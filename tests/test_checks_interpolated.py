@@ -1,0 +1,247 @@
+"""Interpolated travel-limit tests (T2.8).
+
+PLAN.md's reason for this task, stated as a test: *an arc can bulge past a limit mid-sweep while both
+of its endpoints sit comfortably inside it*, so endpoint-only checking can pass a program that would
+crash the machine. Every test here therefore uses geometry where the two checks **disagree** — an
+arc that violated at its endpoints would prove nothing about interpolation.
+"""
+
+import pytest
+
+from foursight.machine.profile import load_profile_text
+from foursight.parser.resolver import parse
+from foursight.sim.simulator import simulate
+from foursight.verify.report import Severity
+from foursight.verify.rules import Program, verify
+
+SMALL_ENVELOPE = """
+[machine]
+units = "mm"
+[axes.x]
+min = 0.0
+max = 100.0
+max_rapid = 5000.0
+[axes.y]
+min = 0.0
+max = 100.0
+max_rapid = 5000.0
+[axes.z]
+min = -50.0
+max = 50.0
+max_rapid = 3000.0
+[offsets]
+g54 = [0.0, 0.0, 0.0, 0.0]
+"""
+
+# Centre (50, 90) radius 20, endpoints (30, 90) -> (70, 90). G2 sweeps clockwise over the top, so Y
+# peaks at 110 while both endpoints sit at 90.
+BULGING_ARC = "G21 G90 G17 G54\nS8000 M3\nG0 X30 Y90 Z0\nG2 X70 Y90 I20 J0 F600\nM30\n"
+
+
+def check(program: str, profile_text: str = SMALL_ENVELOPE, *, interpolated: bool = True):
+    profile = load_profile_text(profile_text)
+    result = parse(program)
+    segments = simulate(result.commands, profile).store if interpolated else None
+    return verify(
+        Program(
+            commands=result.commands,
+            profile=profile,
+            parse_errors=result.errors,
+            segments=segments,
+        )
+    )
+
+
+def travel(diagnostics, rule_id: str = "geometry.axis-travel-exceeded"):
+    return [d for d in diagnostics if d.rule_id == rule_id]
+
+
+# --------------------------------------------------------------------------- the point of T2.8
+
+
+def test_an_arc_bulging_past_a_limit_is_caught_only_with_interpolation() -> None:
+    """Both endpoints sit at Y90 inside a Y100 limit; the sweep reaches Y110."""
+    assert travel(check(BULGING_ARC, interpolated=False)) == []
+    found = travel(check(BULGING_ARC))
+    assert len(found) == 1
+    assert "reaches 110 mm" in found[0].message
+    assert found[0].severity is Severity.ERROR
+    assert found[0].line == 4
+
+
+def test_the_endpoints_really_are_inside_the_limit() -> None:
+    """Guards the premise: an arc violating at its endpoints would prove nothing about interpolation."""
+    profile = load_profile_text(SMALL_ENVELOPE)
+    commands = parse(BULGING_ARC).commands
+    store = simulate(commands, profile).store
+    arc = store.line == 4
+    ys = store.lin[arc][:, :, 1]
+    assert ys[0, 0] == pytest.approx(90.0)
+    assert ys[-1, 1] == pytest.approx(90.0)
+    assert ys.max() > 100.0
+
+
+def test_a_violation_is_reported_once_per_line_not_once_per_segment() -> None:
+    """A long breach would otherwise produce a diagnostic per interpolated point."""
+    profile = load_profile_text(SMALL_ENVELOPE)
+    commands = parse(BULGING_ARC).commands
+    store = simulate(commands, profile).store
+    offending = int((store.lin[:, :, 1] > 100.0).sum())
+    assert offending > 20, "the premise: many points are outside"
+    assert len(travel(check(BULGING_ARC))) == 1
+
+
+def test_the_worst_point_is_the_one_reported() -> None:
+    """ "Reaches 110" is actionable; reporting the first point over the line would understate it."""
+    found = travel(check(BULGING_ARC))
+    assert "110 mm" in found[0].message
+
+
+def test_a_compliant_arc_reports_nothing() -> None:
+    inside = "G21 G90 G17 G54\nS8000 M3\nG0 X30 Y50 Z0\nG2 X70 Y50 I20 J0 F600\nM30\n"
+    assert travel(check(inside)) == []
+
+
+def test_a_minimum_breach_mid_sweep_is_also_caught() -> None:
+    """Centre (50,10) radius 20 swept counter-clockwise dips to Y-10, below the Y0 limit."""
+    program = "G21 G90 G17 G54\nS8000 M3\nG0 X30 Y10 Z0\nG3 X70 Y10 I20 J0 F600\nM30\n"
+    found = travel(check(program))
+    assert len(found) == 1
+    assert "minimum" in found[0].message
+
+
+# --------------------------------------------------------------------------- severity
+
+
+def test_an_unknown_work_offset_downgrades_the_interpolated_error_too() -> None:
+    """The same downgrade the endpoint check applies, per PLAN.md."""
+    no_offsets = SMALL_ENVELOPE.replace("[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n", "")
+    found = travel(check(BULGING_ARC, no_offsets))
+    assert len(found) == 1
+    assert found[0].severity is Severity.WARNING
+    assert "unconfirmed" in found[0].message
+
+
+def test_a_g53_move_needs_no_offset_to_be_confirmed() -> None:
+    """G53 coordinates are already machine-absolute, so the offset is irrelevant to them."""
+    no_offsets = SMALL_ENVELOPE.replace("[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n", "")
+    program = "G21 G90 G17\nS8000 M3\nG53 G0 X150\nM30\n"
+    found = travel(check(program, no_offsets))
+    assert found and found[0].severity is Severity.ERROR
+
+
+# --------------------------------------------------------------------------- rotary
+
+
+def test_rotary_limits_are_checked_over_interpolated_points_when_not_wrapping() -> None:
+    profile_text = (
+        '[machine]\nunits = "mm"\n'
+        '[axes.a]\ntype = "rotary"\nwrap = false\nmin = -90.0\nmax = 90.0\nmax_rapid = 3600.0\n'
+        "[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n"
+    )
+    program = "G21 G90 G54\nS8000 M3\nG1 A200 F1800\nM30\n"
+    found = travel(check(program, profile_text), "geometry.rotary-travel-exceeded")
+    assert found
+    assert "deg" in found[0].message
+    assert "mm" not in found[0].message, "rotary values are degrees, never millimetres"
+
+
+def test_a_wrapping_rotary_axis_is_still_exempt() -> None:
+    profile_text = (
+        '[machine]\nunits = "mm"\n'
+        '[axes.a]\ntype = "rotary"\nwrap = true\nmin = -90.0\nmax = 90.0\nmax_rapid = 3600.0\n'
+        "[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n"
+    )
+    program = "G21 G90 G54\nS8000 M3\nG1 A3600 F1800\nM30\n"
+    assert travel(check(program, profile_text), "geometry.rotary-travel-exceeded") == []
+
+
+# --------------------------------------------------------------------------- fallback behaviour
+
+
+def test_the_endpoint_check_still_works_without_a_simulation() -> None:
+    """`foursight check --no-simulate` and any headless caller must keep working."""
+    over = "G21 G90 G17 G54\nS8000 M3\nG1 X150 F600\nM30\n"
+    found = travel(check(over, interpolated=False))
+    assert len(found) == 1
+    assert found[0].severity is Severity.ERROR
+
+
+def test_both_paths_agree_when_the_endpoint_is_the_worst_point() -> None:
+    """A straight move's extreme *is* its endpoint, so the two checks must not disagree there."""
+    over = "G21 G90 G17 G54\nS8000 M3\nG1 X150 F600\nM30\n"
+    with_sim = travel(check(over))
+    without = travel(check(over, interpolated=False))
+    assert len(with_sim) == len(without) == 1
+    assert with_sim[0].line == without[0].line
+
+
+def test_an_empty_segment_store_falls_back_to_endpoints() -> None:
+    """A program whose geometry was entirely suppressed must not silently skip the check."""
+    profile = load_profile_text(SMALL_ENVELOPE)
+    result = parse("G21 G90 G17 G54\nS8000 M3\nG1 X150 F600\nM30\n")
+    from foursight.sim.segments import SegmentStore
+
+    found = travel(
+        verify(
+            Program(
+                commands=result.commands,
+                profile=profile,
+                parse_errors=result.errors,
+                segments=SegmentStore.empty(),
+            )
+        )
+    )
+    assert len(found) == 1, "an empty store means no interpolation happened, not no violation"
+
+
+def test_no_duplicate_diagnostics_from_the_two_paths() -> None:
+    """One rule, one diagnostic: the interpolated path replaces the endpoint path rather than adding."""
+    over = "G21 G90 G17 G54\nS8000 M3\nG1 X150 F600\nM30\n"
+    found = travel(check(over))
+    assert len({(d.line, d.message) for d in found}) == len(found)
+
+
+def test_the_baseline_fixture_stays_clean_with_interpolation(baseline_text: str) -> None:
+    """The extra precision must not start flagging a program that was previously clean."""
+    from conftest import DEFAULT_PROFILE_PATH
+    from foursight.machine.profile import load_profile
+
+    profile = load_profile(DEFAULT_PROFILE_PATH)
+    result = parse(baseline_text)
+    store = simulate(result.commands, profile).store
+    found = verify(
+        Program(
+            commands=result.commands,
+            profile=profile,
+            parse_errors=result.errors,
+            segments=store,
+        )
+    )
+    assert found == [], [d.message for d in found]
+
+
+def test_interpolated_checking_scales_to_many_segments() -> None:
+    """Aggregation must hold at scale: a long violating path is still one diagnostic per line."""
+    profile = load_profile_text(SMALL_ENVELOPE)
+    program = "G21 G90 G17 G54\nS8000 M3\nG0 X30 Y90 Z0\n" + "G2 X70 Y90 I20 J0 F600\n" * 20
+    result = parse(program)
+    store = simulate(result.commands, profile).store
+    assert len(store) > 500
+    found = travel(
+        verify(
+            Program(
+                commands=result.commands,
+                profile=profile,
+                parse_errors=result.errors,
+                segments=store,
+            )
+        )
+    )
+    # Aggregation is per (line, axis), not per line: a single arc can leave the envelope on X *and*
+    # on Y, and a user needs to be told about both. What must never happen is a diagnostic per
+    # interpolated point.
+    keys = [(d.line, d.message.split()[0]) for d in found]
+    assert len(keys) == len(set(keys)), "one diagnostic per line and axis"
+    assert len(found) <= 20 * 3, "at most one per line per linear axis"
+    assert len(found) < len(store) / 10, "nowhere near one per segment"

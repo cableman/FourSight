@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from foursight.machine.profile import MachineProfile
 from foursight.parser.model import Command, ParseError
+from foursight.sim.segments import SegmentStore
 from foursight.verify.report import Diagnostic, Severity, sort_diagnostics
 
 
@@ -36,6 +37,10 @@ class Program:
     profile: MachineProfile
     parse_errors: Sequence[ParseError] = field(default_factory=tuple)
     block_delete: bool = False  # the mode the program was parsed under
+    # Interpolated geometry, when a simulation has been run. Optional because `foursight check` must
+    # work without one; travel limits fall back to block endpoints when it is absent, which cannot
+    # see an arc that bulges past a limit mid-sweep (T2.8).
+    segments: "SegmentStore | None" = None
 
     def units_at(self, index: int) -> str:
         """Declared units in force at `commands[index]`, for formatting that command's message."""

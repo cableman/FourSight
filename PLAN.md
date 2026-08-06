@@ -632,7 +632,7 @@ Severity per the taxonomy above.
 **Geometry**
 - [ ] E: Arc geometry invalid — radius mismatch beyond `tolerance.arc_radius_mismatch`
 - [ ] E: R-format arc with coincident endpoints
-- [ ] E: Axis travel limit exceeded — **checked on interpolated points, not just block endpoints**, since an arc can bulge past a limit mid-sweep. Downgraded to W when the active work offset is unknown.
+- [x] E: Axis travel limit exceeded — **checked on interpolated points, not just block endpoints** (T2.8), since an arc can bulge past a limit mid-sweep. Downgraded to W when the active work offset is unknown. `Program.segments` carries the `SegmentStore` when a simulation has been run; without one the check falls back to endpoints and says so. Measured: an arc with both endpoints at Y90 inside a Y100 limit reaches **Y110** mid-sweep — 66 offending interpolated points, invisible to the endpoint check. Aggregated to **one diagnostic per (line, axis)** at the worst value, so a long breach reports once rather than per point.
 - [ ] E: Rotary travel limit exceeded when `axes.a.wrap = false`
 - [ ] W: Rotary move > `rotary_wrap_warn` degrees in one block (default 360; legitimate for multi-turn wrapping, so tunable)
 

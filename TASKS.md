@@ -881,11 +881,38 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Open file, view toolpath, orbit/pan/zoom.
       Blocked by: T2.6
 
-- [ ] **T2.8 — Interpolated-point limit checking**
-      Re-run the axis-travel check over interpolated points, not just block endpoints — an arc can
-      bulge past a limit mid-sweep. Downgrade to warning when the active work offset is unknown.
-      Rotary limit enforced when `axes.a.wrap = false`.
+- [x] **T2.8 — Interpolated-point limit checking** — *done*
+      `Program` gained an optional `segments: SegmentStore`. When present, `axis-travel-exceeded` and
+      `rotary-travel-exceeded` check every interpolated point; without it they fall back to block
+      endpoints, so `foursight check` still works headless. Recorded in PLAN.md § Verifier Rules.
+      **DoD met:** 16 tests in `tests/test_checks_interpolated.py`; **720 across the suite**.
+      **The case PLAN describes, now demonstrated:** an arc with both endpoints at Y90 inside a Y100
+      limit reaches **Y110** mid-sweep. The endpoint check reports **nothing**; the interpolated check
+      reports one error naming 110 mm. Every test here uses geometry where the two checks *disagree* —
+      an arc violating at its endpoints would prove nothing about interpolation, so there is also a
+      test asserting the endpoints really are inside the limit.
+      **Aggregated to one diagnostic per (line, axis)** at the most extreme value: the demonstration
+      arc has 66 offending points, and a 500k-segment program would otherwise emit thousands of
+      identical diagnostics. Reporting the *worst* value rather than the first keeps it actionable.
+      **`foursight check` now simulates by default**, with `--no-simulate` to opt out. Leaving the
+      capability unwired would have meant shipping a check nothing calls; the flag preserves the fast
+      path for very large files, and the help text says plainly what it gives up.
+      **An empty store falls back to endpoints rather than skipping the check** — a program whose
+      geometry was entirely suppressed must not read as having no violations.
+      The `error → warning` downgrade on an unknown work offset carries over. Since `lin` is already
+      machine coordinates, the check needs no offset arithmetic but still needs to know whether those
+      coordinates rest on a configured offset, so that is resolved per source line: a program may mix
+      a configured G54 with an unconfigured G55.
+      **Mutation-verified, all six caught:** silently falling back to endpoints (5 tests), examining
+      only one endpoint per segment (7), reporting the first offending point instead of the worst (2),
+      dropping the downgrade (1), removing aggregation (8), and treating an empty store as nothing to
+      check (1).
+      **Two of my own errors along the way:** an arc swept the wrong way (G3 from 180° bulges *down*,
+      so it never approached the limit I was testing), and `np`/`is_machine_absolute` used in
+      annotations, which are evaluated at def-time and so broke the import rather than just linting.
       Blocked by: T2.5
+      Files: `src/foursight/verify/checks/geometry.py`, `src/foursight/verify/rules.py`,
+      `src/foursight/cli.py`, `tests/test_checks_interpolated.py`, `PLAN.md`
 
 - [ ] **T2.9 — Simulation off the GUI thread**
       QThread with progress reporting; cancellable.

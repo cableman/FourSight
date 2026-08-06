@@ -19,8 +19,10 @@ import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
+import numpy as np
+
 from foursight.machine.profile import AxisLimits, MachineProfile
-from foursight.machine.state import Position, machine_value, walk
+from foursight.machine.state import Position, is_machine_absolute, machine_value, walk
 from foursight.parser.model import AXIS_LETTERS, Command
 from foursight.sim.interpolate import PLANES
 from foursight.verify.report import Diagnostic, Severity, format_angle, format_length
@@ -200,19 +202,29 @@ class ArcRFormatInvalid(Rule):
 
 @register_rule
 class AxisTravelExceeded(Rule):
-    """A block endpoint outside the machine's travel.
+    """A linear axis outside the machine's travel.
 
-    **Endpoints only** — T2.8 extends this to interpolated points, where an arc bulging past a limit
-    mid-sweep is caught. Downgraded from `error` to `warning` when the active work offset is unknown,
-    per PLAN.md: without the offset the machine position is a guess, and a hard error on a guess is
-    worse than a warning that says so.
+    **Checked over interpolated points when a simulation is available** (T2.8), and over block
+    endpoints otherwise. The difference is not cosmetic: an arc can bulge well past a limit mid-sweep
+    while both of its endpoints sit comfortably inside it, so the endpoint-only form can pass a
+    program that would crash the machine.
+
+    Downgraded from `error` to `warning` when the active work offset is unknown, per PLAN.md: without
+    the offset the machine position is a guess, and a hard error on a guess is worse than a warning
+    that says so.
+
+    Reported **once per source line and axis**, at the most extreme value reached. A 500k-segment
+    program breaching a limit would otherwise produce thousands of identical diagnostics.
     """
 
     rule_id = "geometry.axis-travel-exceeded"
-    description = "Axis travel limit exceeded at a block endpoint"
+    description = "Axis travel limit exceeded"
     severity = Severity.ERROR
 
     def check(self, program: Program) -> Iterable[Diagnostic]:
+        if program.segments is not None and len(program.segments):
+            yield from _interpolated_violations(program, self.rule_id, rotary=False)
+            return
         for command, _, after in walk(program.commands):
             if not command.words:
                 continue
@@ -311,6 +323,9 @@ class RotaryTravelExceeded(Rule):
     severity = Severity.ERROR
 
     def check(self, program: Program) -> Iterable[Diagnostic]:
+        if program.segments is not None and len(program.segments):
+            yield from _interpolated_violations(program, self.rule_id, rotary=True)
+            return
         for command, _, after in walk(program.commands):
             for letter in sorted(AXIS_LETTERS & set(command.words)):
                 axis = program.profile.axes.get(letter)
@@ -337,3 +352,107 @@ class RotaryTravelExceeded(Rule):
                         + ("" if offset_known else " (assuming a zero rotary work offset)")
                     ),
                 )
+
+
+# --------------------------------------------------------------------------- interpolated checking
+
+
+def _offset_known_by_line(program: Program) -> dict[int, bool]:
+    """Whether the work offset in force was actually configured, per source line.
+
+    ``SegmentStore.lin`` is already machine coordinates, so the interpolated check needs no offset
+    arithmetic — but it still needs to know whether those coordinates rest on a configured offset or
+    an assumed one, because that is what decides `error` versus `warning`. A program may mix a
+    configured G54 with an unconfigured G55, so this is per line rather than program-wide.
+    """
+    known: dict[int, bool] = {}
+    for command in program.commands:
+        code = command.modal_snapshot.offset
+        resolved = is_machine_absolute(command) or program.profile.offset(code) is not None
+        line = command.ref.line_no
+        known[line] = known.get(line, True) and resolved
+    return known
+
+
+def _interpolated_violations(
+    program: Program, rule_id: str, *, rotary: bool
+) -> Iterator[Diagnostic]:
+    """Travel violations found anywhere along the interpolated path.
+
+    Aggregated to one diagnostic per (line, axis) at the most extreme value, so a long breach reports
+    once with its worst point rather than once per segment.
+    """
+    store = program.segments
+    if store is None:
+        return
+    known = _offset_known_by_line(program)
+    units_by_line = {
+        command.ref.line_no: command.modal_snapshot.units for command in program.commands
+    }
+
+    for letter, values in _axis_values(store, rotary=rotary):
+        axis = program.profile.axes.get(letter)
+        if axis is None or axis.is_rotary != rotary:
+            continue
+        if rotary and axis.wrap:
+            continue  # a wrapping axis has no travel limit to exceed
+        for bound, name, outside in _breaches(axis, values):
+            if not outside.any():
+                continue
+            yield from _worst_per_line(
+                store,
+                values,
+                outside,
+                letter,
+                bound,
+                name,
+                rule_id,
+                known,
+                units_by_line,
+                rotary=rotary,
+            )
+
+
+def _axis_values(store, *, rotary: bool) -> Iterator[tuple[str, np.ndarray]]:
+    """Every interpolated coordinate per axis, flattened over both segment endpoints."""
+    if rotary:
+        yield "A", store.rot.reshape(-1)
+        return
+    for index, letter in enumerate(("X", "Y", "Z")):
+        yield letter, store.lin[:, :, index].reshape(-1)
+
+
+def _breaches(axis: AxisLimits, values: np.ndarray) -> Iterator[tuple[float, str, np.ndarray]]:
+    if axis.min is not None:
+        yield axis.min, "minimum", values < axis.min
+    if axis.max is not None:
+        yield axis.max, "maximum", values > axis.max
+
+
+def _worst_per_line(
+    store, values, outside, letter, bound, name, rule_id, known, units_by_line, *, rotary: bool
+) -> Iterator[Diagnostic]:
+    # Both endpoints of a segment share its source line, so the line column is repeated to match the
+    # flattened coordinate array.
+    lines = np.repeat(store.line, 2)
+    for line in sorted({int(value) for value in lines[outside]}):
+        selected = outside & (lines == line)
+        extreme = values[selected]
+        worst = float(extreme.min() if name == "minimum" else extreme.max())
+        offset_known = known.get(line, True)
+        units = units_by_line.get(line, "mm")
+
+        def render(value: float, units: str = units) -> str:
+            """`units` is bound as a default: a closure over the loop variable would use the last."""
+            return format_angle(value) if rotary else format_length(value, units)
+
+        yield Diagnostic(
+            rule_id=rule_id,
+            severity=Severity.ERROR if offset_known else Severity.WARNING,
+            line=line,
+            message=(
+                f"{letter} reaches {render(worst)} along this move, beyond the {name} travel limit "
+                f"{render(bound)}"
+                + ("" if offset_known else " (assumes zero work offset, so unconfirmed)")
+            ),
+        )

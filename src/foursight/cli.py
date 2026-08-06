@@ -13,6 +13,10 @@ Exit codes:
 - ``1`` — errors found in the program
 - ``2`` — could not run: unreadable file, unusable profile, bad usage
 
+``check`` simulates the program by default so travel limits are tested over interpolated points; an
+arc can bulge past a limit mid-sweep while both of its endpoints sit inside it. ``--no-simulate``
+falls back to endpoint-only checking, which is faster and weaker.
+
 ``unsupported`` and ``warning`` diagnostics are reported but do **not** fail the run. A program that
 legitimately contains canned cycles should still pass a build pipeline; refusing it would push users
 toward suppressing the whole check.
@@ -32,6 +36,8 @@ from foursight.machine.profile import (
 )
 from foursight.parser.model import Command
 from foursight.parser.resolver import ParseResult, parse
+from foursight.sim.segments import SegmentStore
+from foursight.sim.simulator import simulate
 from foursight.verify.report import Diagnostic, Severity
 from foursight.verify.rules import Program, verify
 
@@ -79,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="machine profile TOML (default: the profile bundled with foursight)",
     )
+    check_cmd.add_argument(
+        "--no-simulate",
+        action="store_true",
+        help=(
+            "check block endpoints only, skipping interpolation. Faster on very large files, but "
+            "cannot see an arc that bulges past a travel limit mid-sweep"
+        ),
+    )
     check_cmd.set_defaults(handler=run_check)
     return parser
 
@@ -116,7 +130,13 @@ def run_check(args: argparse.Namespace) -> int:
     loaded = load(args.file)
     _report_load(loaded)
     result = parse(loaded.text, block_delete=args.block_delete)
-    diagnostics = verify(_program(result, profile, args.block_delete))
+    # Simulating by default is the more correct choice: without interpolated points the travel check
+    # can pass a program whose arc leaves the machine's envelope mid-sweep. --no-simulate trades that
+    # away for speed.
+    segments = None
+    if not args.no_simulate:
+        segments = simulate(result.commands, profile).store
+    diagnostics = verify(_program(result, profile, args.block_delete, segments))
 
     for diagnostic in diagnostics:
         _print_problem(
@@ -130,12 +150,18 @@ def run_check(args: argparse.Namespace) -> int:
     return EXIT_ERRORS_FOUND if any(d.is_error for d in diagnostics) else EXIT_OK
 
 
-def _program(result: ParseResult, profile: MachineProfile, block_delete: bool) -> Program:
+def _program(
+    result: ParseResult,
+    profile: MachineProfile,
+    block_delete: bool,
+    segments: SegmentStore | None = None,
+) -> Program:
     return Program(
         commands=result.commands,
         profile=profile,
         parse_errors=result.errors,
         block_delete=block_delete,
+        segments=segments,
     )
 
 
