@@ -22,18 +22,28 @@ PLAN.md wins and the task is wrong.
 
 Record the answers **in `PLAN.md`**, then tick here.
 
-- [ ] **D1 — Does pyqtgraph hold?** Resolved by T0.7. If the 500k-segment orbit misses 30 fps on
-      baseline integrated graphics, M2's viewport becomes a raw `QOpenGLWidget` with our own
-      shaders/VBOs, and T2.5–T2.7 grow substantially. Record: fps, GPU, segment count, item count.
+- [x] **D1 — Does pyqtgraph hold? → YES, with ~12× margin.** Measured by T0.7 on Intel Iris Xe
+      (ADL GT2), Mesa 25.1.5: **376.9 fps median** at 500k segments in 10 `GLLinePlotItem`s,
+      worst frame 5.6 ms, against a 30 fps requirement. Still 188 fps at 2M segments (4× target).
+      **M2 builds on pyqtgraph; the raw `QOpenGLWidget` fallback is dropped**, so T2.5–T2.7 keep
+      their original scope. Consistent with the introspection finding that 0.14.0 already draws via
+      shaders with persistent VBOs and dirty-flag uploads. Recorded in PLAN.md § Rendering
+      Constraints.
 - [ ] **D2 — Does a bundled GL app launch?** Resolved by T0.8. If PyInstaller one-dir + PySide6 +
       PyOpenGL will not start on a clean Windows VM, that reshapes packaging before M5, not during.
       Record: Windows version, failure mode (if any), the hook/binary fix applied.
-- [ ] **D3 — Rapids: dashed or colour-only?** Falls out of T0.7. Default is colour-only;
-      only bake dashes into geometry if the spike shows the extra rapid vertices are free.
+- [x] **D3 — Rapids: dashed or colour-only? → COLOUR-ONLY.** Settled by T0.7's introspection:
+      `GLLinePlotItem.setData` accepts exactly `['pos', 'color', 'width', 'mode', 'antialias']`
+      and raises on `dash`/`stipple`/`dashPattern`, so no stipple parameter exists at any driver.
+      Dashes would have to be baked into geometry (~2× rapid vertices). Not worth it, and
+      `width=` is not a fallback either — pyqtgraph skips `glLineWidth` entirely on core
+      forward-compatible profiles. **Rapids are distinguished by colour.** Recorded in PLAN.md.
 - [ ] **D4 — Picking strategy: GPU colour-pick vs CPU KD-tree.** Decided in T3.0, informed by D1.
       Do not defer past M3 planning; it is not a one-liner at 500k segments in ≤ 10 batches.
-- [ ] **D5 — Baseline hardware.** Name the machine the M2 "100k lines in 5 s, ≥ 30 fps" gate is
-      measured on. An unnamed baseline makes the gate untestable.
+- [x] **D5 — Baseline hardware → Intel Iris Xe Graphics (ADL GT2), Mesa 25.1.5, Pop!_OS 22.04,
+      Python 3.12.10.** The machine T0.7 was measured on; recorded in PLAN.md against both the M0
+      spike result and the M2 gate. **Measure that gate with vsync off** — with vsync on, every
+      configuration from 1k to 500k segments reports ~60 fps and the gate cannot fail.
 
 ---
 
@@ -165,27 +175,52 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       Blocked by: T0.5
       Files: `.github/workflows/ci.yml`, `tests/test_smoke.py`
 
-- [ ] **T0.7 — SPIKE: render 500k segments** *(resolves D1, D3)*
-      Throwaway script (not shipped in `src/`): synthesize 500k line segments, upload as
-      ≤ 10 `GLLinePlotItem`s (`mode='lines'`, one per `kind` group), orbit, measure fps on
-      **integrated graphics**. Verify the two claimed constraints first-hand: no dash/stipple
-      parameter on `GLLinePlotItem`, and no persistent VBO control (legacy fixed-function path).
-      Also check `glLineWidth > 1.0` behaviour on the target drivers.
-      **DoD:** measured fps, hardware, and a pyqtgraph-holds-or-not verdict written into `PLAN.md`;
-      D1 and D3 ticked above.
-      Blocked by: T0.2
+- [x] **T0.7 — SPIKE: render 500k segments** — *done; D1, D3 and D5 all resolved*
+      `spikes/render_500k.py` is written and runnable. Synthesizes 500k segments in the real
+      columnar `(N, 2, 3)` float64 layout along a spread-out helical path (a degenerate straight
+      line would flatter the result), partitions by `kind` then subdivides to `--batches` items,
+      uploads float32, orbits, and times frames **inside `paintGL` after `glFinish`** — without
+      that, the numbers measure command submission rather than rendering. Discards 20 warmup
+      frames and reports median/mean/worst-5% fps, worst frame ms, RSS, GL renderer/vendor/version,
+      and the driver's line-width range, then prints a paste-ready Markdown block and a verdict
+      against the 30 fps threshold.
+      **DoD met — measured, verdict recorded, D1/D3/D5 all resolved.** Results on Intel Iris Xe
+      (ADL GT2) / Mesa 25.1.5, uncapped: **376.9 fps median at 500k** (worst frame 5.6 ms),
+      275.5 at 1M, 188.6 at 2M. Verdict: **pyqtgraph holds with ~12× margin; no `QOpenGLWidget`
+      fallback.** Introspection additionally resolved D3 and corrected two wrong claims in
+      PLAN.md § Rendering Constraints.
+      **Two findings that changed PLAN.md beyond the fps verdict:**
+      1. **Vsync makes this measurement lie.** With vsync on, 1k / 50k / 500k segments all report
+         ~60 fps — the display refresh rate, not the GPU. The pass is real but the headroom is
+         invisible. Measure with `vblank_mode=0`; the spike now warns when it detects a ~60 fps
+         result, and PLAN.md's M2 gate says to measure uncapped or it cannot fail.
+      2. **The ≤ 250 MB memory budget was never achievable.** Fixed Python + Qt + Mesa overhead is
+         **233 MB** with 1k segments on screen. The columnar store's own cost is exactly as
+         predicted — 40 MB per 500k, linear to 2M — so the data model is vindicated while the
+         budget was measuring the interpreter. PLAN.md now binds the budget to geometry + GL
+         buffers (≤ 50 MB per 500k) and records total RSS (273 MB at 500k) rather than capping it.
+      Blocked by: — *(done)*
       Files: `spikes/render_500k.py`, `PLAN.md`
 
-- [ ] **T0.8 — SPIKE: PyInstaller one-dir on a clean Windows VM** *(resolves D2)*
-      Write `spikes/gl_window.py` — a bare PySide6 + PyOpenGL window — and bundle it through the
-      existing script, which already supports this:
+- [~] **T0.8 — SPIKE: PyInstaller one-dir on a clean Windows VM** *(D2 open; needs a VM)*
+      `spikes/gl_window.py` is written. It imports PySide6, shiboken6, PyOpenGL **and pyqtgraph
+      separately**, printing which one fails — a bare traceback is close to useless on a machine
+      with no Python installed, and pyqtgraph is included deliberately because it ships shader
+      source as package data, exactly what PyInstaller's analysis tends to drop. It reports
+      `sys.frozen`, `_MEIPASS`, the Qt plugin path, and GL renderer/vendor/version, then exits with
+      a code that distinguishes the outcomes: **0** a frame was painted, **1** window created but
+      never painted (QPA plugin or GL driver), **2** an import failed. `--seconds` auto-closes so
+      the check is scriptable; `--stay` keeps it open for a human.
+      Build and test:
       `.venv/bin/python scripts/build.py --entry spikes/gl_window.py --name gl-spike`
-      Launch on a Windows VM with no Python and no dev tooling. Keep the console on (the default)
-      so the failure mode is visible. **T0.4 only proved the bootloader works with nothing
-      bundled — Qt/GL bundling is entirely unverified until this task runs.**
-      **DoD:** launch result and any `HIDDEN_IMPORTS` / binary / Qt-plugin-path fix needed recorded
-      in `PLAN.md` and applied to `scripts/build.py`; D2 ticked.
-      Blocked by: T0.4
+      then copy `dist/gl-spike/` to a Windows VM with no Python or dev tooling and run
+      `gl-spike.exe` **from a terminal** so the console output is visible.
+      **T0.4 only proved the bootloader works with nothing bundled — Qt/GL bundling is entirely
+      unverified until this runs.** Nothing here has been executed even on Linux yet.
+      **DoD:** launch result and any `HIDDEN_IMPORTS` / binary / Qt-plugin-path fix recorded in
+      `PLAN.md` and applied to `scripts/build.py`; D2 ticked.
+      Blocked by: T0.4 (script), then a clean Windows VM
+      Files: `spikes/gl_window.py`
 
 - [ ] **T0.9 — Milestone gate**
       **DoD:** both spikes have a *measured* answer in `PLAN.md`; CI green; D1–D3 and D5 resolved.
