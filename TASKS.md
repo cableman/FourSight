@@ -944,10 +944,46 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Blocked by: T2.5
       Files: `tests/test_golden.py`, `tests/golden/segments.json`, `PLAN.md`
 
-- [ ] **T2.11 — Extend `test_perf.py`: segment budget + memory**
-      Per-fixture segment counts, and ≤ 250 MB resident for a 500k-segment program including
-      coordinate arrays and GL buffers.
+- [x] **T2.11 — Extend `test_perf.py`: segment budget + memory** — *done*
+      16 tests in `test_perf.py` (was 6); **750 across the suite**. Recorded in PLAN.md
+      § Performance Requirements.
+      **DoD met:** geometry measured **through the real pipeline** at 500,070 simulated segments —
+      **38.5 MB, 77 B/segment**, against the 50 MB budget. T0.7 only measured a directly-filled
+      builder; this is the stronger claim that nothing per-block crept in between parser and store.
+      Per-fixture segment counts are recorded as a table (exact counts stay pinned by T2.10's
+      goldens, which fail with a diff — duplicating them here would mean two places to update).
+      **The measurement inverted the assumption.** PLAN says the 100k-line and 500k-segment targets
+      are "different axes", and they are, but the difficulty runs the opposite way: 500k segments
+      simulate in **0.18 s** (2.7M segments/sec) while 100k CAM lines take **3.46 s** (22.7k
+      segments/sec). A 120x spread on the same code. **The cost is ~40 us per motion block**,
+      near-independent of the geometry produced, so the segment target has ~25x margin and the
+      *line* target is the binding one.
+      **This puts T2.13's gate at risk, which is why it is worth knowing now:** parse + simulate for
+      100k lines is **4.56 s** and the gate is "parses and renders within 5 s" — the whole budget is
+      spent before rendering starts. `cProfile` localizes it: 35% of simulate is `_durations`, doing
+      two `np.stack` and ~6 reductions **per block** on length-1 arrays (`np.stack` called 71,428
+      times for a 50k-line file). A single-segment fast path should recover most of it. **Not done
+      here** — this is a measurement task and PLAN sets no simulate target — see PLAN.md for sizing.
+      **Two of my own tests were wrong and were fixed:**
+      - The per-block/per-segment test originally *asserted the ratio*, which would have failed the
+        day someone fixed the overhead. A test that punishes an improvement is worse than none, so it
+        now asserts a floor on tessellation throughput (the real property: bulk, never per-segment)
+        and merely records the ratio.
+      - The fixture-count test ended in `assert all(count >= 0)`, a tautology. Now asserts no fixture
+        produced *zero* geometry, which would mean the pipeline had broken for it while the table
+        still looked plausible.
+      **Mutation-verified**, including one that survived and taught something: dropping a column from
+      `nbytes()` is caught; fixed-count tessellation is caught; a size-dependent extra column is
+      caught (`77.0 -> 125.0 B/segment`). But **padding the store to a power of two survives every
+      size check** — `len(store)` derives from the arrays, so a padded store reports the padding *as
+      segments* at an unchanged 77 B/segment. Those phantom origin segments would be drawn; the
+      goldens and `test_segments.py` catch it, no memory test can, and the docstring now says so
+      rather than claiming otherwise.
+      Wall-clock thresholds are deliberately loose: the gate seconds carry only a 60 s runaway guard,
+      because the parse floor already sits at 14% margin on Windows CI and one flaky cross-platform
+      time assertion is enough. The regression duty sits on the blocks/sec floor instead.
       Blocked by: T2.10
+      Files: `tests/test_perf.py`, `PLAN.md`
 
 - [ ] **T2.12 — Manual GUI test script**
       Written steps a human follows to verify the viewport (keep the GUI thin so everything else

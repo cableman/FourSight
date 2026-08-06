@@ -798,6 +798,30 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
 - **Parse ≥ 50k lines/sec** — ~20 µs per line in CPython. Reachable, but only with `slots=True` on every hot dataclass, shared copy-on-write `ModalState`, `SourceRef` holding offsets rather than string copies, and one compiled regex per line rather than per word.
 - **Render 500k+ segments interactively** — pre-batch into ≤ 10 buffers grouped by kind; never one draw call per move.
 - **Memory — target restated after measurement (T0.7).** The columnar store's predicted ~38 MB per 500k segments is **confirmed**: measured geometry cost is 40 MB at 500k, 76 MB at 1M, 157 MB at 2M — linear at ~39 MB per 500k. But the original "≤ 250 MB resident for a 500k-segment program, including coordinate arrays and GL buffers" is **not achievable, and never was**: the fixed Python + Qt + Mesa baseline is **233 MB** with only 1k segments on screen, before any real geometry exists. A total-RSS cap therefore measures the interpreter and GL driver, not our data model. The budget binds on what the data model actually controls: **geometry + GL buffers ≤ 50 MB per 500k segments** (measured 40 MB). Total resident is recorded rather than capped — 273 MB at 500k on the baseline machine — because the fixed component is platform- and driver-dependent. Per-object segments would blow the geometry budget ~6× and remain ruled out.
+- **Simulation cost is per *block*, not per segment — measured (T2.11).** ~40 µs per motion block,
+  essentially independent of how much geometry that block produces. The consequence inverts the
+  intuition behind "the 100k-line and 500k-segment targets are different axes":
+
+  | Program | Blocks | Segments | Simulate | Segments/sec |
+  |---|---|---|---|---|
+  | 3,166 rotary lines (full-turn A sweeps) | 3,166 | 500,070 | **0.18 s** | 2,725,813 |
+  | 100k CAM-style lines | 85,715 | 81,900 | **3.46 s** | 22,750 |
+
+  **The 500k-segment target is met with ~25× margin; the 100k-line target is the binding one.** Parse
+  plus simulate for 100k lines is **4.56 s**, so the M2 gate's 5 s budget is spent before rendering
+  begins. Geometry is a non-issue at that size (6.3 MB).
+
+  The cost is fixed numpy overhead on tiny arrays, not geometry math: `cProfile` attributes 35% of
+  simulate to `sim/timing.block_durations` via `_durations`, which performs two `np.stack` calls and
+  roughly six array reductions **per block** — on arrays of length 1 for the ordinary single-segment
+  `G1`. `np.stack` is called 71,428 times and `linspace` 42,857 times for a 50k-line file. A fast path
+  for single-segment blocks should recover most of that 35%, taking 100k lines to roughly 3.4 s. **Not
+  done here** — T2.11 is a measurement task and PLAN sets no simulate-rate target — but T2.13 will
+  need it, or a gate stated against blocks rather than lines.
+- **Geometry budget confirmed through the real pipeline (T2.11).** T0.7 measured a directly-filled
+  `SegmentBuilder`; simulating an actual program to 500,070 segments also costs **38.5 MB, 77 B per
+  segment**, against the 50 MB budget. So no per-block bookkeeping has crept in between parser and
+  store. Peak RSS is recorded, never asserted — `resource` is Unix-only and Windows is in the matrix.
 - Simulation runs off the GUI thread (QThread) with progress reporting for large files.
 
 ### Rendering Constraints
