@@ -616,11 +616,29 @@ taxonomy gets teeth.
       `src/foursight/profiles/default_4axis.toml`, `tests/test_cli.py`, `tests/conftest.py`,
       `tests/test_profile.py`, `PLAN.md`
 
-- [ ] **T1.12 — `tests/test_perf.py`: parse rate**
-      Assert **≥ 50k lines/sec** on a generated large fixture, with enough headroom that CI
-      variance does not flake it (assert the floor, log the actual).
-      **DoD:** test passes on the T0.9 baseline hardware and in CI; the measured rate is logged.
+- [x] **T1.12 — `tests/test_perf.py`: parse rate** — *done*
+      **DoD met:** 6 tests; 547 across the suite. **Measured 110,551 lines/sec (9.05 µs/line) —
+      2.2× the 50k floor** — and the measurement is *logged in normal output*, not only with `-s`:
+      a `pytest_terminal_summary` hook prints every measurement, so the numbers appear in CI logs
+      without anyone remembering a flag.
+      **Asserts the floor, logs the actual**, per PLAN.md's guidance, so a slower CI runner does not
+      flake. Best-of-3 after a warmup removes scheduling noise without inflating the result.
+      `FOURSIGHT_PERF_MIN_RATE` overrides the threshold for a runner that genuinely cannot reach it —
+      better to argue about a wrong threshold than to delete the test.
+      **Three guards beyond the rate itself**, each catching something a rate test alone would miss:
+      per-line cost from 5k → 50k lines stays within 1.3× (a rescanning parser looks fast on a small
+      file); one `ModalState` is still shared across all 42,858 commands (a sharing regression would
+      not fail the rate test on a fast machine but would eat the budget on a slow one); and the
+      generator really produces the requested size, without which every measurement above is
+      meaningless.
+      **A measured finding recorded in PLAN.md rather than acted on:** verification costs **530 ms**
+      for 42,858 commands — *more than the parse* — and **72% of it (380 ms) is seven rules each
+      independently re-walking the command list** to rebuild positions. Sharing one walk through
+      `Program` would cut it to roughly 200 ms. Not done here: PLAN sets no verification target, so
+      nothing is being missed, and it would change the rule contract. Flagged because M2's gate
+      (100k lines in 5 s) leaves verification ~1.1 s of that budget.
       Blocked by: T1.3
+      Files: `tests/test_perf.py`, `tests/conftest.py`, `PLAN.md`
 
 - [ ] **T1.13 — Milestone gate**
       **DoD:** all fixtures parse; each broken fixture produces exactly its expected *added*

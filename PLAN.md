@@ -659,6 +659,21 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
 
 ## Performance Requirements
 
+- **Parse ≥ 50k lines/sec — MEASURED 110k (9.0 µs/line), 2.2× the target**, on the baseline machine
+  for a realistic 50k-line mix. Asserted by `tests/test_perf.py`, which asserts the *floor* and logs
+  the actual, so a slower CI runner does not flake. `FOURSIGHT_PERF_MIN_RATE` overrides the floor for
+  a runner that genuinely cannot reach it. The tokenizer's share is 6.9 µs/line; one `ModalState`
+  instance is shared across all 42,858 commands; per-line cost grows only 1.3× from 5k to 50k lines,
+  so the parse is linear rather than quadratic.
+- **Verification is not covered by a target, and currently costs more than the parse: 530 ms for
+  42,858 commands (12.4 µs/command).** Measured breakdown: **72% of that (380 ms) is seven rules
+  each independently re-walking the command list** to rebuild positions — `arc-r-invalid`,
+  `arc-radius-mismatch`, `axis-travel-exceeded`, `rotary-travel-exceeded`, `rotary-wrap`,
+  `rapid-below-clearance`, `toolchange-without-retract`. Computing the walk once and sharing it
+  through `Program` would cut verification to roughly 200 ms. Deliberately **not** done in M1: no
+  requirement is being missed, and it changes the rule contract. Revisit if the M2 gate
+  (100k lines parsed and rendered in 5 s) turns out tight, since verification would take ~1.1 s of
+  that budget.
 - **Parse ≥ 50k lines/sec** — ~20 µs per line in CPython. Reachable, but only with `slots=True` on every hot dataclass, shared copy-on-write `ModalState`, `SourceRef` holding offsets rather than string copies, and one compiled regex per line rather than per word.
 - **Render 500k+ segments interactively** — pre-batch into ≤ 10 buffers grouped by kind; never one draw call per move.
 - **Memory — target restated after measurement (T0.7).** The columnar store's predicted ~38 MB per 500k segments is **confirmed**: measured geometry cost is 40 MB at 500k, 76 MB at 1M, 157 MB at 2M — linear at ~39 MB per 500k. But the original "≤ 250 MB resident for a 500k-segment program, including coordinate arrays and GL buffers" is **not achievable, and never was**: the fixed Python + Qt + Mesa baseline is **233 MB** with only 1k segments on screen, before any real geometry exists. A total-RSS cap therefore measures the interpreter and GL driver, not our data model. The budget binds on what the data model actually controls: **geometry + GL buffers ≤ 50 MB per 500k segments** (measured 40 MB). Total resident is recorded rather than capped — 273 MB at 500k on the baseline machine — because the fixed component is platform- and driver-dependent. Per-object segments would blow the geometry budget ~6× and remain ruled out.

@@ -212,3 +212,23 @@ def baseline_text() -> str:
 @pytest.fixture(scope="session")
 def baseline_diagnostics(baseline_text: str, default_profile: MachineProfile) -> list[Diagnostic]:
     return diagnose(baseline_text, default_profile)
+
+
+# --------------------------------------------------------------------------- perf reporting
+
+# T1.12's DoD requires the measured rate to be *logged*. pytest swallows stdout for passing tests,
+# so measurements are collected here and printed in the terminal summary, where they show up in a
+# normal `pytest -q` run and therefore in CI logs — without anyone having to remember `-s`.
+PERF_MEASUREMENTS: list[str] = []
+
+
+def record_measurement(line: str) -> None:
+    PERF_MEASUREMENTS.append(line)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    if not PERF_MEASUREMENTS:
+        return
+    terminalreporter.write_sep("-", "performance")
+    for line in PERF_MEASUREMENTS:
+        terminalreporter.write_line(line)
