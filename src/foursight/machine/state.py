@@ -127,6 +127,7 @@ _DWELL = "4"
 _TOOL_LENGTH_ON = frozenset({"43", "44"})
 _TOOL_LENGTH_OFF = "49"
 _RAPID_MOTIONS = frozenset({"0"})
+_ARC_MOTIONS = frozenset({"2", "3"})
 _FEED_MOTIONS = frozenset({"1", "2", "3"})
 
 
@@ -173,12 +174,18 @@ class MachineState:
     is how a work offset ends up applied twice.
     """
 
-    __slots__ = ("_profile", "active_h", "programmed")
+    __slots__ = ("_profile", "active_h", "position_lost", "programmed")
 
     def __init__(self, profile: MachineProfile) -> None:
         self._profile = profile
         self.programmed = Position()
         self.active_h: int | None = None
+        # Distinguishes "never established" from "we had a position and lost it". At program start an
+        # unset axis can reasonably be assumed to be at the machine reference; after an undrawable
+        # G28 it cannot, because we genuinely no longer know where the machine is. Conflating the two
+        # either refuses to draw every program's approach moves or fabricates a position after a
+        # reference return.
+        self.position_lost = False
 
     @property
     def profile(self) -> MachineProfile:
@@ -204,7 +211,12 @@ class MachineState:
         before = self.programmed
         after = _advance(before, command)
         self.programmed = after
-        if after == before or command.motion is None:
+        # An arc whose endpoints coincide is a **full circle**, not a stationary block — that is
+        # precisely the case IJK can express and R cannot. Treating "position unchanged" as "no
+        # motion" silently dropped every full circle, which is the confidently-wrong-output failure
+        # in its quietest form: no error, no diagnostic, just a missing circle.
+        stationary = after == before and command.motion not in _ARC_MOTIONS
+        if stationary or command.motion is None:
             return Step(command=command, tool_length_unmodelled=self.active_h is not None)
 
         start, start_known = self._to_machine(before, command)
@@ -235,6 +247,7 @@ class MachineState:
         if home is None:
             # Position is genuinely unknown afterwards, so do not pretend to track it.
             self.programmed = Position()
+            self.position_lost = True
             return Step(
                 command=command,
                 undrawable=(

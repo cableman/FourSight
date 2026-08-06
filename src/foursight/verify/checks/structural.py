@@ -16,7 +16,7 @@ being re-derived here.
 
 from collections.abc import Iterable, Iterator, Sequence
 
-from foursight.parser.model import Command, ParseErrorKind
+from foursight.parser.model import CANNED_CYCLE_CODES, Command, ParseErrorKind
 from foursight.verify.report import Diagnostic, Severity
 from foursight.verify.rules import Program, Rule, register_rule
 
@@ -46,7 +46,8 @@ INTERPRETED_GCODES = frozenset({
 INTERPRETED_MCODES = frozenset({"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "30"})
 
 # Recognized, motion-affecting, and NOT interpreted in v1 → `unsupported`, never `warning`.
-CANNED_CYCLES = frozenset({"73", "76", "81", "82", "83", "84", "85", "86", "87", "88", "89"})
+# Borrowed from the parse layer so `sim` and `verify` cannot disagree about what a cycle is.
+CANNED_CYCLES = CANNED_CYCLE_CODES
 CUTTER_COMP = frozenset({"41", "42"})
 # Per-occurrence rather than span-based: these are one-shot or rarely repeated.
 UNSUPPORTED_ONE_SHOT: dict[str, str] = {

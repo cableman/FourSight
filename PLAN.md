@@ -268,6 +268,36 @@ class SegmentStore:
 
 **`kind` is motion type only.** The earlier `'rapid' | 'feed' | 'arc'` conflated motion type with geometry: an arc is always a cutting move, and after interpolation everything is a line segment anyway. Rendering groups by rapid vs feed. If the originating motion code is needed, it is recoverable via `line[i]`.
 
+### Simulator (T2.5)
+
+`simulate(commands, profile)` → `Simulation(store, spans, notes, unknown_durations)`. Composes
+`MachineState`, `interpolate`, `timing` and `SegmentBuilder`; `lin` is written in machine coordinates.
+
+**Spans are reported as source-line ranges, not as a seventh `SegmentStore` column.** Every segment
+already carries `line[i]`, so `unverified_mask()` is one comparison away and the store keeps exactly
+the six columns this plan specifies.
+
+Three tiers of honesty, and the differences between them are the point:
+
+- **Canned cycles are not drawn.** The span is suppressed and reported.
+- **Cutter comp *is* drawn**, as the programmed centreline, with the span marked `unverified` so the
+  renderer can style it distinctly. Refusing would refuse a large share of real programs, and the
+  centreline is genuinely what was programmed.
+- **An uninterpretable arc is not drawn**, with the interpolator's reason attached.
+
+**The machine is assumed to start at its reference position**, and this is deliberately *not* noted —
+a note present on every program says nothing. The stricter rule (refuse until every axis is
+established) was implemented and then rejected: the first move along each axis becomes undrawable, so
+a program that never mentions Y renders **empty**. That loses real geometry to avoid a bounded,
+conventional assumption about one approach move's origin, and the cut geometry is identical either
+way.
+
+That is distinct from a **lost** position. `MachineState.position_lost` marks the state after an
+undrawable G28, and those moves *are* suppressed: there we had a position and no longer do, so
+assuming one would fabricate the rest of the program.
+
+`progress(done, total)` is the seam T2.9 drives from a QThread; the simulator knows nothing about Qt.
+
 ### Timing (T2.4)
 
 `sim/timing.py`. `rates_for(command, profile, rapid=…)` resolves the rates in force for a block;

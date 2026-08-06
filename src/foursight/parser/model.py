@@ -32,6 +32,11 @@ ROTARY_LETTERS = frozenset("A")
 # G93 (inverse time) it is 1/minutes and must not — the distinction is feed-mode dependent and
 # belongs to the resolver, not to a static table here.
 
+# Canned cycles (G73/G76/G81-G89). Defined in the parse layer because both `sim` and `verify` need
+# the same set, and `sim` cannot import `verify` without inverting the dependency direction. G80 is
+# the *cancel* and is deliberately absent: it ends a cycle rather than being one.
+CANNED_CYCLE_CODES = frozenset({"73", "76", "81", "82", "83", "84", "85", "86", "87", "88", "89"})
+
 # Dialect defaults for a program that never states them, used as ModalState's field defaults.
 # PLAN.md § Dialect Divergences pins arc-centre mode: G91.1 default, G90.1 honoured.
 DEFAULT_PLANE = "17"

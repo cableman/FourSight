@@ -841,11 +841,36 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Blocked by: T2.3
       Files: `src/foursight/sim/timing.py`, `tests/test_timing.py`, `PLAN.md`
 
-- [ ] **T2.5 — `sim/simulator.py`**
-      Steps `Command`s → `SegmentStore`. Suppresses geometry across `unsupported` spans (canned
-      cycles) and marks cutter-comp spans as unverified rather than drawing them as understood.
-      `lin` is written in **machine coordinates, always**.
+- [x] **T2.5 — `sim/simulator.py`** — *done*
+      Steps commands into a `SegmentStore` in machine coordinates, composing T2.2–T2.4. Recorded in
+      PLAN.md § Simulator.
+      **DoD met:** 30 tests in `tests/test_simulator.py`; **704 across the suite**. All ten fixtures
+      simulate and validate; the baseline yields 129 segments over 22.58 s with nothing suppressed.
+      **A real bug found, and it is the quietest possible form of the failure this project exists to
+      prevent.** `MachineState` treated "position unchanged" as "no motion" — but an arc whose
+      endpoints coincide is a **full circle**, precisely the case IJK can express and R cannot. So
+      **every full circle was silently dropped**: no error, no diagnostic, just a missing circle. Now
+      drawn: 71 segments at exactly radius 10, closing on itself. Regression test added.
+      **Spans are line ranges, not a seventh store column** — `line[i]` already exists for exactly
+      this, so `unverified_mask()` is one comparison and PLAN's six columns stand.
+      **A decision I reversed after implementing it, which is worth recording.** I first refused to
+      draw any move whose start position was unestablished, on the grounds that drawing from a
+      fabricated origin invents a line. That is true but the cure is worse: the first move along
+      *each* axis is then undrawable, so a program that never mentions Y renders **empty**. Settled
+      on assuming the machine starts at its reference — the universal convention — and *not* noting
+      it, since a note on every program says nothing. The cut geometry is identical either way.
+      **Kept distinct: an assumed start vs a lost position.** `position_lost` marks the state after an
+      undrawable G28, and those moves are suppressed, because there we had a position and no longer
+      do. Both directions are tested.
+      Also moved `CANNED_CYCLE_CODES` into the parse layer: `sim` needs it and cannot import
+      `verify` without inverting the dependency direction, so `structural.py` now borrows it.
+      **Three of my own test bugs fixed along the way:** a progress callback bound to `list.append`
+      (which takes one argument), an off-by-one source line after G80, and a profile fixture with a
+      duplicate `[axes.x]` table, which TOML forbids.
       Blocked by: T2.4
+      Files: `src/foursight/sim/simulator.py`, `src/foursight/machine/state.py`,
+      `src/foursight/parser/model.py`, `src/foursight/verify/checks/structural.py`,
+      `tests/test_simulator.py`, `PLAN.md`
 
 - [ ] **T2.6 — Batched GL viewport** — `gui/viewport3d.py`
       Pre-batch into ≤ 10 buffers grouped by `kind`; never one draw call per move. Rapids red,
