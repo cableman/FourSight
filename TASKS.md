@@ -244,14 +244,35 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
 Headless end to end. This is where the parse-rate target is won or lost, and where the severity
 taxonomy gets teeth.
 
-- [ ] **T1.1 — `parser/model.py`**
+- [x] **T1.1 — `parser/model.py`** — *done*
       `SourceRef`, `ModalState` (both `slots=True, frozen=True`), `Command` (`slots=True`) exactly
-      as in PLAN.md § *Parse layer*. `gcodes`/`mcodes` are `list[str]`; `words` holds axis/parameter
-      letters only. **Must not import from `machine/`** — dependency direction is one-way.
-      **DoD:** unit test asserts field sets and that `SourceRef`/`ModalState` are hashable and
-      frozen; a test asserts `foursight.parser.model` imports with `machine/` unimportable
-      (or asserts on the module's imports directly).
-      Blocked by: T0.9
+      as PLAN.md § *Parse layer* specifies. Imports nothing from the rest of the package.
+      **Three decisions the PLAN sketch left open, now made and recorded there:**
+      1. `ModalState` fields carry the dialect defaults (`mm`/`17`/`90`/`91.1`/`94`); everything
+         not-yet-established starts `None`, so "never set" stays distinguishable from "set to zero".
+      2. `units` is never `None` (unlike `offset`) — a program with neither G20 nor G21 still has an
+         effective unit. "Units never set" is a program-level property, so the verifier finds it by
+         scanning the command stream rather than reading a sentinel.
+      3. This module owns the **word-letter tables**, because the resolver's G20 conversion depends
+         on classifying letters and a mistake is silent: `WORD_LETTERS`, `AXIS_LETTERS`,
+         `LINEAR_LENGTH_LETTERS` (scaled by 25.4), `ROTARY_LETTERS` (degrees, never scaled).
+         **`F` is deliberately in neither scaling set** — a length rate under G94/G95 but 1/minutes
+         under G93, so only the resolver can classify it per feed mode.
+      **DoD met:** `tests/test_parser.py`, 21 tests — field sets asserted verbatim against PLAN.md,
+      annotations checked (`gcodes`/`mcodes` are `list[str]`, not floats), frozen-ness, hashability,
+      `slots` in effect, dialect defaults, copy-on-write via `replace`, `Command` mutable and
+      unhashable. The `machine/` import rule is covered by the existing AST test in
+      `tests/test_smoke.py`, which catches function-local imports too.
+      **Mutation-verified** — dropping `slots=True`, classifying `A` as a length, and changing
+      `gcodes` to `list[float]` each fail exactly one test. The first two break nothing
+      behaviourally, so without these guards they would pass unnoticed.
+      **Test bug found and fixed while writing it:** asserting frozen-ness by assigning an
+      *unknown* attribute to a `frozen=True, slots=True` dataclass raises a confusing
+      `TypeError: super(type, obj)...` from CPython's generated `__setattr__`, not
+      `FrozenInstanceError` — so a typo'd field name would have passed for the wrong reason. The
+      test now assigns only fields each class actually has.
+      Blocked by: — *(T0.9's gate is still open on T0.6/T0.8, both of which are infrastructure-only
+      and cannot affect the parse layer)*
 
 - [ ] **T1.2 — `parser/tokenizer.py`**
       Line → words. **One compiled regex per line, not per word** (the 20 µs/line budget).

@@ -148,6 +148,17 @@ Three things the earlier draft got wrong and this fixes:
 
 `ModalState` is frozen and shared: the simulator holds one live `MachineState` and emits a new `ModalState` only when something actually changes, so consecutive commands usually share one instance.
 
+**Implemented in T1.1, with three decisions the sketch above left open:**
+
+- **`ModalState` fields carry the dialect defaults**, so a program that never states them still has a well-defined starting state: `units='mm'`, `plane='17'`, `distance='90'`, `arc_distance='91.1'` (per Dialect Divergences), `feed_mode='94'`. Everything genuinely not-yet-established — `offset`, `feed`, `spindle_on`, `tool`, `length_offset`, `cutter_comp` — starts `None`, so the verifier can distinguish "never set" from "set to zero".
+- **`units` is never `None`**, unlike `offset`. A program with neither G20 nor G21 still has an effective unit, whereas "no work offset active yet" is a real modal state. "Units never explicitly set" is a property of the whole program rather than of a modal group, so the verifier detects it by looking for G20/G21 across the command stream, not via a sentinel.
+- **`parser/model.py` owns the word-letter tables**, because the G20 inch conversion in the resolver depends on classifying letters correctly and getting it wrong is silent:
+  - `WORD_LETTERS` — `X Y Z A I J K R F S T P H D L Q`; excludes G and M, which are lists of strings.
+  - `AXIS_LETTERS` — `X Y Z A`; distinguishes a real motion block from a parameter-only one.
+  - `LINEAR_LENGTH_LETTERS` — `X Y Z I J K R`; scaled by 25.4 on G20 input.
+  - `ROTARY_LETTERS` — `A`; degrees, **never** scaled by a unit conversion.
+  - `F` is in neither scaling set on purpose: it is a length rate under G94/G95 but 1/minutes under G93, so no static table can classify it and the resolver must decide per feed mode.
+
 ### Segment store — columnar, not per-object
 
 500k `Segment` dataclasses each holding two numpy arrays costs ~400 B apiece (≈48 B object + ~100 B `__dict__` + 2 × ~144 B for the tiny arrays) — over 200 MB before the GL buffers, and then it all has to be repacked into contiguous arrays anyway. Store columns:
