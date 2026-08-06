@@ -442,6 +442,29 @@ An unrecognized code that never touches position stays a warning. An unrecognize
 - **An unknown code is reported once per code, not once per line**, so a 100k-line file with a stray
   `G12` on every line yields one warning rather than 100k.
 
+### Process checks (T1.8)
+
+`verify/checks/process.py`, 13 rules covering PLAN.md's Process group, plus the G93-without-F check
+the checklist mandates. Position tracking lives in `machine/state.py` — a minimal, **endpoint-only**
+walker built here for the same reason profile loading moved into M1: the verifier cannot run without
+it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated points.
+
+- **Clearance and retract are judged in machine coordinates**, per this plan's rule that
+  verification happens in machine coords. `machine_value()` adds the active work offset and reports
+  whether that offset was actually *known*. A `G53` block is already machine-absolute and must not
+  have the offset added again.
+- **When the work offset is unknown**, the programmed value is used and the message says
+  "assumes zero work offset". For travel limits PLAN downgrades `error` → `warning`; these rules are
+  already warnings, so there is no tier below to drop to and the caveat carries the uncertainty.
+- **Unknown position is treated asymmetrically, deliberately.** A rapid whose Z was never
+  established is *not* judged — no position, no claim. A tool change whose Z cannot be established
+  *is* a violation: if we cannot show the tool was clear, we cannot call the change safe.
+- **A missing limit disables its check.** No rule invents a bound.
+- **Most rules report once**, at the first offending line: "no feed rate ever set" is one fact about
+  the program. `feed-too-high` and `spindle-too-high` report per offending word, since each is a
+  separate programming decision to change.
+- Coolant state is tracked inside its rule rather than added to `ModalState`; nothing else needs it.
+
 ### Unsupported motion codes (v1)
 
 These are common enough that silently mis-drawing them is the most likely way FourSight produces a wrong picture:

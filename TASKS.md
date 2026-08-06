@@ -473,15 +473,43 @@ taxonomy gets teeth.
       `src/foursight/parser/tokenizer.py`, `src/foursight/parser/resolver.py`,
       `tests/test_checks_structural.py`, `PLAN.md`
 
-- [ ] **T1.8 — Process checks** — `verify/checks/process.py`
-      All of PLAN.md's Process list: E for cutting move with no feed ever set; G93 active with no
-      F on a cutting block; F > `limits.max_feed`; S > `limits.max_spindle_rpm`. W for units never
-      set, no work offset before motion, cut before M3/M4, M6 without prior safe-Z retract (when
-      `safety.retract_before_toolchange`), M6 with no tool ever set, coolant on with spindle off,
-      rapid below `min_clearance_z`, G91 active at program end, no M2/M30.
-      **DoD:** one broken fixture per check, each a **single mutation** of the clean baseline
-      (T1.10), asserting on the diagnostic *added* relative to the baseline's set.
+- [x] **T1.8 — Process checks** — `verify/checks/process.py` — *done*
+      13 rules: all of PLAN.md's Process group plus `process.g93-without-feed`, which the checklist
+      mandates but the corpus had no mutation for — added one. Recorded in PLAN.md § Process checks.
+      **DoD met:** 42 tests in `tests/test_checks_process.py`; 451 across the suite. Pending skips
+      dropped **15 → 3** (only the geometry rules remain), and the clean baseline still reports
+      **zero** diagnostics.
+      **Built `machine/state.py` early** — a minimal *endpoint-only* position walker. Several rules
+      need machine Z, and duplicating position tracking across `process.py` and `geometry.py` would
+      be worse than building the small version T2.2 extends. Same reasoning that moved profile
+      loading into M1.
+      **The `min_clearance_z` ambiguity flagged in T1.10 is resolved:** judged in **machine
+      coordinates**, consistent with PLAN's rule that verification happens there. `machine_value()`
+      adds the active work offset and reports whether it was known; a `G53` block is already
+      machine-absolute and must not have the offset applied twice. When the offset is unknown the
+      message says "assumes zero work offset" — these rules are already warnings, so there is no
+      tier below to downgrade to and the caveat carries the uncertainty instead.
+      **Unknown position is treated asymmetrically, on purpose:** a rapid whose Z was never
+      established is not judged (no position, no claim), while a tool change whose Z cannot be
+      established *is* a violation (if we cannot show the tool was clear, we cannot call the change
+      safe). Both directions are tested.
+      **A fixture defect the new checks caught:** `arc_r_format.nc` rapided at Z-1, i.e. at cutting
+      depth without retracting. The check was right; the fixture was not. Fixed.
+      **Mutation-verified — and two survivors exposed real test weaknesses:**
+      1. **A crashing rule was passing as a clean result.** Making the rapid check judge an unknown
+         Z crashes it on `None`; `verify()` converts that into `internal.rule-failed` so one bad rule
+         cannot suppress the others — and my test only asserted the *specific* rule id was absent, so
+         the crash read as correct silence. `conftest.diagnose` now refuses to return any result
+         containing `internal.rule-failed`, closing that hole for **every** fixture and check test at
+         once. The robustness feature was masking bugs from the tests.
+      2. **A test that could not distinguish the thing it named.** `test_g53_coordinates_are_already_
+         machine_absolute` used Z20 with a +10 offset — 20 and 30 both clear a 5 mm threshold, so
+         double-counting the offset was invisible. Rewritten at Z2, where the two answers differ,
+         plus a paired control without G53.
       Blocked by: T1.6
+      Files: `src/foursight/verify/checks/process.py`, `src/foursight/machine/state.py`,
+      `src/foursight/verify/checks/__init__.py`, `tests/test_checks_process.py`,
+      `tests/conftest.py`, `tests/fixtures/arc_r_format.nc`, `PLAN.md`
 
 - [ ] **T1.9 — Sim-free geometry checks** — `verify/checks/geometry.py`
       What is checkable without interpolation: arc radius mismatch beyond

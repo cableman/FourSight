@@ -70,6 +70,13 @@ MUTATIONS: tuple[Mutation, ...] = (
         "process.spindle-too-high", "E: spindle S exceeds limits.max_spindle_rpm (24000)",
     ),
     Mutation(
+        "inverse_time_without_feed",
+        "N10 G21 G90 G17 G94 G54",
+        "N10 G21 G90 G17 G93 G54",
+        "process.g93-without-feed",
+        "E: G93 inverse-time active with no F on a cutting block",
+    ),
+    Mutation(
         "cut_before_spindle", "N50 S8000 M3", None,
         "process.cut-before-spindle", "W: cutting move before spindle start",
     ),
@@ -154,9 +161,20 @@ def apply_mutation(baseline: str, mutation: Mutation) -> str:
 
 
 def diagnose(text: str, profile: MachineProfile) -> list[Diagnostic]:
+    """Verify a program, refusing to return a result in which a rule crashed.
+
+    `verify()` deliberately converts a raising rule into one `internal.rule-failed` diagnostic so a
+    single broken rule cannot suppress the others. That robustness also *masks crashes from tests*:
+    a rule that blew up on a None looked like a rule that correctly stayed silent, because the
+    assertions only checked that a specific rule_id was absent. Every fixture and check test routes
+    through here, so this one assertion closes that hole everywhere at once.
+    """
     result = parse(text)
     program = Program(commands=result.commands, profile=profile, parse_errors=result.errors)
-    return verify(program)
+    diagnostics = verify(program)
+    crashed = [d.message for d in diagnostics if d.rule_id == "internal.rule-failed"]
+    assert not crashed, f"a rule raised while checking this program: {crashed}"
+    return diagnostics
 
 
 def diagnostic_keys(diagnostics: list[Diagnostic]) -> set[tuple[str, int]]:

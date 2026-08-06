@@ -37,6 +37,9 @@ def of(diagnostics, rule_id: str):
 
 
 PREAMBLE = "G21 G90 G17 G94 G54\nS8000 M3\n"
+# Needed only by the tests that assert *zero* diagnostics: without it the process checks correctly
+# report a missing program end, which would swamp the structural assertion being made.
+POSTAMBLE = "M5\nM30\n"
 
 
 # --------------------------------------------------------------------------- taxonomy
@@ -204,12 +207,12 @@ def test_path_control_and_return_modes_are_silent(code: str, profile) -> None:
 
     G64 appears in nearly every LinuxCNC program, so warning here would be pure noise.
     """
-    assert check(PREAMBLE + f"{code}\nG1 X10 F100\n", profile) == []
+    assert check(PREAMBLE + f"{code}\nG1 X10 F100\n" + POSTAMBLE, profile) == []
 
 
 def test_cancel_codes_do_not_report_themselves(profile) -> None:
     """G40 and G80 end an unsupported span; they are not unsupported constructs."""
-    assert check(PREAMBLE + "G40\nG80\nG1 X10 F100\n", profile) == []
+    assert check(PREAMBLE + "G40\nG80\nG1 X10 F100\n" + POSTAMBLE, profile) == []
 
 
 def test_codes_owned_by_the_unsupported_rule_are_not_also_called_unknown(profile) -> None:
