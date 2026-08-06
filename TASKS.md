@@ -918,10 +918,31 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       QThread with progress reporting; cancellable.
       Blocked by: T2.5
 
-- [ ] **T2.10 — `tests/test_golden.py`**
-      Hash `SegmentStore` geometry (rounded to tolerance) per fixture. The highest-value regression
-      net for a geometry engine: refactors that silently move the toolpath are otherwise invisible.
+- [x] **T2.10 — `tests/test_golden.py`** — *done*
+      A fingerprint per fixture in `tests/golden/segments.json`. Recorded in PLAN.md § Testing
+      Strategy.
+      **DoD met:** 21 tests; **740 across the suite**. All 10 fixtures have goldens, and a test
+      asserts the golden file and the fixture directory stay in step — a fixture added without a
+      golden would be silently unprotected.
+      **A bare hash is a poor golden**, so the fingerprint pairs `geometry_sha256` with readable
+      fields (segments, per-axis bounds, duration, rapid/feed, spans) and a mismatch **names the field
+      that moved**. Verified against injected regressions: tessellation one step coarser fails 6
+      fixtures reporting `segments: 128 -> 125`; a silent 0.1 mm shift fails 10 reporting
+      `X: [0.0, 50.0] -> [0.0, 50.1]`. That is exactly the "refactor silently moves the toolpath"
+      failure PLAN says is otherwise invisible.
+      **Quantized to 1 µm / 0.001° before hashing** — 10× finer than the chord tolerance so a real
+      change cannot hide, ~10 orders of magnitude coarser than float64 noise so a different libm's
+      `cos` cannot break the build. Both directions are tested: a 0.01 mm shift changes the hash, a
+      1e-9 shift does not. Windows CI is the real exercise of that.
+      **`kind` and `line` are hashed unquantized**, with tests: a rapid reclassified as a feed, or a
+      segment attributed to the wrong source line, are regressions as real as a moved coordinate and
+      would change no coordinate at all.
+      **Spans are in the fingerprint too**, because a canned cycle silently becoming *drawn* would
+      change no existing coordinate — it would add geometry that should not exist.
+      Re-record with `FOURSIGHT_UPDATE_GOLDEN=1`; the failure message says so, and says to read the
+      diff first.
       Blocked by: T2.5
+      Files: `tests/test_golden.py`, `tests/golden/segments.json`, `PLAN.md`
 
 - [ ] **T2.11 — Extend `test_perf.py`: segment budget + memory**
       Per-fixture segment counts, and ≤ 250 MB resident for a 500k-segment program including

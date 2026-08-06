@@ -1,0 +1,294 @@
+{
+  "arc_full_circle_ijk.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        29.998
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 13.101,
+    "feed": 72,
+    "geometry_sha256": "d6b2b8c5f9f1865910020705f7a7d2be",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 75,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "arc_g18_direction.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        0.0
+      ],
+      "Z": [
+        -19.996,
+        25.0
+      ]
+    },
+    "duration_s": 19.162,
+    "feed": 72,
+    "geometry_sha256": "6eb4b9cd8b0cefe3cecc74a01a08043d",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 75,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "arc_helical.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        45.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        20.0
+      ],
+      "Z": [
+        -6.0,
+        25.0
+      ]
+    },
+    "duration_s": 17.733,
+    "feed": 125,
+    "geometry_sha256": "f66dafb26630a3fe701dbf76852acdf7",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 128,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "arc_r_format.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        60.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 18.941,
+    "feed": 74,
+    "geometry_sha256": "76e2c8f1fff661c8b33301b9df9d150d",
+    "notes": 0,
+    "rapid": 5,
+    "segments": 79,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "baseline_4axis.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        180.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 22.581,
+    "feed": 125,
+    "geometry_sha256": "8c6703e0848a2dc852622ac94af43acb",
+    "notes": 0,
+    "rapid": 4,
+    "segments": 129,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "block_delete.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 16.34,
+    "feed": 4,
+    "geometry_sha256": "e8ba95b4cb43ca3274ce7c1ddebe8385",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 7,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "canned_cycle_span.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        10.0
+      ],
+      "Z": [
+        -5.0,
+        25.0
+      ]
+    },
+    "duration_s": 2.22,
+    "feed": 1,
+    "geometry_sha256": "e2e6d1d2f9589ec871741f2d698ccdb9",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 4,
+    "spans": [
+      [
+        9,
+        12,
+        "suppressed"
+      ]
+    ],
+    "unknown_durations": 0
+  },
+  "cutter_comp_span.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 16.34,
+    "feed": 4,
+    "geometry_sha256": "711cc31ac73f0fe413dd2636b81cdc96",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 7,
+    "spans": [
+      [
+        9,
+        11,
+        "unverified"
+      ]
+    ],
+    "unknown_durations": 0
+  },
+  "framing_fanuc.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        10.0
+      ],
+      "Y": [
+        0.0,
+        10.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 7.634,
+    "feed": 2,
+    "geometry_sha256": "1de1d5d0d2ed3417954902bcba7f95ce",
+    "notes": 0,
+    "rapid": 2,
+    "segments": 4,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "inch_program.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        90.0
+      ],
+      "X": [
+        0.0,
+        50.8
+      ],
+      "Y": [
+        0.0,
+        22.86
+      ],
+      "Z": [
+        -1.016,
+        25.4
+      ]
+    },
+    "duration_s": 14.662,
+    "feed": 62,
+    "geometry_sha256": "2335f14ba021b8c7e07f8cf5c663fdd9",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 65,
+    "spans": [],
+    "unknown_durations": 0
+  }
+}

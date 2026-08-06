@@ -870,7 +870,10 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 - **Broken fixtures: baseline plus one mutation.** "Each broken file triggers exactly one diagnostic" is brittle in practice — a file missing G21 also trips "no work offset" and "lacks M30." Instead keep one known-clean baseline file, derive each broken fixture by a single mutation, and assert on the *newly added* diagnostic relative to the baseline's diagnostic set.
 - **Arc math:** hypothesis property tests — interpolated points equidistant from center within 1e-6; tessellation never exceeds `tolerance.arc_chord`; R↔IJK round-trips where expressible.
 - **Kinematics:** compare transformed paths against closed-form expectations (helix on a cylinder).
-- **Golden tests:** hash `SegmentStore` geometry (rounded to tolerance) per fixture. This is the highest-value regression net for a geometry engine — refactors that silently move the toolpath are otherwise invisible.
+- **Golden tests (T2.10):** a fingerprint per fixture in `tests/golden/segments.json`, pairing an exact `geometry_sha256` with **readable** fields — segment count, per-axis bounds, duration, rapid/feed split, spans. A bare hash is a poor golden: it says something changed and nothing about what, so a failure here names the field that moved.
+  Geometry is **quantized before hashing**, to 1 µm and 0.001° — 10× finer than the 0.01 mm chord tolerance, so a real change cannot hide inside it, and ~10 orders of magnitude coarser than float64 noise, so a different libm's `cos` cannot break the build. `kind` and `line` are hashed unquantized: a rapid reclassified as a feed, or a segment attributed to the wrong line, are regressions too.
+  Verified to catch what it is for: tessellation one step coarser fails 6 fixtures (`segments: 128 → 125`); a silent 0.1 mm shift fails 10 (`X: [0.0, 50.0] → [0.0, 50.1]`).
+  Re-record with `FOURSIGHT_UPDATE_GOLDEN=1 pytest tests/test_golden.py`, and read the diff first.
 - **Performance regression:** assert the parse rate and the segment count per fixture in `test_perf.py`. Hard numbers in the plan need a test or they decay.
 - **GUI:** manual test script per milestone; keep the GUI layer thin so logic stays testable.
 
