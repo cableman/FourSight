@@ -659,6 +659,16 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
 
 ## Performance Requirements
 
+- **Windows CI is ~1.9× slower than the dev machine, and that is the number that matters.**
+  Measured on `windows-latest`: **57,009 lines/sec (py3.11)** and **58,747 (py3.12)** against the
+  50k floor — the target is met on the slowest hardware we test, but with only **14% headroom**. A
+  15% regression is therefore caught; runner variance beyond that will occasionally fail the build.
+  If it does, the answer is to make the parse faster or to revise the target with evidence — **not**
+  to lower `FOURSIGHT_PERF_MIN_RATE` until the test stops complaining.
+- **Verification on Windows CI costs 1,086 ms** for the same 42,858 commands, against 530 ms
+  locally. For a 100k-line file that is ~2.5 s of the M2 gate's 5 s budget, on the platform we
+  ship to. This makes the redundant-walk optimization below materially more attractive than the
+  local numbers alone suggest.
 - **Parse ≥ 50k lines/sec — MEASURED 110k (9.0 µs/line), 2.2× the target**, on the baseline machine
   for a realistic 50k-line mix. Asserted by `tests/test_perf.py`, which asserts the *floor* and logs
   the actual, so a slower CI runner does not flake. `FOURSIGHT_PERF_MIN_RATE` overrides the floor for

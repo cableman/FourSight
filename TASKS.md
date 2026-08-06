@@ -669,7 +669,28 @@ taxonomy gets teeth.
       **The one genuine risk in that run** is the perf floor on a shared runner. If a leg reports
       below 50k lines/sec, set `FOURSIGHT_PERF_MIN_RATE` in the workflow rather than deleting the
       assertion.
-      **To close:** confirm all 6 jobs green on the queued run, then tick.
+      **CI update — run 31123157517 (`a87ad82`): 4 jobs never started, 2 passed.** Cause again
+      infrastructure, and a different one: *"The job was not acquired by Runner of type hosted even
+      after multiple attempts"* — all four Ubuntu-hosted jobs sat 15 minutes without a runner. The
+      T1.12 run was `cancelled`, which is correct: the workflow's `cancel-in-progress` superseded it.
+      **Both Windows legs passed in under 2 minutes, and those were the ones that mattered** — the
+      first time the matrix has exercised the verifier, the CLI and the perf test on Windows or 3.11.
+      **Two real findings from that data, both acted on:**
+      1. **The perf floor has only 14% headroom on Windows.** 57,009 lines/sec (py3.11) and 58,747
+         (py3.12) against the 50k floor; Windows CI is ~1.9× slower than the dev machine. The target
+         *is* met on the slowest hardware we test, and a 15% regression would be caught — but runner
+         variance may occasionally fail the build. Recorded in PLAN.md, along with the rule that the
+         answer is a faster parse or an evidence-based revision of the target, **not** lowering
+         `FOURSIGHT_PERF_MIN_RATE` until it stops complaining.
+      2. **A test was silently skipping on Windows.** `546 passed, 1 skipped` against 547/0 locally:
+         `test_the_console_script_is_installed_and_runs` looked for `foursight` beside
+         `sys.executable`, but Windows installs `foursight.exe` into `Scripts/`. So the console
+         script went untested on the one platform where a shim is most likely to break. Fixed to
+         check both names.
+      Also recorded: **verification costs 1,086 ms on Windows CI** versus 530 ms locally — ~2.5 s of
+      M2's 5 s budget for a 100k-line file, which makes the redundant-walk optimization more
+      attractive than the local numbers suggested.
+      **To close:** re-run the four Ubuntu jobs and confirm all 6 green.
       Blocked by: CI confirmation only
       Files: `TASKS.md`
 

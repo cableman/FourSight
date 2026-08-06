@@ -251,10 +251,23 @@ def test_the_cli_path_imports_no_qt() -> None:
 
 
 def test_the_console_script_is_installed_and_runs() -> None:
-    """The entry point declared in pyproject.toml, exercised as a user would."""
-    executable = Path(sys.executable).parent / "foursight"
-    if not executable.exists():  # pragma: no cover - only when not installed as a script
-        pytest.skip("console script not installed in this environment")
+    """The entry point declared in pyproject.toml, exercised as a user would.
+
+    Both filename forms are checked: Windows installs `foursight.exe` into `Scripts/`, and looking
+    only for the extensionless name made this skip on Windows — the one platform where a
+    console-script shim is most likely to be the thing that breaks.
+    """
+    directory = Path(sys.executable).parent
+    executable = next(
+        (
+            candidate
+            for candidate in (directory / "foursight", directory / "foursight.exe")
+            if candidate.exists()
+        ),
+        None,
+    )
+    if executable is None:  # pragma: no cover - only when not installed as a script
+        pytest.skip(f"console script not found in {directory}")
     result = subprocess.run(  # noqa: S603
         [str(executable), "check", str(BASELINE)], capture_output=True, text=True, check=False
     )
