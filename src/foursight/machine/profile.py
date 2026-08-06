@@ -21,11 +21,25 @@ file said, and every stored number is already mm (or degrees, for rotary).
 
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 
 from foursight.parser.model import ROTARY_LETTERS
 
 INCH_TO_MM = 25.4
+
+DEFAULT_PROFILE_NAME = "default_4axis.toml"
+
+
+def default_profile_path() -> Path:
+    """Path to the profile shipped inside the package.
+
+    Resolved through ``importlib.resources`` rather than relative to the source tree, because the
+    only copy that exists at runtime is the packaged one — a path relative to the repository root
+    works in a checkout and fails for both `pip install` and a PyInstaller bundle.
+    """
+    return Path(str(resources.files("foursight") / "profiles" / DEFAULT_PROFILE_NAME))
+
 
 # Rotary axes beyond A are not v1, but naming them here means an unlabelled `[axes.b]` is treated
 # as rotary rather than having its degrees scaled by 25.4 on an inch profile. Guessing "rotary" is

@@ -20,13 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from foursight.machine.profile import MachineProfile, load_profile
+from foursight.machine.profile import MachineProfile, default_profile_path, load_profile
 from foursight.parser.resolver import parse
 from foursight.verify.report import Diagnostic
 from foursight.verify.rules import Program, registered_rules, verify
 
 FIXTURES = Path(__file__).parent / "fixtures"
-DEFAULT_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "default_4axis.toml"
+# Resolved through the package, not the repo layout: the shipped profile lives inside
+# `foursight/profiles/` so that an installed app and a PyInstaller bundle can both find it.
+DEFAULT_PROFILE_PATH = default_profile_path()
 BASELINE = "baseline_4axis.nc"
 
 

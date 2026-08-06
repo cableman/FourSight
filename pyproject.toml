@@ -27,6 +27,11 @@ foursight = "foursight.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The default machine profile must travel with the package: a copy at the repo root cannot be
+# found by an installed app or a PyInstaller bundle.
+[tool.setuptools.package-data]
+foursight = ["profiles/*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

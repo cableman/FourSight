@@ -583,14 +583,38 @@ taxonomy gets teeth.
       `profiles/default_4axis.toml`
 
 
-- [ ] **T1.11 — CLI: `foursight parse` / `foursight check`**
-      `parse` dumps commands; `check` runs the verifier and reports `severity line message`.
-      `--profile` (default `profiles/default_4axis.toml`) and `--block-delete` (default **off**,
-      meaning deleted blocks execute, matching the common control-panel default). Exit non-zero
-      when errors are present. **No Qt import anywhere on this path.**
-      **DoD:** both subcommands run against fixtures; a test invokes the CLI in a Qt-free
-      environment.
+- [x] **T1.11 — CLI: `foursight parse` / `foursight check`** — *done*
+      Both subcommands, `--profile`, `--block-delete` (off by default), plus `--modal` for `parse`.
+      Recorded in PLAN.md § CLI.
+      **DoD met:** 43 tests in `tests/test_cli.py`; **541 across the suite**. Every fixture runs
+      through both subcommands; the Qt-free requirement is checked in a **subprocess**, because this
+      venv has `[gui]` installed and an in-process check would prove nothing about a `.[dev]`-only
+      install. That guard was itself verified to fail when a leak is simulated.
+      **A packaging bug found and fixed:** the default profile lived at the **repo root**, where an
+      installed app or a PyInstaller bundle can never find it. Moved to
+      `src/foursight/profiles/default_4axis.toml` as package data, resolved via
+      `importlib.resources` in `default_profile_path()`. This would have surfaced at M5 as "the
+      bundled app cannot find its own default profile"; PLAN.md's layout is updated.
+      **Exit codes are the contract**, each asserted: `0` clean, `1` errors, `2` cannot run.
+      **`unsupported` and `warning` deliberately do not fail the run** — a program that legitimately
+      contains canned cycles must still pass a pipeline, since failing it would push users toward
+      suppressing the whole check.
+      **Diagnostics and summary go to stdout, tool problems to stderr.** The first version put the
+      summary on stderr, which interleaved out of order as soon as stdout was piped; linters put
+      both on stdout and that is what this now does.
+      **The T1.5 note is honoured:** unrecognized profile keys print to stderr, so a `max_fed` typo
+      cannot silently disable the feed check. Latin-1 fallback is reported too.
+      **Mutation-verified, all six caught:** errors not failing the run (2 tests), `unsupported`
+      failing it (3), swallowing profile typos (2), ignoring `--profile` (5), ignoring
+      `--block-delete` (1), and letting exceptions escape as tracebacks (3).
+      **A process failure worth recording:** after moving the profile I ran only the CLI tests, not
+      the full suite, and left `conftest.py` pointing at the old path — 110 errors that the next full
+      run surfaced. Moving a file that tests locate by path needs a full-suite run immediately, not
+      at the end of the task.
       Blocked by: T1.7, T1.8, T1.9
+      Files: `src/foursight/cli.py`, `src/foursight/machine/profile.py`, `pyproject.toml`,
+      `src/foursight/profiles/default_4axis.toml`, `tests/test_cli.py`, `tests/conftest.py`,
+      `tests/test_profile.py`, `PLAN.md`
 
 - [ ] **T1.12 — `tests/test_perf.py`: parse rate**
       Assert **≥ 50k lines/sec** on a generated large fixture, with enough headroom that CI

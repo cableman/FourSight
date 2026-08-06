@@ -15,11 +15,12 @@ from foursight.machine.profile import (
     MachineProfile,
     ProfileError,
     WorkOffset,
+    default_profile_path,
     load_profile,
     load_profile_text,
 )
 
-DEFAULT_PROFILE = Path(__file__).resolve().parent.parent / "profiles" / "default_4axis.toml"
+DEFAULT_PROFILE = default_profile_path()
 
 MINIMAL = """
 [machine]

@@ -86,10 +86,10 @@ FourSight/
 │   │   ├── editor.py        # code pane, line highlighting
 │   │   ├── timeline.py      # play/pause/scrub
 │   │   └── diagnostics_panel.py
-│   └── fileio/              # NOT `io/` — that shadows the stdlib module
-│       └── loader.py        # file loading, encoding detection, large-file handling
-├── profiles/
-│   └── default_4axis.toml
+│   ├── fileio/              # NOT `io/` — that shadows the stdlib module
+│   │   └── loader.py        # file loading, encoding detection, large-file handling
+│   └── profiles/            # package DATA, not the repo root: an installed app and a
+│       └── default_4axis.toml   # PyInstaller bundle must both be able to find it
 ├── tests/
 │   ├── test_tokenizer.py
 │   ├── test_parser.py
@@ -328,7 +328,8 @@ retract_before_toolchange = true
 ### Loading rules (T1.5)
 
 `load_profile(path)` / `load_profile_text(text)` → `MachineProfile`, all frozen dataclasses. The
-shipped profile is `profiles/default_4axis.toml`.
+shipped profile is `src/foursight/profiles/default_4axis.toml`, resolved at runtime through
+`default_profile_path()`.
 
 **Absence means "unknown", never a fabricated value.** This plan already states it for work offsets;
 the same reasoning covers every limit. An invented `max_feed` of 3000 would produce confident
@@ -540,6 +541,28 @@ Severity per the taxonomy above.
 - [ ] W: Program lacks M2/M30
 
 Diagnostics report positions **in the program's declared units**. A message reading "X exceeds 400 mm" against a program written in inches is not actionable.
+
+### CLI (T1.11)
+
+`foursight parse FILE` and `foursight check FILE`, both headless — the path imports no Qt, enforced
+by CI's `.[dev]`-only job and by a subprocess test.
+
+- **Exit codes:** `0` ran and found no errors, `1` errors found, `2` could not run (unreadable file,
+  unusable profile, bad usage). `FileLoadError` and `ProfileError` are relayed as one-line messages,
+  never tracebacks.
+- **`unsupported` and `warning` do not fail the run.** A program that legitimately contains canned
+  cycles must still pass a build pipeline; failing it would push users toward suppressing the whole
+  check, which is worse than reporting a span we did not interpret.
+- **Diagnostics and the summary go to stdout**, as linters do; stderr carries problems with the
+  tool's own inputs. Mixing them interleaves unpredictably the moment stdout is piped.
+- Output is compiler-style — `file:line: severity [rule_id] message` — so editors can jump to it and
+  grep can filter it.
+- **`--profile` defaults to the bundled profile**, resolved via `importlib.resources` rather than a
+  path relative to the repo, which exists only in a checkout.
+- **Unrecognized profile keys are printed to stderr.** Loading tolerates them so a newer profile
+  still works, but an unsurfaced `max_fed = 3000` silently disables the feed check.
+- A latin-1 decoding fallback is reported too: a mis-decoded comment is cosmetic, but silently
+  claiming success on a non-UTF-8 file is not.
 
 ## Automatic Fixes (each produces a reviewable diff)
 
