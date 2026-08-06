@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Distribution name is foursight-cnc; plain `foursight` is taken on PyPI.
+# The import package is `foursight` (see [tool.setuptools.packages.find]).
+name = "foursight-cnc"
+version = "0.1.0"
+description = "4-axis CNC G-code previewer and verifier"
+requires-python = ">=3.11"
+authors = [{ name = "Jesper Kristensen", email = "jeskr@aarhus.dk" }]
+dependencies = ["numpy>=1.26"]
+
+# Qt lives behind an extra so the "every module outside gui/ imports without Qt"
+# invariant is enforceable: CI installs .[dev] only and imports the headless packages.
+# M1 (parser, verifier, CLI) is fully usable without this extra.
+[project.optional-dependencies]
+gui = ["PySide6>=6.6", "pyqtgraph>=0.13.3", "PyOpenGL>=3.1.7"]
+dev = ["pytest>=8.0", "hypothesis>=6.100", "ruff>=0.6", "pyinstaller>=6.0"]
+
+[project.scripts]
+# Target lands in T1.11; the entry point is declared now so the console script
+# is wired from the first install. Not importable until then.
+foursight = "foursight.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# Ruff formats Python code blocks embedded in Markdown. PLAN.md's snippets use aligned
+# comment columns deliberately, and `ruff format .` would rewrite the design document —
+# so Markdown is excluded. Docs are not code here.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+# "S" must be selected for the tests/* S101 ignore below to mean anything.
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "NPY", "S"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]                       # assert is the point
+"scripts/*" = ["S603", "S607"]             # build.py shells out to PyInstaller
+"src/foursight/machine/kinematics.py" = ["N806"]  # R for a rotation matrix is correct

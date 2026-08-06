@@ -30,9 +30,9 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 |---|---|---|
 | Language | Python 3.11+ | |
 | Environment | `venv` (`.venv/` at repo root) | **Always.** Never install into or run against system Python |
-| GUI shell | PySide6 (Qt) | Native look on both OSes |
-| 3D rendering | pyqtgraph GLViewWidget (OpenGL) | Batch into ≤ 10 `GLLinePlotItem`s; see Rendering Constraints |
-| OpenGL binding | PyOpenGL | Hard requirement of `pyqtgraph.opengl`, not optional |
+| GUI shell | PySide6 (Qt) | Behind the `[gui]` extra — see below |
+| 3D rendering | pyqtgraph GLViewWidget (OpenGL) | Behind `[gui]`. Batch into ≤ 10 `GLLinePlotItem`s; see Rendering Constraints |
+| OpenGL binding | PyOpenGL | Behind `[gui]`. Hard requirement of `pyqtgraph.opengl`, not optional |
 | Code editor pane | QPlainTextEdit + custom highlighter | Line sync with 3D view |
 | Parsing | Custom tokenizer/parser | Do NOT depend on pygcode; write our own for modal-state control |
 | Math | numpy | Arc interpolation, rotary transforms |
@@ -42,6 +42,13 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 | Packaging | PyInstaller (**one-dir**) | One-file re-extracts ~200 MB per launch and trips Windows AV heuristics |
 | CI | GitHub Actions, Ubuntu + Windows matrix | From M0; the cross-platform claim is only as good as the matrix |
 
+**Dependency extras.** Runtime deps are `numpy` only. The three Qt/GL packages live behind a
+`[gui]` extra, and `[dev]` carries `pytest`, `hypothesis`, `ruff`, `pyinstaller`. This is what makes
+"every module outside `gui/` imports without Qt" an *enforced* invariant rather than an intention:
+CI runs a job that installs `.[dev]` alone and imports every headless package. M1 (parser, verifier,
+`foursight check`) is fully usable without the extra. Full dev install is
+`pip install -e ".[dev,gui]"`.
+
 ## Repository Layout
 
 ```
@@ -50,6 +57,7 @@ FourSight/
 ├── pyproject.toml
 ├── src/foursight/
 │   ├── __init__.py
+│   ├── cli.py               # headless CLI: `foursight parse` / `foursight check`; no Qt
 │   ├── parser/
 │   │   ├── tokenizer.py     # line → words (letter+number), comments, block-delete
 │   │   ├── resolver.py      # words → Command objects, modal group resolution
@@ -436,8 +444,10 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 
 - **Everything Python runs inside the project venv at `.venv/`.** Never invoke bare `python`, `pip`, `pytest`, or `ruff` — they may resolve to system Python. Either activate first, or call the venv binaries directly (`.venv/bin/python`, `.venv/bin/pytest`; `.venv\Scripts\` on Windows). If `.venv/` is missing, create it before running anything:
 
+  Bootstrap with an **explicit 3.11+ interpreter** — bare `python3` is not guaranteed to be one (on the current dev machine it is 3.10). See CLAUDE.md for the interpreter path in use.
+
   ```bash
-  python3 -m venv .venv
+  <python3.11+> -m venv .venv
   .venv/bin/pip install -e ".[dev]"
   ```
 
@@ -459,6 +469,9 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Ruff formats Python code blocks embedded in Markdown. This file's snippets use aligned
+# comment columns deliberately, and `ruff format .` rewrites them — so Markdown is excluded.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 # "S" must be selected for the tests/* S101 ignore below to mean anything.

@@ -6,18 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The repository is **plan-only**. `PLAN.md` is the single source of truth: it defines the target architecture, tech stack, G-code subset, verifier rules, and milestones. No `src/`, `tests/`, `pyproject.toml`, or `profiles/` exist yet — they are created as milestones M0–M5 are implemented.
 
-Read `PLAN.md` before starting any task. When a change alters the design (new dependency, new module, changed data model), update `PLAN.md` in the same change.
+`TASKS.md` is the execution layer: ordered tasks with blockers and done-criteria, derived from `PLAN.md`'s milestones. **PLAN.md owns the design; TASKS.md owns the order of work.** If the two disagree, PLAN.md wins and the task is wrong. Its `Open decisions` section lists the questions that block later milestones — the M0 spikes exist to answer them.
+
+Read `PLAN.md` before starting any task, then pick up work from `TASKS.md` in ID order. When a change alters the design (new dependency, new module, changed data model), update `PLAN.md` in the same change, and tick the task in `TASKS.md`.
 
 ## Commands
 
 **All Python runs inside the project venv at `.venv/`.** Never invoke bare `python`, `pip`, `pytest`, or `ruff` — they may resolve to system Python. Call the venv binaries directly (shown below), or activate first with `source .venv/bin/activate`. On Windows the binaries live in `.venv\Scripts\`.
 
-If `.venv/` does not exist, create it before doing anything else:
+The venv runs **CPython 3.12.10**. `PLAN.md` requires 3.11+ (`tomllib` is stdlib only from 3.11), and bare `python3` on this machine is **3.10** — so never bootstrap with plain `python3`. The system's `/usr/bin/python3.11` is `3.11.0rc1`, a release candidate, and is also not suitable.
+
+If `.venv/` does not exist, create it before doing anything else, using an explicit 3.11+ interpreter. A uv-managed CPython 3.12.10 is already cached locally at `~/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/bin/python3.12`:
 
 ```bash
-python3 -m venv .venv
+~/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/bin/python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
+
+Verify with `.venv/bin/python --version` before proceeding; if it reports 3.10, delete `.venv/` and start again.
 
 These are the commands `PLAN.md` mandates; they become runnable once `pyproject.toml` and the package exist.
 
