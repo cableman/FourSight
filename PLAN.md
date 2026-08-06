@@ -417,6 +417,31 @@ An unrecognized code that never touches position stays a warning. An unrecognize
   `format_angle` deliberately takes **no** units argument, because rotary values are degrees in
   every unit mode and a parameter there could only be misused.
 
+### Structural checks (T1.7)
+
+`verify/checks/structural.py`. Five rules: `structural.syntax-error`, `.modal-group-conflict`,
+`.unsupported-oword`, `.unknown-code`, `.unsupported-motion`.
+
+- **`ParseError` carries a `kind`** (`ParseErrorKind`), set by whichever layer produced it. Without
+  it the verifier would have to pattern-match message *text* to tell a malformed word from a
+  modal-group conflict, so any wording change would silently re-route a diagnostic to the wrong
+  rule and severity. `ParseError` also carries `line`, since a `Diagnostic` is reported by line.
+- **Unsupported constructs are reported per *span*, not per block.** A twenty-hole canned cycle is
+  one thing the user needs to know about. Span boundaries come from the resolver's existing
+  `Command.motion` and `ModalState.cutter_comp` rather than being re-derived, so a bare `X10 Y10`
+  inside a cycle is already known to belong to it. An uncancelled span runs to end of program and
+  says so.
+- **Three code tables, and no code may appear in two of them:** `INTERPRETED_GCODES` (silent),
+  the unsupported sets (`CANNED_CYCLES`, `CUTTER_COMP`, `UNSUPPORTED_ONE_SHOT`), and everything
+  else, which warns. The *cancel* codes G40 and G80 are interpreted; their activations are not.
+- **G61/G61.1/G64 and G98/G99 are accepted silently.** They change cornering or canned-cycle return,
+  not the programmed centreline we draw, so there is nothing about the toolpath to warn on — and
+  G64 appears in nearly every LinuxCNC program, so warning would be pure noise.
+- **`G10` and `G92`/`G92.x` are `unsupported`, not warnings.** They shift the coordinate system or
+  tool table, which changes where subsequent motion actually goes.
+- **An unknown code is reported once per code, not once per line**, so a 100k-line file with a stray
+  `G12` on every line yields one warning rather than 100k.
+
 ### Unsupported motion codes (v1)
 
 These are common enough that silently mis-drawing them is the most likely way FourSight produces a wrong picture:

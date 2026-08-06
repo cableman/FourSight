@@ -18,7 +18,7 @@ case-insensitivity, and words with no separating whitespace (``X1.0Y2.0``).
 
 import re
 
-from foursight.parser.model import ParseError, SourceRef, TokenizedLine, Word
+from foursight.parser.model import ParseError, ParseErrorKind, SourceRef, TokenizedLine, Word
 
 # A single alternation over the comment-free line, tried in order:
 #
@@ -121,7 +121,14 @@ def _strip_comments(line: TokenizedLine, ref: SourceRef, content: str) -> str:
             if text.endswith(")"):
                 _append(line, "comments", text[1:-1])
             else:
-                _add_error(line, ref, match.start(), text, "unterminated comment: missing ')'")
+                _add_error(
+                    line,
+                    ref,
+                    match.start(),
+                    text,
+                    "unterminated comment: missing ')'",
+                    ParseErrorKind.UNTERMINATED_COMMENT,
+                )
                 _append(line, "comments", text[1:])
         else:
             _append(line, "comments", text[1:].strip())
@@ -144,6 +151,7 @@ def _is_oword_flow_control(line: TokenizedLine, ref: SourceRef, code: str) -> bo
         match.start(),
         match.group().strip(),
         f"LinuxCNC O-word '{keyword}' flow control is not interpreted in v1",
+        ParseErrorKind.UNSUPPORTED_OWORD,
     )
     return True
 
@@ -209,8 +217,19 @@ def _flush_bad(line: TokenizedLine, ref: SourceRef, pending: list[re.Match[str]]
     pending.clear()
 
 
-def _add_error(line: TokenizedLine, ref: SourceRef, at: int, text: str, message: str) -> None:
-    _append(line, "errors", ParseError(offset=ref.start + at, text=text, message=message))
+def _add_error(
+    line: TokenizedLine,
+    ref: SourceRef,
+    at: int,
+    text: str,
+    message: str,
+    kind: ParseErrorKind = ParseErrorKind.MALFORMED_WORD,
+) -> None:
+    _append(
+        line,
+        "errors",
+        ParseError(line=ref.line_no, offset=ref.start + at, text=text, message=message, kind=kind),
+    )
 
 
 def _append(line: TokenizedLine, attribute: str, item: object) -> None:

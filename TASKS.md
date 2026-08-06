@@ -439,18 +439,39 @@ taxonomy gets teeth.
 
       Blocked by: T1.3, T1.5
 
-- [ ] **T1.7 — Structural checks** — `verify/checks/structural.py`
-      E: syntax/malformed word. E: two codes from one modal group in a block.
-      W: unknown/unsupported **inert** G/M code. U: unsupported **motion-affecting** code —
-      G40/G41/G42 cutter comp, G80–G89 canned cycles.
-      The taxonomy line is the deliverable: an unrecognized code that never touches position is a
-      warning; one that changes how subsequent motion is interpreted is `unsupported`, never a
-      warning. Canned cycles emit **one diagnostic per cycle span** (open at G8x, close at G80),
-      not one per block.
-      **DoD:** fixtures for each; a test asserting a canned-cycle span produces exactly one
-      `unsupported`, and that a block of bare `X10 Y10` under G81 is *not* classified as a
-      linear move.
+- [x] **T1.7 — Structural checks** — `verify/checks/structural.py` — *done*
+      Five rules: `structural.syntax-error`, `.modal-group-conflict`, `.unsupported-oword`,
+      `.unknown-code`, `.unsupported-motion`. Recorded in PLAN.md § Structural checks.
+      **DoD met:** 38 tests in `tests/test_checks_structural.py`; 393 across the suite. The corpus's
+      pending skips dropped **20 → 15**, so five declared mutations now assert for real
+      (`malformed_word`, `modal_group_conflict`, `unknown_inert_code`, `canned_cycle`,
+      `cutter_compensation`), and the clean baseline still reports **zero** diagnostics.
+      **A design change to avoid brittleness:** `ParseError` gained a **`kind`**
+      (`ParseErrorKind`), set by whichever layer produced it, plus `line`. Otherwise the verifier
+      would have had to pattern-match message *text* to tell a malformed word from a modal-group
+      conflict — so any wording change would silently re-route a diagnostic to the wrong rule and
+      severity.
+      **Spans, not blocks.** A canned cycle or comp region yields **one** diagnostic covering its
+      extent — a twenty-hole cycle produced one, not twenty. Boundaries come from the resolver's
+      existing `Command.motion` / `ModalState.cutter_comp`, so a bare `X10 Y10` inside a cycle is
+      already known to belong to it. That is T1.3's carry-over paying off. An uncancelled span runs
+      to program end and says so.
+      **Judgment calls, all in PLAN.md:** G61/G61.1/G64 and G98/G99 are silent (they change
+      cornering or canned-cycle return, not the centreline, and G64 is in nearly every LinuxCNC
+      program — warning would be pure noise); `G10` and `G92`/`G92.x` are `unsupported` rather than
+      warnings, since they move the coordinate system; cancel codes G40/G80 are interpreted while
+      their activations are not; an unknown code reports once per code, not once per line.
+      **Mutation-verified — and one mutation exposed a real test gap.** Downgrading a canned cycle
+      from `unsupported` to `warning` failed 2 tests; marking cycles interpreted failed 2; making
+      spans per-block failed 10. But **merging the syntax and modal-conflict kinds failed nothing**:
+      the test asserting "a modal conflict is not a syntax error" used input with no syntax error, so
+      the negative held trivially. Added the missing direction plus a test that no parse error
+      surfaces under two rule ids; both now catch it.
       Blocked by: T1.6
+      Files: `src/foursight/verify/checks/structural.py`,
+      `src/foursight/verify/checks/__init__.py`, `src/foursight/parser/model.py`,
+      `src/foursight/parser/tokenizer.py`, `src/foursight/parser/resolver.py`,
+      `tests/test_checks_structural.py`, `PLAN.md`
 
 - [ ] **T1.8 — Process checks** — `verify/checks/process.py`
       All of PLAN.md's Process list: E for cutting move with no feed ever set; G93 active with no

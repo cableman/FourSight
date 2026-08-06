@@ -9,6 +9,7 @@ the dependency order and imports nothing from the rest of the package.
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 # PLAN.md § Supported G-code Subset: "Words: X Y Z A I J K R F S T P H D L Q".
 # G and M are deliberately absent: a block carries several of each, so they live in
@@ -69,21 +70,44 @@ class Word:
     value: float
 
 
+class ParseErrorKind(StrEnum):
+    """What sort of problem a ``ParseError`` describes.
+
+    The producer classifies; the verifier maps kind → rule id and severity. Without this the
+    verifier would have to pattern-match ``message`` text to tell a malformed word from a
+    modal-group conflict, so every wording change would silently re-route a diagnostic.
+
+    ``UNSUPPORTED_OWORD`` is the one that is not an error at all: O-word flow control is
+    well-formed and *affects which motion runs*, so it becomes ``unsupported``, never a warning.
+    """
+
+    MALFORMED_WORD = "malformed-word"
+    UNTERMINATED_COMMENT = "unterminated-comment"
+    UNSUPPORTED_OWORD = "unsupported-oword"
+    MODAL_GROUP_CONFLICT = "modal-group-conflict"
+    DUPLICATE_WORD = "duplicate-word"
+
+
 @dataclass(slots=True, frozen=True)
 class ParseError:
-    """A malformed piece of a line.
+    """A problem found while tokenizing or resolving one line.
 
-    The tokenizer reports these rather than raising: one bad word must not cost us the rest of the
-    file, and the whole point of the verifier is to list every problem at once.
+    Reported rather than raised: one bad word must not cost us the rest of the file, and the whole
+    point of the verifier is to list every problem at once.
 
     Deliberately *not* a ``verify.Diagnostic``. The dependency direction is
     parser → machine → sim → verify, so the parse layer cannot name a verify type; the verifier
     converts these into diagnostics with a severity attached (T1.7).
+
+    ``line`` is carried alongside ``offset`` because a ``Diagnostic`` is reported by line, and
+    recovering one from the other would mean re-scanning the source.
     """
 
+    line: int  # 1-based source line
     offset: int  # absolute offset into the source text
     text: str  # the offending characters, as written
     message: str
+    kind: ParseErrorKind
 
 
 @dataclass(slots=True)

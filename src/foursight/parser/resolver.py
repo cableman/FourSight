@@ -24,6 +24,7 @@ from foursight.parser.model import (
     Command,
     ModalState,
     ParseError,
+    ParseErrorKind,
     SourceRef,
     TokenizedLine,
     Word,
@@ -193,12 +194,14 @@ def _check_group_conflicts(
         if group in seen:
             result.errors.append(
                 ParseError(
+                    line=ref.line_no,
                     offset=ref.start,
                     text=f"{letter}{seen[group]} {letter}{code}",
                     message=(
                         f"{letter}{seen[group]} and {letter}{code} are both in modal group "
                         f"'{group}'; only one can be active"
                     ),
+                    kind=ParseErrorKind.MODAL_GROUP_CONFLICT,
                 )
             )
             continue
@@ -270,4 +273,12 @@ def _resolve_motion(gcodes: list[str], motion: str | None) -> str | None:
 
 
 def _error(result: ParseResult, ref: SourceRef, word: Word, message: str) -> None:
-    result.errors.append(ParseError(offset=ref.start, text=word.letter, message=message))
+    result.errors.append(
+        ParseError(
+            line=ref.line_no,
+            offset=ref.start,
+            text=word.letter,
+            message=message,
+            kind=ParseErrorKind.DUPLICATE_WORD,
+        )
+    )

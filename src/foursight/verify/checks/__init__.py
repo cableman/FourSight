@@ -11,3 +11,4 @@ imported` in `tests/test_verify.py` compares this against the files on disk.
 """
 
 # ruff: noqa: F401 — imported for the registration side effect, not for use here.
+from foursight.verify.checks import structural
