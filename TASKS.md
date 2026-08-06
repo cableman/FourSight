@@ -814,14 +814,32 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Files: `src/foursight/sim/interpolate.py`, `src/foursight/verify/checks/geometry.py`,
       `tests/test_arcs.py`, `tests/test_checks_geometry.py`, `PLAN.md`
 
-- [ ] **T2.4 — `sim/timing.py`**
-      Per-segment duration. Linear and rotary travel measured **separately** and combined as
-      `max(linear_time, rotary_time)`. **Never** `np.linalg.norm` across linear (mm) and rotary
-      (deg) components — that is the exact expression the columnar split exists to prevent.
-      Honour G93 inverse-time / G94 units-per-min / G95 units-per-rev, and per-axis `max_rapid`.
-      **DoD:** unit tests per feed mode; a test asserting a pure-A move gets a duration from the
-      rotary rate alone, and a mixed move takes the max, not the norm.
+- [x] **T2.4 — `sim/timing.py`** — *done*
+      Per-segment durations combining linear and rotary as `max(linear_time, rotary_time)`, all four
+      feed modes, per-axis rapid rates. Recorded in PLAN.md § Timing.
+      **DoD met:** 27 tests in `tests/test_timing.py`; **674 across the suite**. Both DoD cases are
+      asserted with numbers chosen so the wrong answers are far apart: a pure-A move is timed from the
+      rotary rate alone (3 s), and a mixed move takes the max (60 s) where a norm gives 360.1 s.
+      **Two real bugs found by my own expected values, both instances of the mm/degrees conflation:**
+      1. **`F` treated as the rotary rate on a *mixed* move.** On a rotary-only move F is degrees/min,
+         but on a mixed move F governs the linear path and A is bounded only by its own `max_rapid`.
+         The bug made 100 mm + 3600° at F600 take **360 s instead of 60 s** — and 360 s is close
+         enough to the norm's 360.1 s that it would have read as a norm bug rather than a rate bug.
+         The test now uses values that separate all three possible answers.
+      2. **`limits.max_feed` (documented mm/min) was clamping a degrees-per-minute rate.** F9000 on a
+         rotary-only move came out at 3000 deg/min, taking 72 s instead of 60 s. The linear and rotary
+         clamps now apply to the unclamped F independently. Worth noting the invariant can be violated
+         in the *limits*, not only in the geometry.
+      **G93 is a block time, not a rate** — shared along the path by length, so the speed stays
+      constant; an even split would make the tool appear to slow through a finely tessellated arc.
+      **Unknown rates are 0.0 and counted**, never invented, so a timeline can say how much of itself
+      is missing. A stationary segment is distinguished from an undeterminable one.
+      **Mutation-verified, all eight caught:** the forbidden norm (3 tests), `min` instead of `max`
+      (14), ignoring rotary entirely (7), G93 as a rate (3), G93 split evenly (1), a vector rapid rate
+      instead of per-axis (1), re-applying `max_feed` to the rotary rate (1), and inventing 1000 for
+      an unknown rate (3).
       Blocked by: T2.3
+      Files: `src/foursight/sim/timing.py`, `tests/test_timing.py`, `PLAN.md`
 
 - [ ] **T2.5 — `sim/simulator.py`**
       Steps `Command`s → `SegmentStore`. Suppresses geometry across `unsupported` spans (canned

@@ -268,6 +268,35 @@ class SegmentStore:
 
 **`kind` is motion type only.** The earlier `'rapid' | 'feed' | 'arc'` conflated motion type with geometry: an arc is always a cutting move, and after interpolation everything is a line segment anyway. Rendering groups by rapid vs feed. If the originating motion code is needed, it is recoverable via `line[i]`.
 
+### Timing (T2.4)
+
+`sim/timing.py`. `rates_for(command, profile, rapid=…)` resolves the rates in force for a block;
+`block_durations(lin, rot, rates, profile, rapid=…)` returns one duration per segment plus a count of
+those it could not determine.
+
+- **`max(linear_time, rotary_time)`, never a norm.** Also the physically correct answer: the axes
+  move together, so the move takes as long as its slowest participant. The `np.linalg.norm` in this
+  module spans X, Y and Z only.
+- **`F` means different things depending on the block**, and this is the subtle one. On a
+  *rotary-only* move F is degrees/min. On a *mixed* XYZ+A move F governs the linear path and A merely
+  keeps up, bounded only by its own `max_rapid`. Collapsing the two makes 100 mm + 3600° at F600 take
+  360 s instead of 60 s — and 360 s is close enough to the 360.1 s a mm/degree norm gives that the
+  error looks like a different bug entirely.
+- **`limits.max_feed` is in mm/min and must never bound a degrees-per-minute rate.** The linear and
+  rotary clamps are applied to the unclamped F independently; sharing them makes F9000 on a
+  rotary-only move come out as 3000 deg/min. The mm/degrees conflation can appear in the *limits*,
+  not just the geometry.
+- **Rapids ignore F** and use per-axis `max_rapid`: a coordinated rapid takes as long as its slowest
+  axis, which is why per-axis rates matter rather than one vector rate.
+- **G93 is a block time, not a rate.** The block takes `1/F` minutes whatever the distance, shared
+  along the path *by length* so the speed stays constant — an even per-segment split would make the
+  tool appear to slow down through a finely tessellated arc.
+- **G95 without a spindle speed is unknown, not guessed.** Unknown durations are `0.0` **and
+  counted**, so a timeline can report how much of itself is missing rather than silently pretending
+  such moves are instantaneous.
+- **Feed is clamped to `max_feed`** because the control would clamp; using the programmed value would
+  under-report the time for a program the verifier is already flagging.
+
 ### MachineState (T2.2)
 
 `machine/state.py` gains `MachineState`, which steps a command list and returns a `Step` per block:
