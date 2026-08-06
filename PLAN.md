@@ -193,6 +193,33 @@ class TokenizedLine:
 - **LinuxCNC O-word flow control** (`O100 sub`, `o<name> while`, …) is detected and reported as a single unsupported construct. Without that, the letters of `sub` surfaced as three bogus "address has no value" errors, which would have hidden a construct that decides *which motion runs* — `unsupported`, never a warning.
 - **Measured: 159k lines/sec (6.27 µs/line)** on the baseline machine for a realistic mix, or 31% of the 20 µs/line budget, leaving ~13.7 µs for the resolver.
 
+### Loader layer (T1.4)
+
+`load(path)` / `load_text(bytes)` → `LoadedFile(text, encoding, had_bom, newline, path)`. Decoding
+is split from I/O so the encoding rules are testable without a filesystem. Hardened for large files
+in T5.4.
+
+Everything here exists to make **offsets trustworthy**, since every `SourceRef` indexes into this
+text and editor sync, diagnostics and fixes all anchor on it:
+
+- **Offsets are character offsets into the decoded, BOM-free text** — not byte offsets into the
+  file. For a UTF-16 file the two differ, and the editor holds the decoded text, so decoded wins.
+- **The BOM is stripped.** Left in place, line 1 would begin with an invisible `﻿` that the
+  tokenizer would correctly report as garbage.
+- **Line endings are preserved, never normalized.** Rewriting CRLF to LF would shift every offset
+  after line 1 relative to the text handed to the editor. LF, CRLF and lone CR all work.
+- **Encoding order:** UTF-8 BOM, UTF-16 LE/BE BOM, then UTF-8 strict, then latin-1. latin-1 maps
+  every byte so it cannot fail — `LoadedFile.used_fallback` flags it, because silently claiming
+  success on a mis-decoded file is worse than saying so.
+- **Binary input raises `FileLoadError`** rather than latin-1 decoding megabytes of garbage into
+  thousands of meaningless diagnostics. The NUL-byte check runs on the *decoded* text, since
+  legitimate UTF-16 is full of NUL bytes.
+- **`line_starts(text)` is a function, not a `LoadedFile` field.** The tokenizer already tracks
+  offsets as it goes, so materializing ~100k ints on every load would cost several MB for nothing;
+  fixes and jump-to-line can ask when they need it. It is built from
+  `splitlines(keepends=True)` — the same primitive the tokenizer walks — so the two agree **by
+  construction** rather than by two implementations happening to match.
+
 ### Resolver layer (T1.3)
 
 `resolve(lines)` → `ParseResult(commands, errors)`; `parse(text)` tokenizes and resolves in one

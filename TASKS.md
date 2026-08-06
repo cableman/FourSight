@@ -342,12 +342,33 @@ taxonomy gets teeth.
       Files: `src/foursight/parser/resolver.py`, `src/foursight/parser/model.py`,
       `tests/test_parser.py`, `PLAN.md`
 
-- [ ] **T1.4 — `fileio/loader.py` (minimum viable)**
-      Read a file to text + line offsets. Encoding detection with latin-1 fallback, BOM, CRLF.
-      Hardening is M5 (T5.4); M1 needs correct offsets so `SourceRef` is trustworthy.
-      **DoD:** tests for UTF-8, UTF-8-BOM, latin-1, CRLF, and a file with no trailing newline —
-      each yielding correct 1-based line numbers and offsets.
+- [x] **T1.4 — `fileio/loader.py` (minimum viable)** — *done*
+      `load(path)` / `load_text(bytes)` → `LoadedFile(text, encoding, had_bom, newline, path)`,
+      with decoding split from I/O so the encoding rules are testable without a filesystem.
+      Recorded in PLAN.md § Loader layer.
+      **DoD met:** 38 tests in `tests/test_loader.py`; 180 across the suite. Every DoD case —
+      UTF-8, UTF-8 BOM, latin-1, CRLF, no trailing newline — is asserted **end to end through the
+      tokenizer**: each `SourceRef` must slice its own line back out of the loaded text. Line
+      numbers alone would not catch a BOM shifting everything by one.
+      **A real bug found by checking a claim the module already made.** `detect_newline` handles
+      lone `\r`, but `line_starts` only scanned for `\n` — so a classic-Mac file reported **one**
+      line where the tokenizer saw **three**, at offsets `[0]` vs `[0, 4, 10]`. Two offset
+      computations that must agree, disagreeing. The root cause was having two independent
+      implementations of the same thing, so the fix removes the class of bug rather than the
+      instance: `line_starts` now derives from `splitlines(keepends=True)`, the same primitive the
+      tokenizer walks, making agreement hold **by construction**. Regression test covers LF, CRLF,
+      lone CR, mixed, no-trailing-newline, empty and blank-only.
+      **Mutation-verified:** leaving the BOM in, normalizing CRLF→LF, and dropping the binary check
+      each fail tests (4, 2 and 1 respectively). File restored byte-identical.
+      **Two decisions worth knowing:** offsets are *character* offsets into the decoded BOM-free
+      text, not byte offsets into the file (they differ for UTF-16, and the editor holds decoded
+      text); and binary input raises `FileLoadError` rather than latin-1 decoding an STL into
+      thousands of meaningless diagnostics — the NUL check runs on decoded text because real UTF-16
+      is full of NUL bytes.
+      **Deliberately deferred to T5.4:** any size limit or streaming. A whole file is read into
+      memory, which is fine at ~3 MB for 100k lines but not for a pathological input.
       Blocked by: T1.1
+      Files: `src/foursight/fileio/loader.py`, `tests/test_loader.py`, `PLAN.md`
 
 - [ ] **T1.5 — `machine/profile.py`** *(moved into M1: the verifier cannot run without it)*
       `MachineProfile` from TOML via `tomllib`, matching PLAN.md § *Machine Profile* exactly:
