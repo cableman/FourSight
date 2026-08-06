@@ -141,8 +141,19 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       pre-mutation state via `cmp`.
       Blocked by: T0.3
 
-- [~] **T0.6 — GitHub Actions matrix (Ubuntu + Windows)** — *written and locally simulated;
-      **DoD blocked on infrastructure***
+- [x] **T0.6 — GitHub Actions matrix (Ubuntu + Windows)** — *done; all 6 jobs green on
+      `origin/main`*
+      **DoD met (run 31112042171, and again on the T1.1 push):** `lint` ✓, `headless` ✓, and all
+      four matrix legs ✓ — `ubuntu×3.11`, `ubuntu×3.12`, `windows×3.11`, `windows×3.12`, 28 tests
+      each. The two things I could not check locally both hold: **Windows works**, so the
+      cross-platform claim now has evidence rather than intent; and **3.11 works**, so
+      `requires-python = ">=3.11"` and `target-version = "py311"` are validated rather than
+      asserted (local dev is 3.12.10 only).
+      The `headless` job behaves exactly as simulated: prints `Qt/GL absent, as required`, then
+      **21 passed / 7 skipped**, then `foursight.cli imports clean without Qt`. The Qt-free
+      invariant is now genuinely enforced by infrastructure, not just by a local test.
+      **Follow-up applied:** runs annotated a Node 20 deprecation for `actions/checkout@v4` and
+      `actions/setup-python@v5` (forced onto Node 24). Both bumped to `@v7`, the current major.
       `.github/workflows/ci.yml`, 6 jobs. Restructured slightly from the original single-job plan:
       **`lint`** (ubuntu/3.12: `ruff check --output-format=github`, `ruff format --check`, plus
       `scripts/build.py --dry-run`, since build.py has no unit tests); **`test`** (4 legs —
@@ -168,14 +179,6 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       imports Qt-free. Mutation-tested: `import pyqtgraph` added to `verify/report.py` fails that
       job on **two** independent checks while the full matrix would have stayed green — which is
       precisely the gap this job closes. File restored byte-identical.
-      **DoD NOT met — needs infrastructure I do not have:** no git remote is configured and the
-      `gh` token is invalid, so nothing has been pushed and **no leg has actually run**. Entirely
-      unverified: both **Windows** legs and both **3.11** legs (local dev is Linux/3.12.10 only,
-      so `requires-python = ">=3.11"` and `target-version = "py311"` are so far assertions, not
-      results), Actions cache behaviour, and the apt step. Shell syntax was checked by hand — the
-      three heredoc steps are all in Linux-only jobs, and the Windows legs run only
-      shell-agnostic `python -m ...` commands.
-      **To finish:** add a remote, `gh auth login`, push, then confirm all 6 jobs green and tick.
       Blocked by: T0.5
       Files: `.github/workflows/ci.yml`, `tests/test_smoke.py`
 
@@ -233,9 +236,13 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       Blocked by: a clean Windows VM
       Files: `spikes/gl_window.py`, `PLAN.md`
 
-- [ ] **T0.9 — Milestone gate**
+- [ ] **T0.9 — Milestone gate** — *one item left: T0.8 on Windows*
       **DoD:** both spikes have a *measured* answer in `PLAN.md`; CI green; D1–D3 and D5 resolved.
-      Blocked by: T0.6, T0.7, T0.8
+      Status: CI green on `origin/main` (6/6 jobs) ✓ · render spike measured and recorded ✓ ·
+      D1 ✓ D3 ✓ D5 ✓ · packaging spike measured **on Linux only**, D2 half-open.
+      **Remaining: run `dist/gl-spike/gl-spike.exe` on a clean Windows VM** (T0.8), record the
+      result in `PLAN.md`, tick D2. Nothing else blocks the gate.
+      Blocked by: T0.8
 
 ---
 
