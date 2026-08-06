@@ -69,16 +69,18 @@ def test_g18_uses_i_and_k_not_j() -> None:
     """G18's IJK mapping is I,K. Reading J here would silently produce a different arc."""
     commands = parse("G21 G18\nG1 X50 Z0 F100\nG2 X40 Z-10 I0 K-10\n").commands
     arc = arc_geometry(commands[-1], Position(x=50.0, z=0.0))
-    assert arc.axes == ("X", "Z")
-    assert arc.centre == (50.0, -10.0)
+    # The frame order is the canonical one from sim.interpolate.PLANES — (Z, X) for G18, because
+    # Z x X = +Y makes it right-handed. Asserting axis-to-value avoids depending on that order here.
+    assert set(arc.axes) == {"X", "Z"}
+    assert dict(zip(arc.axes, arc.centre, strict=True)) == {"X": 50.0, "Z": -10.0}
     assert arc.radius_start == pytest.approx(10.0)
 
 
 def test_g19_uses_j_and_k() -> None:
     commands = parse("G21 G19\nG1 Y50 Z0 F100\nG3 Y40 Z-10 J0 K-10\n").commands
     arc = arc_geometry(commands[-1], Position(y=50.0, z=0.0))
-    assert arc.axes == ("Y", "Z")
-    assert arc.centre == (50.0, -10.0)
+    assert set(arc.axes) == {"Y", "Z"}
+    assert dict(zip(arc.axes, arc.centre, strict=True)) == {"Y": 50.0, "Z": -10.0}
 
 
 def test_a_helical_arc_is_measured_in_plane_only() -> None:

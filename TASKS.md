@@ -776,19 +776,43 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Files: `src/foursight/machine/state.py`, `src/foursight/machine/profile.py`,
       `src/foursight/profiles/default_4axis.toml`, `tests/test_machine_state.py`, `PLAN.md`
 
-- [ ] **T2.3 — `sim/interpolate.py`: lines and arcs**
-      G0/G1 lines. G2/G3 in **both IJK and R** form. R sign convention: positive selects ≤ 180°,
-      negative selects > 180°. Full circles are IJK-only (start == end); R-format with coincident
-      endpoints is an **error**, not a guess. Plane-dependent IJK mapping G17→I,J / G18→I,K /
-      G19→J,K, with G18's counterintuitive direction convention covered by its own fixture.
-      Helical: plane-normal axis interpolates linearly across the sweep; an A-word may move
-      simultaneously. **Adaptive chord-height tessellation** from `tolerance.arc_chord` —
-      never a fixed step count. Interpolation is **per-step from the start**, not endpoint-only,
-      so M4 is a transform and not a rewrite.
-      **DoD:** `tests/test_arcs.py` with hypothesis properties — interpolated points equidistant
-      from center within 1e-6, chord deviation never exceeds `tolerance.arc_chord`, R↔IJK
-      round-trips where expressible; plus the G18-direction fixture.
+- [x] **T2.3 — `sim/interpolate.py`: lines and arcs** — *done*
+      G0/G1 lines, G2/G3 in IJK and R form, helical, adaptive chord tessellation, per-step rotary.
+      Recorded in PLAN.md § Arc Semantics.
+      **DoD met:** 32 tests in `tests/test_arcs.py`; **646 across the suite**. All three hypothesis
+      properties PLAN names are asserted over generated inputs — points equidistant from the centre
+      within 1e-6, chord sagitta never exceeding `arc_chord`, and R↔IJK agreement where both are
+      expressible (minor arcs, deliberately excluding the full circle R cannot express).
+      **The G18 trap is resolved by construction, not by convention.** "G2 decreases the angle" only
+      holds in a *right-handed* frame, and `X × Z = -Y` — so G18's frame is **(Z, X)** with first
+      offset **K**. An (X, Z) frame is left-handed and silently reverses G2/G3. A test asserts
+      right-handedness for all three planes, which is the property rather than the instance.
+      **Removed a duplicated direction-sensitive table:** `verify/checks/geometry.py` now derives its
+      axis pair from `interpolate.PLANES` instead of keeping its own copy. Its checks only measure
+      distances, where order is irrelevant, so borrowing costs nothing and removes the drift hazard.
+      **R-format centre selection checks itself against the definition** rather than applying a
+      hand-derived sign rule: both candidate centres are computed and the one whose sweep matches the
+      R sign is chosen. Verified R=+15 gives the minor arc and R=-15 the major.
+      **Rotary step sizing implemented here rather than deferred to T4.3**, using
+      `tolerance.rotary_chord` at the path's distance from the centerline. PLAN shapes M2 around the
+      4-axis model precisely so M4 is a transform and not a rewrite, and endpoint-only interpolation
+      of a rotary move would draw a wrapped path as a chord. **T4.3 is therefore reduced to the
+      transform itself.**
+      **Mutation-verified, 7 mutations, and two needed better tests:**
+      • The G18 (X,Z) frame fails 4 tests; a fixed step count fails 4; inverted R sign fails 3; a
+      flat helix fails 1; a zero full-circle sweep fails 1; disabled rotary subdivision fails 2.
+      • **Removing endpoint snapping failed nothing at first.** On a mathematically consistent arc
+      the trigonometry reproduces the endpoint bit-exactly, so the test could not discriminate.
+      Re-pointed at the case that actually matters — an endpoint rounded off its own circle, as CAM
+      emits — plus a test that consecutive arcs leave no gap. Both now catch it.
+      **One flaky failure observed and diagnosed:** a full-suite run under heavy load failed once and
+      did not reproduce. Sampling five runs showed the parse rate swinging 92.6k–109.2k (18%) while
+      the linearity ratio held at 1.24–1.31, so the parse-rate floor is the fragile assertion — which
+      corroborates the 14% Windows CI margin already recorded. Not loosened: it is PLAN's
+      requirement, and `FOURSIGHT_PERF_MIN_RATE` exists for a runner that cannot meet it.
       Blocked by: T2.2
+      Files: `src/foursight/sim/interpolate.py`, `src/foursight/verify/checks/geometry.py`,
+      `tests/test_arcs.py`, `tests/test_checks_geometry.py`, `PLAN.md`
 
 - [ ] **T2.4 — `sim/timing.py`**
       Per-segment duration. Linear and rotary travel measured **separately** and combined as

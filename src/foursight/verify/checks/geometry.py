@@ -22,17 +22,19 @@ from dataclasses import dataclass
 from foursight.machine.profile import AxisLimits, MachineProfile
 from foursight.machine.state import Position, machine_value, walk
 from foursight.parser.model import AXIS_LETTERS, Command
+from foursight.sim.interpolate import PLANES
 from foursight.verify.report import Diagnostic, Severity, format_angle, format_length
 from foursight.verify.rules import Program, Rule, register_rule
 
 ARC_MOTIONS = frozenset({"2", "3"})
 
-# Plane → (first in-plane axis, second in-plane axis, first centre offset, second centre offset).
-# G17 → I,J; G18 → I,K; G19 → J,K (PLAN.md § Arc Semantics).
+# Plane geometry comes from `sim/interpolate.PLANES` rather than a second table here. That mapping
+# is direction-sensitive — G18's frame is (Z, X), not (X, Z) — and a duplicated copy is exactly the
+# kind of thing that drifts. These checks only measure *distances*, for which the axis order is
+# irrelevant, so borrowing the canonical spec costs nothing and removes the hazard.
 _PLANE_AXES: dict[str, tuple[str, str, str, str]] = {
-    "17": ("X", "Y", "I", "J"),
-    "18": ("X", "Z", "I", "K"),
-    "19": ("Y", "Z", "J", "K"),
+    code: (spec.first, spec.second, spec.first_offset, spec.second_offset)
+    for code, spec in PLANES.items()
 }
 
 # G90.1 makes IJK absolute centre coordinates; G91.1 (the default) makes them offsets from start.
