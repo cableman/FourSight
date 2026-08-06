@@ -268,6 +268,36 @@ class SegmentStore:
 
 **`kind` is motion type only.** The earlier `'rapid' | 'feed' | 'arc'` conflated motion type with geometry: an arc is always a cutting move, and after interpolation everything is a line segment anyway. Rendering groups by rapid vs feed. If the originating motion code is needed, it is recoverable via `line[i]`.
 
+### MachineState (T2.2)
+
+`machine/state.py` gains `MachineState`, which steps a command list and returns a `Step` per block:
+the `Move`s it performs **in machine coordinates**, its dwell time, and an honest reason when its
+geometry cannot be produced. The endpoint-only `walk` the verifier uses is unchanged.
+
+Both coordinate frames are held at once — `programmed` is what the G-code says, machine is that plus
+the work offset. Arc geometry and incremental moves are computed in the former while `SegmentStore.lin`
+needs the latter, and conflating them is how an offset gets applied twice.
+
+**Two constructs this plan lists as "interpreted" turn out not to be computable, and they are
+resolved differently on purpose:**
+
+- **G28/G30 reference return.** The reference point is machine-specific and appears nowhere in the
+  G-code, so `[axes.*].home` was added to the profile (optional, unset in the shipped default). With
+  no home configured the move is **not drawn** and the position afterwards becomes unknown — a
+  reference move to a guessed target is exactly the confidently-wrong output this plan forbids, and
+  claiming to still know the position would corrupt every later move too. `G28 X0 Y0` is two rapids:
+  to the intermediate point, then to the reference point.
+- **G43/G44 tool length.** There is no tool table (tool changes are "position tracking only, no
+  geometry in v1"), so the H offset's length is unknown. Here suppression would be the **wrong**
+  trade: G43 appears in nearly every real program, and refusing to draw them all makes the previewer
+  useless. The offset shifts the Z datum uniformly *without changing the path's shape*, so the path
+  **is** drawn and `Step.tool_length_unmodelled` records that Z is relative to the spindle rather
+  than the tool tip. **A verifier rule reporting this is still owed** — by the strict taxonomy it is
+  motion-affecting and uninterpreted, i.e. `unsupported`.
+
+G4 dwell is carried through in **seconds** (LinuxCNC); the `P > 60` ms/s-confusion warning stays the
+verifier's call, not the stepper's.
+
 ### Segment store implementation (T2.1)
 
 `SegmentStore` plus a `SegmentBuilder`. **Measured 38.5 MB at N = 500k (77 bytes/segment)**, against

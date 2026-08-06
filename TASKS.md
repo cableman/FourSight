@@ -744,11 +744,37 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Blocked by: T1.13
       Files: `src/foursight/sim/segments.py`, `tests/test_segments.py`, `PLAN.md`
 
-- [ ] **T2.2 — `machine/state.py`: `MachineState`**
-      Live position + modal groups during simulation. G53 non-modal machine coords, G28/G30
-      reference return, G43/G44 with H and G49, G54–G59 offsets, G4 dwell (seconds; warn if
-      P > 60 as likely ms/s confusion).
+- [x] **T2.2 — `machine/state.py`: `MachineState`** — *done*
+      Steps a command list into a `Step` per block: the `Move`s it performs **in machine
+      coordinates**, its dwell, and an honest reason when its geometry cannot be produced. The
+      verifier's endpoint-only `walk` is untouched. Recorded in PLAN.md § MachineState.
+      **DoD met:** 29 tests in `tests/test_machine_state.py`; **615 across the suite**. All five
+      listed constructs covered — G53, G28/G30, G43/G44 with H and G49, G54–G59, G4 dwell.
+      **Two constructs PLAN calls "interpreted" are not computable from available data, and I
+      resolved them differently on purpose:**
+      1. **G28/G30** — the reference point is machine-specific and appears nowhere in the G-code.
+         Added optional **`[axes.*].home`** to the profile (unset in the shipped default). With no
+         home configured the move is **not drawn** and the position afterwards becomes *unknown*;
+         claiming to still know it would corrupt every later move. `G28 X0 Y0` is two rapids.
+      2. **G43/G44** — no tool table exists, so the H length is unknown. Here suppression would be
+         the **wrong** trade: G43 is in nearly every real program and refusing to draw them all makes
+         the previewer useless. The offset shifts the Z datum uniformly *without changing the path's
+         shape*, so the path **is** drawn and `Step.tool_length_unmodelled` records that Z is
+         relative to the spindle rather than the tool tip.
+      The asymmetry is proportionality: a G28 is one rapid, G43 is the whole program.
+      **Owed follow-up, recorded in PLAN.md:** a verifier rule for the unmodelled tool length. By the
+      strict taxonomy it is motion-affecting and uninterpreted — `unsupported` — but adding a rule
+      was outside this task.
+      **Mutation-verified, all five caught:** drawing G28 to machine zero instead of refusing (3
+      tests), suppressing G43 paths instead of flagging them (1), reporting programmed instead of
+      machine coordinates (5), keeping the position after an undrawable G28 (1), and clamping dwell
+      instead of carrying it through (1).
+      **Also fixed a tautological test of my own:** an assertion comparing a list comprehension to
+      itself, which could never fail. Replaced with a real check that `Position` exposes four *named*
+      axes and is not indexable, so `math.dist` cannot be applied across mm and degrees.
       Blocked by: T2.1
+      Files: `src/foursight/machine/state.py`, `src/foursight/machine/profile.py`,
+      `src/foursight/profiles/default_4axis.toml`, `tests/test_machine_state.py`, `PLAN.md`
 
 - [ ] **T2.3 — `sim/interpolate.py`: lines and arcs**
       G0/G1 lines. G2/G3 in **both IJK and R** form. R sign convention: positive selects ≤ 180°,

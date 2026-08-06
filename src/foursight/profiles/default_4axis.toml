@@ -43,6 +43,12 @@ min = -150.0
 max = 100.0
 max_rapid = 3000.0 # mm/min
 
+# `home` is the machine position each axis returns to under G28/G30. It is machine-specific and
+# appears nowhere in the G-code, so it is left unset here: an unset home means a G28 move is NOT
+# drawn, rather than drawn to a guessed point. Set it per machine to see reference moves.
+# Example for this generic mill:
+#   [axes.x] home = 0.0   /   [axes.y] home = 0.0   /   [axes.z] home = 100.0
+
 [axes.a]
 type = "rotary"
 wrap = true        # 0-360 wraparound; when false, min/max below are enforced

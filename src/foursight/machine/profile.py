@@ -61,7 +61,7 @@ _KEYS: dict[str, frozenset[str]] = {
         {"min_clearance_z", "require_spindle_before_cut", "retract_before_toolchange"}
     ),
 }
-_AXIS_KEYS = frozenset({"type", "min", "max", "max_rapid", "wrap"})
+_AXIS_KEYS = frozenset({"type", "min", "max", "max_rapid", "wrap", "home"})
 
 
 class ProfileError(Exception):
@@ -82,6 +82,10 @@ class AxisLimits:
     max: float | None = None
     max_rapid: float | None = None
     wrap: bool = False  # rotary only: when True, min/max are not enforced
+    # Machine position this axis returns to under G28. Absent means unknown, and a G28 move is
+    # then not drawn at all rather than drawn to a guessed point — the reference point is
+    # machine-specific and appears nowhere in the G-code.
+    home: float | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -251,6 +255,7 @@ def _axes(section: dict, scale: float, unknown: list[str]) -> dict[str, AxisLimi
             max=_scaled(body.get("max"), axis_scale),
             max_rapid=_scaled(body.get("max_rapid"), axis_scale),
             wrap=bool(body.get("wrap", False)),
+            home=_scaled(body.get("home"), axis_scale),
         )
     return axes
 
