@@ -30,9 +30,9 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 |---|---|---|
 | Language | Python 3.11+ | |
 | Environment | `venv` (`.venv/` at repo root) | **Always.** Never install into or run against system Python |
-| GUI shell | PySide6 (Qt) | Native look on both OSes |
-| 3D rendering | pyqtgraph GLViewWidget (OpenGL) | Batch into ≤ 10 `GLLinePlotItem`s; see Rendering Constraints |
-| OpenGL binding | PyOpenGL | Hard requirement of `pyqtgraph.opengl`, not optional |
+| GUI shell | PySide6 (Qt) | Behind the `[gui]` extra — see below |
+| 3D rendering | pyqtgraph GLViewWidget (OpenGL) | Behind `[gui]`. Batch into ≤ 10 `GLLinePlotItem`s; see Rendering Constraints |
+| OpenGL binding | PyOpenGL | Behind `[gui]`. Hard requirement of `pyqtgraph.opengl`, not optional |
 | Code editor pane | QPlainTextEdit + custom highlighter | Line sync with 3D view |
 | Parsing | Custom tokenizer/parser | Do NOT depend on pygcode; write our own for modal-state control |
 | Math | numpy | Arc interpolation, rotary transforms |
@@ -42,6 +42,13 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 | Packaging | PyInstaller (**one-dir**) | One-file re-extracts ~200 MB per launch and trips Windows AV heuristics |
 | CI | GitHub Actions, Ubuntu + Windows matrix | From M0; the cross-platform claim is only as good as the matrix |
 
+**Dependency extras.** Runtime deps are `numpy` only. The three Qt/GL packages live behind a
+`[gui]` extra, and `[dev]` carries `pytest`, `hypothesis`, `ruff`, `pyinstaller`. This is what makes
+"every module outside `gui/` imports without Qt" an *enforced* invariant rather than an intention:
+CI runs a job that installs `.[dev]` alone and imports every headless package. M1 (parser, verifier,
+`foursight check`) is fully usable without the extra. Full dev install is
+`pip install -e ".[dev,gui]"`.
+
 ## Repository Layout
 
 ```
@@ -50,6 +57,7 @@ FourSight/
 ├── pyproject.toml
 ├── src/foursight/
 │   ├── __init__.py
+│   ├── cli.py               # headless CLI: `foursight parse` / `foursight check`; no Qt
 │   ├── parser/
 │   │   ├── tokenizer.py     # line → words (letter+number), comments, block-delete
 │   │   ├── resolver.py      # words → Command objects, modal group resolution
@@ -347,9 +355,12 @@ Cheap now, expensive later. Nothing here ships, but two of these spikes can inva
 - `.venv/` at the repo root, `.gitignore`d; editable install (`pip install -e ".[dev]"`)
 - `pyproject.toml`, package skeleton, ruff + pytest wired
 - GitHub Actions matrix (Ubuntu + Windows) green on an empty test suite
-- **Render spike:** 500k synthetic segments in ≤ 10 `GLLinePlotItem`s; measure orbit framerate on integrated graphics. Determines whether pyqtgraph survives or we drop to a raw `QOpenGLWidget` with our own shaders and VBOs.
-- **Packaging spike:** PyInstaller one-dir build of a bare PySide6 + OpenGL window, launched on a clean Windows VM. Discovering that a bundled GL app will not start is an M0 problem, not an M5 problem.
-- **Done when:** both spikes have a measured answer recorded in this file.
+- **Render spike — DONE, pyqtgraph survives.** `spikes/render_500k.py`. 376.9 fps median at 500k segments in 10 `GLLinePlotItem`s on Intel Iris Xe, against a 30 fps requirement. Full numbers in § Rendering Constraints. No raw `QOpenGLWidget` needed.
+- **Packaging spike — LINUX PASSES, WINDOWS OUTSTANDING.** `spikes/gl_window.py`, bundled with `scripts/build.py --entry spikes/gl_window.py --name gl-spike`.
+  - **Ubuntu/Pop!_OS 22.04: passes.** One-dir bundle is **410 files plus 30 symlinks, 265 MB**. PySide6, shiboken6, PyOpenGL and pyqtgraph all import; pyqtgraph's 87 package-data files (CET colormap CSVs and friends) survive PyInstaller's analysis; all nine Qt platform plugins including `libqxcb.so` are bundled; the window paints a real frame on `Mesa Intel(R) Iris(R) Xe Graphics`. Exit 0. **`HIDDEN_IMPORTS` in `scripts/build.py` is still empty — nothing needed adding.**
+  - **Windows: not yet run.** This is the half that actually carries risk: DLL resolution, the VC++ runtime, and AV heuristics all differ, and none of the Linux result transfers. Copy `dist/gl-spike/` to a VM with no Python or dev tooling and run `gl-spike.exe` from a terminal.
+  - The 265 MB measured size corroborates rejecting one-file packaging: a one-file build would re-extract that on every launch, matching the ~200 MB figure this plan already cited.
+- **Done when:** both spikes have a measured answer recorded in this file. *(Render spike recorded; packaging spike passes on Linux, Windows outstanding.)*
 
 ### M1 — Parser core + verifier (no GUI)
 
@@ -368,7 +379,7 @@ Built on the **4-axis-shaped data model from day one**, with the kinematics tran
 - Qt window, GL viewport, batched polyline rendering (rapids red, feeds green — see Rendering Constraints on dashes)
 - Open file, view toolpath, orbit/pan/zoom camera
 - Simulation off the GUI thread with progress reporting
-- **Done when:** a 100k-line file parses and renders within 5 s, and sustains ≥ 30 fps while orbiting, on the M0 spike's baseline hardware
+- **Done when:** a 100k-line file parses and renders within 5 s, and sustains ≥ 30 fps while orbiting, on the M0 spike's baseline hardware — **Intel Iris Xe Graphics (ADL GT2), Mesa 25.1.5, Pop!_OS 22.04**. Measure with vsync off; with vsync on every result pins to ~60 fps and the gate cannot fail.
 
 ### M3 — Editor sync + diagnostics UI
 
@@ -398,16 +409,57 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
 
 - **Parse ≥ 50k lines/sec** — ~20 µs per line in CPython. Reachable, but only with `slots=True` on every hot dataclass, shared copy-on-write `ModalState`, `SourceRef` holding offsets rather than string copies, and one compiled regex per line rather than per word.
 - **Render 500k+ segments interactively** — pre-batch into ≤ 10 buffers grouped by kind; never one draw call per move.
-- **Memory: ≤ 250 MB resident for a 500k-segment program**, including both coordinate arrays and GL buffers. The columnar store makes this comfortable; per-object segments do not.
+- **Memory — target restated after measurement (T0.7).** The columnar store's predicted ~38 MB per 500k segments is **confirmed**: measured geometry cost is 40 MB at 500k, 76 MB at 1M, 157 MB at 2M — linear at ~39 MB per 500k. But the original "≤ 250 MB resident for a 500k-segment program, including coordinate arrays and GL buffers" is **not achievable, and never was**: the fixed Python + Qt + Mesa baseline is **233 MB** with only 1k segments on screen, before any real geometry exists. A total-RSS cap therefore measures the interpreter and GL driver, not our data model. The budget binds on what the data model actually controls: **geometry + GL buffers ≤ 50 MB per 500k segments** (measured 40 MB). Total resident is recorded rather than capped — 273 MB at 500k on the baseline machine — because the fixed component is platform- and driver-dependent. Per-object segments would blow the geometry budget ~6× and remain ruled out.
 - Simulation runs off the GUI thread (QThread) with progress reporting for large files.
 
 ### Rendering Constraints
 
-Two assumptions to verify in the M0 spike rather than discover in M2:
+#### T0.7 render spike result — MEASURED, pyqtgraph holds
 
-- **`GLLinePlotItem` has no dash or line-stipple parameter.** "Rapids dashed" requires baking dashes into the geometry (roughly doubling rapid vertex count) or settling for a colour-only distinction. Default to colour-only unless the spike shows the vertex cost is free.
-- **pyqtgraph's GL items use the legacy fixed-function path and do not expose persistent VBO management.** The "≤ 10 vertex buffers" requirement is really "≤ 10 `GLLinePlotItem`s," which may or may not hit the framerate target. The fallback is a raw `QOpenGLWidget` with our own shaders.
-- `glLineWidth > 1.0` is not guaranteed by all drivers; do not depend on line thickness to carry meaning.
+Baseline hardware (also the answer to "baseline hardware" for the M2 gate): **Intel Iris Xe
+Graphics (ADL GT2), Mesa 25.1.5, Pop!_OS 22.04, Python 3.12.10, pyqtgraph 0.14.0**, 1280×800
+window, 10 `GLLinePlotItem`s, `mode='lines'`, timed inside `paintGL` after `glFinish`, 20 warmup
+frames discarded.
+
+| Segments | fps median (vsync off) | Worst frame | Resident |
+|---|---|---|---|
+| 1k (baseline overhead) | 59.8 *(vsync-capped)* | — | 233 MB |
+| **500k** | **376.9** | 5.6 ms | 273 MB |
+| 1M | 275.5 | 5.7 ms | 309 MB |
+| 2M | 188.6 | 9.1 ms | 390 MB |
+
+**Verdict: pyqtgraph HOLDS, with ~12× margin at the 500k target** — 376.9 fps median against a
+30 fps requirement, worst frame 5.6 ms. Even at 2M segments (4× target) it sustains 188 fps. The
+raw `QOpenGLWidget` fallback is **not needed**; M2 builds on pyqtgraph.
+
+With vsync on, every configuration from 1k to 500k reports ~60 fps, because that measures the
+display refresh rate rather than the GPU. Always measure uncapped (`vblank_mode=0` on Mesa/GLX)
+before drawing conclusions about headroom; the spike now prints a warning when it detects this.
+
+#### Item and driver constraints
+
+**Verified against pyqtgraph 0.14.0** by `spikes/render_500k.py --introspect-only` (T0.7). Two of
+the three assumptions originally recorded here were written against an older pyqtgraph and were
+wrong; re-run the spike's introspection on every pyqtgraph upgrade, because these answers are
+version-specific.
+
+- **CONFIRMED — `GLLinePlotItem` has no dash or line-stipple parameter.** `setData` accepts exactly
+  `['pos', 'color', 'width', 'mode', 'antialias']` and raises on anything else. "Rapids dashed"
+  therefore requires baking dashes into the geometry (roughly doubling rapid vertex count) or
+  settling for a colour-only distinction. Default to colour-only.
+- **CORRECTED — pyqtgraph 0.14.0 does *not* use the legacy fixed-function path.** `GLLinePlotItem`
+  draws through a shader program with `glVertexAttribPointer` + `glDrawArrays`, holds **persistent
+  VBOs** (`m_vbo_position`, `m_vbo_color`, `QOpenGLBuffer`), and re-uploads vertex data **only when
+  a dirty flag is set** — not per frame. No `glBegin`, `glVertexPointer`, or `glEnableClientState`
+  anywhere. This materially lowers the risk of needing a raw `QOpenGLWidget`: the modern path we
+  would have dropped down to write ourselves is already what pyqtgraph does. It does **not** settle
+  the framerate question, which still needs the measurement half of T0.7.
+- **CONFIRMED and sharpened — do not depend on line thickness to carry meaning.** Beyond drivers
+  being free to ignore `glLineWidth > 1.0`, pyqtgraph itself *deliberately skips the
+  `glLineWidth` call entirely* on a core forward-compatible profile, because such contexts error
+  on any width but 1.0. So on those contexts `width=` is silently inert.
+- The "≤ 10 vertex buffers" requirement is in practice "≤ 10 `GLLinePlotItem`s"; each item owns its
+  own VBOs.
 
 ## Dialect Divergences
 
@@ -436,8 +488,10 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 
 - **Everything Python runs inside the project venv at `.venv/`.** Never invoke bare `python`, `pip`, `pytest`, or `ruff` — they may resolve to system Python. Either activate first, or call the venv binaries directly (`.venv/bin/python`, `.venv/bin/pytest`; `.venv\Scripts\` on Windows). If `.venv/` is missing, create it before running anything:
 
+  Bootstrap with an **explicit 3.11+ interpreter** — bare `python3` is not guaranteed to be one (on the current dev machine it is 3.10). See CLAUDE.md for the interpreter path in use.
+
   ```bash
-  python3 -m venv .venv
+  <python3.11+> -m venv .venv
   .venv/bin/pip install -e ".[dev]"
   ```
 
@@ -459,6 +513,9 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Ruff formats Python code blocks embedded in Markdown. This file's snippets use aligned
+# comment columns deliberately, and `ruff format .` rewrites them — so Markdown is excluded.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 # "S" must be selected for the tests/* S101 ignore below to mean anything.

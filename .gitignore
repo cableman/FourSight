@@ -1,0 +1,36 @@
+# Virtual environment — the project venv lives here and is never committed.
+.venv/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Editable install metadata
+*.egg-info/
+.eggs/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# PyInstaller (one-dir builds, per PLAN.md — never one-file)
+build/
+dist/
+*.spec
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings (personal; .claude/settings.json is committed)
+.claude/settings.local.json
+
+# OS cruft — Windows is a target platform, so Thumbs.db matters here
+.DS_Store
+Thumbs.db
