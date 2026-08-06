@@ -29,9 +29,13 @@ Record the answers **in `PLAN.md`**, then tick here.
       their original scope. Consistent with the introspection finding that 0.14.0 already draws via
       shaders with persistent VBOs and dirty-flag uploads. Recorded in PLAN.md § Rendering
       Constraints.
-- [ ] **D2 — Does a bundled GL app launch?** Resolved by T0.8. If PyInstaller one-dir + PySide6 +
-      PyOpenGL will not start on a clean Windows VM, that reshapes packaging before M5, not during.
-      Record: Windows version, failure mode (if any), the hook/binary fix applied.
+- [~] **D2 — Does a bundled GL app launch? → YES on Linux; Windows still open.** T0.8's bundle runs
+      on Pop!_OS 22.04: all four imports fine, pyqtgraph's package data intact, a real frame painted
+      on Iris Xe, exit 0, and **no `HIDDEN_IMPORTS` were needed**. That retires the "PyInstaller
+      cannot bundle this stack at all" risk, which was the larger one. **It does not answer the
+      question as posed**: Windows differs in DLL resolution, the VC++ runtime, and AV heuristics,
+      and none of the Linux result transfers. Record: Windows version, failure mode (if any), and
+      any hook/binary fix applied.
 - [x] **D3 — Rapids: dashed or colour-only? → COLOUR-ONLY.** Settled by T0.7's introspection:
       `GLLinePlotItem.setData` accepts exactly `['pos', 'color', 'width', 'mode', 'antialias']`
       and raises on `dash`/`stipple`/`dashPattern`, so no stipple parameter exists at any driver.
@@ -215,12 +219,19 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       `.venv/bin/python scripts/build.py --entry spikes/gl_window.py --name gl-spike`
       then copy `dist/gl-spike/` to a Windows VM with no Python or dev tooling and run
       `gl-spike.exe` **from a terminal** so the console output is visible.
-      **T0.4 only proved the bootloader works with nothing bundled — Qt/GL bundling is entirely
-      unverified until this runs.** Nothing here has been executed even on Linux yet.
-      **DoD:** launch result and any `HIDDEN_IMPORTS` / binary / Qt-plugin-path fix recorded in
-      `PLAN.md` and applied to `scripts/build.py`; D2 ticked.
-      Blocked by: T0.4 (script), then a clean Windows VM
-      Files: `spikes/gl_window.py`
+      **Linux half: DONE and passing.** Bundle is 410 real files + 30 symlinks, 265 MB. All four imports succeed;
+      pyqtgraph's 87 package-data files survive analysis; all nine Qt platform plugins including
+      `libqxcb.so` are present; a real frame paints on Iris Xe; exit 0. Launched from a neutral
+      working directory so nothing could resolve out of the source tree. **`HIDDEN_IMPORTS` stays
+      empty — nothing needed adding.** The 265 MB size also corroborates rejecting one-file.
+      **Windows half: OUTSTANDING, and it is where the risk actually lives.** DLL resolution, the
+      VC++ runtime and AV heuristics all differ; nothing above transfers. Copy `dist/gl-spike/` to
+      a VM with no Python or dev tooling, run `gl-spike.exe` **from a terminal**, and read the exit
+      code: 0 painted, 1 created but never painted, 2 import failed.
+      **DoD:** Windows launch result and any `HIDDEN_IMPORTS` / binary / Qt-plugin-path fix recorded
+      in `PLAN.md` and applied to `scripts/build.py`; D2 ticked.
+      Blocked by: a clean Windows VM
+      Files: `spikes/gl_window.py`, `PLAN.md`
 
 - [ ] **T0.9 — Milestone gate**
       **DoD:** both spikes have a *measured* answer in `PLAN.md`; CI green; D1–D3 and D5 resolved.

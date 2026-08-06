@@ -89,9 +89,13 @@ def report_output(name: str) -> int:
     if not executable.exists():
         print(f"no executable at {executable}", file=sys.stderr)
         return 1
-    files = [p for p in bundle.rglob("*") if p.is_file()]
+    # Exclude symlinks: Qt and numpy ship versioned .so links, and `is_file()` follows them, so
+    # counting those would report each shared library's bytes twice (~125 MB of phantom size on a
+    # PySide6 bundle). Distribution size is a real constraint here, so the number has to be honest.
+    files = [p for p in bundle.rglob("*") if p.is_file() and not p.is_symlink()]
+    links = sum(1 for p in bundle.rglob("*") if p.is_symlink())
     size_mb = sum(p.stat().st_size for p in files) / 1e6
-    print(f"one-dir bundle: {bundle}  ({len(files)} files, {size_mb:.1f} MB)")
+    print(f"one-dir bundle: {bundle}  ({len(files)} files + {links} symlinks, {size_mb:.1f} MB)")
     print(f"executable:     {executable}")
     return 0
 

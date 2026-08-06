@@ -356,8 +356,11 @@ Cheap now, expensive later. Nothing here ships, but two of these spikes can inva
 - `pyproject.toml`, package skeleton, ruff + pytest wired
 - GitHub Actions matrix (Ubuntu + Windows) green on an empty test suite
 - **Render spike — DONE, pyqtgraph survives.** `spikes/render_500k.py`. 376.9 fps median at 500k segments in 10 `GLLinePlotItem`s on Intel Iris Xe, against a 30 fps requirement. Full numbers in § Rendering Constraints. No raw `QOpenGLWidget` needed.
-- **Packaging spike — OPEN.** `spikes/gl_window.py` is written and bundles via `scripts/build.py --entry spikes/gl_window.py --name gl-spike`, but has not been run on a clean Windows VM. Discovering that a bundled GL app will not start is an M0 problem, not an M5 problem.
-- **Done when:** both spikes have a measured answer recorded in this file. *(Render spike recorded; packaging spike outstanding.)*
+- **Packaging spike — LINUX PASSES, WINDOWS OUTSTANDING.** `spikes/gl_window.py`, bundled with `scripts/build.py --entry spikes/gl_window.py --name gl-spike`.
+  - **Ubuntu/Pop!_OS 22.04: passes.** One-dir bundle is **410 files plus 30 symlinks, 265 MB**. PySide6, shiboken6, PyOpenGL and pyqtgraph all import; pyqtgraph's 87 package-data files (CET colormap CSVs and friends) survive PyInstaller's analysis; all nine Qt platform plugins including `libqxcb.so` are bundled; the window paints a real frame on `Mesa Intel(R) Iris(R) Xe Graphics`. Exit 0. **`HIDDEN_IMPORTS` in `scripts/build.py` is still empty — nothing needed adding.**
+  - **Windows: not yet run.** This is the half that actually carries risk: DLL resolution, the VC++ runtime, and AV heuristics all differ, and none of the Linux result transfers. Copy `dist/gl-spike/` to a VM with no Python or dev tooling and run `gl-spike.exe` from a terminal.
+  - The 265 MB measured size corroborates rejecting one-file packaging: a one-file build would re-extract that on every launch, matching the ~200 MB figure this plan already cited.
+- **Done when:** both spikes have a measured answer recorded in this file. *(Render spike recorded; packaging spike passes on Linux, Windows outstanding.)*
 
 ### M1 — Parser core + verifier (no GUI)
 
