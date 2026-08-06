@@ -57,6 +57,66 @@ class SourceRef:
 
 
 @dataclass(slots=True, frozen=True)
+class Word:
+    """One address word: a letter and its numeric value.
+
+    ``letter`` is always upper-cased, so ``g1`` and ``G1`` tokenize identically. G and M words do
+    not appear as ``Word``s in a ``Command`` — a block carries several of each, so the resolver
+    moves them into ``Command.gcodes`` / ``Command.mcodes`` as canonical strings.
+    """
+
+    letter: str
+    value: float
+
+
+@dataclass(slots=True, frozen=True)
+class TokenError:
+    """A malformed piece of a line.
+
+    The tokenizer reports these rather than raising: one bad word must not cost us the rest of the
+    file, and the whole point of the verifier is to list every problem at once.
+
+    Deliberately *not* a ``verify.Diagnostic``. The dependency direction is
+    parser → machine → sim → verify, so the parse layer cannot name a verify type; the verifier
+    converts these into diagnostics with a severity attached (T1.7).
+    """
+
+    offset: int  # absolute offset into the source text
+    text: str  # the offending characters, as written
+    message: str
+
+
+@dataclass(slots=True)
+class TokenizedLine:
+    """One source line, split into words with its framing constructs pulled out.
+
+    ``ref`` is created once here and shared onward by every ``Command`` and segment derived from
+    this line.
+
+    ``N`` and ``O`` never appear in ``words``: an N-number labels the line rather than addressing
+    anything, and a bare ``Oxxxx`` is a Fanuc program number that this dialect consumes silently
+    (PLAN.md § Supported G-code Subset).
+
+    ``comments`` and ``errors`` are ``None`` rather than ``[]`` when empty, which is the common
+    case: a 100k-line file would otherwise allocate 200k throwaway lists against a ~20 µs/line
+    budget. Read them through ``line.comments or ()``, and use ``has_errors`` rather than
+    ``len(errors)``.
+    """
+
+    ref: SourceRef
+    words: list[Word]
+    block_delete: bool = False  # line began with '/'
+    line_number: float | None = None  # N
+    program_number: float | None = None  # Fanuc Oxxxx
+    comments: list[str] | None = None
+    errors: list[TokenError] | None = None
+
+    @property
+    def has_errors(self) -> bool:
+        return bool(self.errors)
+
+
+@dataclass(slots=True, frozen=True)
 class ModalState:
     """The modal groups in force for one command.
 

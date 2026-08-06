@@ -281,15 +281,35 @@ taxonomy gets teeth.
       Blocked by: — *(T0.9's gate is still open on T0.6/T0.8, both of which are infrastructure-only
       and cannot affect the parse layer)*
 
-- [ ] **T1.2 — `parser/tokenizer.py`**
-      Line → words. **One compiled regex per line, not per word** (the 20 µs/line budget).
-      Handles: comments `( )` and `;`, block delete `/`, N-numbers, leading/trailing `%`,
-      Fanuc `Oxxxx` (consumed silently, never flagged), whitespace and case insensitivity,
-      words with no space (`X1.0Y2.0`), signed and decimal-less numbers.
-      Emits `SourceRef` **once per line, shared** by everything derived from it.
-      **DoD:** `tests/test_tokenizer.py` covers each construct above plus malformed words
-      (`X`, `XY`, `X1.2.3`) as errors, not exceptions.
+- [x] **T1.2 — `parser/tokenizer.py`** — *done*
+      Module-level compiled regexes, one `finditer` pass per line; nothing is compiled or matched
+      per word. `model.py` gained `Word`, `TokenError` and `TokenizedLine` (the layout already
+      promised `Word`); all recorded in PLAN.md § Tokenizer layer.
+      **DoD met:** `tests/test_tokenizer.py`, 51 tests — every listed construct plus malformed
+      input (`X`, `XY`, `X1.2.3`, stray punctuation) reported as `TokenError` records, never raised.
+      `X1.2.3` keeps the valid `X1.2` and flags only `.3`; adjacent stray characters merge into one
+      error rather than one per character.
+      **Measured 159,476 lines/sec (6.27 µs/line)** for a realistic mix on the baseline machine —
+      31% of the 20 µs/line budget, leaving ~13.7 µs for the resolver. T1.12 turns this into an
+      assertion.
+      **Two bugs found by probing edge cases rather than by the tests I first wrote:**
+      1. **`X (why not) 10` was reported as two errors on valid input.** LinuxCNC strips comments
+         *before* interpreting words, so that legally means `X10`. Comments are now removed in a
+         prior pass and **blanked in place rather than deleted**, so every later offset — and hence
+         every error position — stays correct. A fast `"(" not in line` membership test keeps the
+         common case free; throughput actually *improved* after the change.
+      2. **`O100 sub` reported "address 'S' has no value" three times**, one per letter of `sub`.
+         O-word flow control is now detected and reported as a single unsupported construct. This
+         mattered beyond tidiness: flow control decides *which motion runs*, so it must reach T1.7
+         as `unsupported`, and a malformed-word diagnosis would have buried it.
+      **Known gap, deliberate:** `TokenError` carries no severity — the parse layer cannot name a
+      `verify` type without violating the dependency direction. T1.7 converts these to
+      `Diagnostic`s, and is where the O-word error becomes `unsupported` rather than `error`.
+      A second `N` on one line is silently ignored (first wins); flagging duplicates is the
+      verifier's call, not the tokenizer's.
       Blocked by: T1.1
+      Files: `src/foursight/parser/tokenizer.py`, `src/foursight/parser/model.py`,
+      `tests/test_tokenizer.py`, `PLAN.md`
 
 - [ ] **T1.3 — `parser/resolver.py` — modal groups**
       Words → `Command`. Canonicalize G-codes to strings: `G01`, `G1`, `G1.0` → `'1'`;

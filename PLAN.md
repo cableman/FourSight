@@ -159,6 +159,40 @@ Three things the earlier draft got wrong and this fixes:
   - `ROTARY_LETTERS` — `A`; degrees, **never** scaled by a unit conversion.
   - `F` is in neither scaling set on purpose: it is a length rate under G94/G95 but 1/minutes under G93, so no static table can classify it and the resolver must decide per feed mode.
 
+### Tokenizer layer (T1.2)
+
+`tokenizer.py` turns one line into a `TokenizedLine`, and `model.py` gains three types for it:
+
+```python
+@dataclass(slots=True, frozen=True)
+class Word:                       # one address word
+    letter: str                   # always upper-cased
+    value: float
+
+@dataclass(slots=True, frozen=True)
+class TokenError:                 # malformed input, REPORTED not raised
+    offset: int                   # absolute offset into the source text
+    text: str                     # the offending characters, as written
+    message: str
+
+@dataclass(slots=True)
+class TokenizedLine:
+    ref: SourceRef
+    words: list[Word]
+    block_delete: bool = False    # line began with '/'
+    line_number: float | None = None      # N
+    program_number: float | None = None    # Fanuc Oxxxx
+    comments: list[str] | None = None
+    errors: list[TokenError] | None = None
+```
+
+- **`TokenError` is deliberately not a `Diagnostic`.** The dependency direction forbids the parse layer from naming a `verify` type, so the tokenizer reports neutral facts and the verifier attaches severity (T1.7).
+- **`comments` and `errors` are `None` when empty**, not `[]`. Both are empty on the overwhelming majority of lines, and a 100k-line file would otherwise allocate 200k throwaway lists against a ~20 µs/line budget. Read them as `line.comments or ()`.
+- **N and O never appear in `words`.** An N-number labels the line; a bare `Oxxxx` is a Fanuc program number, consumed silently.
+- **Comments are stripped before words are scanned**, matching LinuxCNC, which makes `X (why not) 10` a legal spelling of `X10`. They are blanked in place rather than deleted, so every later offset — and therefore every error position — stays correct. Tokenizing them inline instead produced two *false* errors on valid input.
+- **LinuxCNC O-word flow control** (`O100 sub`, `o<name> while`, …) is detected and reported as a single unsupported construct. Without that, the letters of `sub` surfaced as three bogus "address has no value" errors, which would have hidden a construct that decides *which motion runs* — `unsupported`, never a warning.
+- **Measured: 159k lines/sec (6.27 µs/line)** on the baseline machine for a realistic mix, or 31% of the 20 µs/line budget, leaving ~13.7 µs for the resolver.
+
 ### Segment store — columnar, not per-object
 
 500k `Segment` dataclasses each holding two numpy arrays costs ~400 B apiece (≈48 B object + ~100 B `__dict__` + 2 × ~144 B for the tiny arrays) — over 200 MB before the GL buffers, and then it all has to be repacked into contiguous arrays anyway. Store columns:
@@ -481,6 +515,8 @@ Where LinuxCNC and Fanuc disagree, and what we do:
 | `G4 P` units | seconds | milliseconds | seconds; warn if P > 60 as a likely ms/s confusion |
 | Arc center default | G91.1 (incremental) | always incremental | G91.1 default, G90.1 honoured |
 | Comments | `( )` and `;` | `( )` | both accepted |
+| Comment placement | stripped before parsing, so `X (c) 10` == `X10` | same | strip first (LinuxCNC) |
+| O-words | flow control (`O100 sub`) | `Oxxxx` program number | bare `Oxxxx` consumed silently; flow control reported as one `unsupported` construct |
 | Program framing | none required | `%` … `%`, `Oxxxx` | consumed silently, never flagged |
 
 **Block delete (`/`)**: simulated **with block-delete OFF by default** (deleted blocks execute), matching the common control-panel default. Exposed as a toggle in the GUI and a `--block-delete` CLI flag; the verifier runs against the active mode.
