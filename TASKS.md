@@ -640,10 +640,54 @@ taxonomy gets teeth.
       Blocked by: T1.3
       Files: `tests/test_perf.py`, `tests/conftest.py`, `PLAN.md`
 
-- [ ] **T1.13 — Milestone gate**
-      **DoD:** all fixtures parse; each broken fixture produces exactly its expected *added*
-      diagnostic; `foursight check` works end to end; parse rate asserted; CI green.
-      Blocked by: T1.10, T1.11, T1.12
+- [~] **T1.13 — Milestone gate** — *four of five DoD items verified; CI confirmation outstanding*
+      **DoD 1 — all fixtures parse: PASS.** 10 fixtures, 0 failures, 0 parse errors in any of them.
+      **DoD 2 — each broken fixture produces its expected added diagnostic: PASS.** All **22**
+      mutations hit their declared `rule_id`, diffed against a baseline whose own diagnostic set is
+      **empty**.
+      Three mutations add a *second* diagnostic, and all three are legitimate cascades — which is
+      precisely why PLAN.md rejects "exactly one diagnostic per file":
+      • `cut_before_spindle` (removes `S8000 M3`) also trips `coolant-without-spindle`, because M8 is
+      now on with the spindle stopped.
+      • `rapid_below_clearance` (`G0 Z25` → `G0 Z1`) also trips `toolchange-without-retract`, because
+      the M6 now happens below clearance.
+      • `axis_travel_exceeded` (`X50` → `X500`) also trips `arc-radius-mismatch`, because the
+      following arc now starts 450 mm away and its IJK centre no longer matches.
+      Each is the *correct* consequence of the single mutation, and each would have broken a
+      one-diagnostic-per-file assertion.
+      **DoD 3 — `foursight check` end to end: PASS.** All 10 fixtures via the installed console
+      script; 8 clean, 2 reporting their intended `unsupported` span; exit codes as specified.
+      **DoD 4 — parse rate asserted: PASS.** 108,538 lines/sec (9.21 µs/line), 2.2× the 50k floor,
+      asserted and logged by `tests/test_perf.py`.
+      **DoD 5 — CI green: NOT YET CONFIRMED.** Run **31118036275** (T1.3) **failed**, and had gone
+      unnoticed for nine commits. Cause was **transient GitHub infrastructure**, not a regression:
+      `Failed to resolve action download info. Error: Service Unavailable` at *Set up job* on four of
+      six jobs, while `windows-3.12` and `headless` ran to completion and **passed** — which is what
+      shows the code was fine. Everything since is pushed (`eeb9520`) and run **31121…** is queued;
+      the matrix has not yet exercised the verifier, the CLI or the perf test on **Windows** or
+      **3.11**.
+      **The one genuine risk in that run** is the perf floor on a shared runner. If a leg reports
+      below 50k lines/sec, set `FOURSIGHT_PERF_MIN_RATE` in the workflow rather than deleting the
+      assertion.
+      **To close:** confirm all 6 jobs green on the queued run, then tick.
+      Blocked by: CI confirmation only
+      Files: `TASKS.md`
+
+### M1 summary
+
+Parse layer, machine profile, verifier and headless CLI complete. **547 tests, 23 rules**, ruff
+clean. Measured: parse **110k lines/sec** (2.2× target), one `ModalState` shared across 42,858
+commands, verification **530 ms** for the same file — with 72% of that identified as redundant
+position walking, recorded in PLAN.md but deliberately not optimized, since no target requires it.
+
+Carried into M2:
+- **Verification cost.** M2's gate (100k lines parsed and rendered in 5 s) would spend ~1.1 s
+  verifying. The fix is measured and scoped; take it if the gate turns out tight.
+- **`machine/state.py` is endpoint-only.** T2.2 extends it for simulation; **T2.8 must re-run the
+  travel-limit check over interpolated points**, because an arc can bulge past a limit mid-sweep
+  while both endpoints sit inside it. Nothing in M1 proves a program stays in bounds.
+- **`min_clearance_z` is judged in machine coordinates**, with the work offset applied and an
+  "assumes zero work offset" caveat when unknown.
 
 ---
 
