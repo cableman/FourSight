@@ -370,17 +370,38 @@ taxonomy gets teeth.
       Blocked by: T1.1
       Files: `src/foursight/fileio/loader.py`, `tests/test_loader.py`, `PLAN.md`
 
-- [ ] **T1.5 — `machine/profile.py`** *(moved into M1: the verifier cannot run without it)*
-      `MachineProfile` from TOML via `tomllib`, matching PLAN.md § *Machine Profile* exactly:
-      `[machine]`, `[limits]`, `[tolerance]`, `[axes.*]`, `[offsets]`, `[kinematics]`, `[safety]`.
-      Dataclasses, not dicts. Convert profile values to mm on load using `machine.units`.
-      **Refuse to load** a `rotary_mount = "head"` profile without `pivot_to_tip`.
-      Unset work offsets are represented distinctly from zero — they downgrade limit errors to
-      warnings (T1.8), so `None` and `0.0` must not collapse.
-      **DoD:** `profiles/default_4axis.toml` loads; tests cover head-mount-without-pivot refusal,
-      unset-vs-zero offsets, inch-profile conversion, and unknown-key handling.
+- [x] **T1.5 — `machine/profile.py`** — *done*
+      `load_profile(path)` / `load_profile_text(text)` → `MachineProfile`, all frozen dataclasses,
+      every section from PLAN.md implemented. `profiles/default_4axis.toml` written and loading with
+      **zero unknown keys**. Recorded in PLAN.md § Loading rules.
+      **DoD met:** 40 tests in `tests/test_profile.py`; 220 across the suite. All four required
+      cases covered — head-mount-without-pivot refusal, unset-vs-zero offsets, inch conversion,
+      unknown-key handling.
+      **Mutation-verified, all five caught:** collapsing an unset offset to zero (4 failures),
+      scaling rotary axes by 25.4, scaling the offset's A component, dropping the head-mount
+      refusal, and using falsy-`or` for defaults.
+      **A `PLAN.md` gap filled:** `rotary_wrap_warn` is referenced by the verifier checklist and
+      described as "tunable", but appeared nowhere in the TOML sample — so it had no home. Added to
+      `[limits]` in both the sample and the shipped profile.
+      **The module's governing rule, now in PLAN.md:** *absence means unknown, never a fabricated
+      value.* PLAN states it for work offsets; the same reasoning applies to every limit, so
+      `max_feed`, `max_spindle_rpm`, `min_clearance_z`, per-axis limits and each offset are `| None`
+      and their absence disables the check. Tolerances are the sole exception, since tessellation
+      needs a number.
+      **A bug caught before testing:** `_scaled(...) or DEFAULT` substitutes the default when the
+      value is legitimately `0.0` — and `rotary_wrap_warn = 0` ("warn on any rotary move") is a
+      reasonable setting that would silently have become 360. Replaced with an explicit `is None`
+      check.
+      **Design notes:** offsets are keyed `'54'`…`'59'` to match `ModalState.offset` so lookup needs
+      no conversion; an unlabelled `[axes.b]`/`[axes.c]` is assumed **rotary**, because guessing
+      rotary is recoverable while guessing linear corrupts values by 25.4×; `rotary_chord` scales on
+      an inch profile despite its name, being a chord height in mm; and booleans are rejected as
+      numbers, since `max_feed = true` would otherwise become 1.0 mm/min.
+      **Note for T1.11:** the CLI must print `profile.unknown_keys`. Loading tolerates them so a
+      newer profile still works, but an unsurfaced typo silently disables a check.
       Blocked by: T1.1
-      Files: `src/foursight/machine/profile.py`, `profiles/default_4axis.toml`
+      Files: `src/foursight/machine/profile.py`, `profiles/default_4axis.toml`,
+      `tests/test_profile.py`, `PLAN.md`
 
 - [ ] **T1.6 — `verify/report.py` + `verify/rules.py`**
       `Diagnostic(severity, line, message, fix_ids)` — `fix_ids` is a **list**. Severity is the

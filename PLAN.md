@@ -284,6 +284,7 @@ units = "mm"                # units the values in THIS FILE are expressed in
 [limits]
 max_feed = 3000.0           # mm/min
 max_spindle_rpm = 24000.0
+rotary_wrap_warn = 360.0    # degrees of rotary travel in one block before warning
 
 [tolerance]
 arc_radius_mismatch = 0.005 # mm — |r_start - r_end| above this is an error
@@ -323,6 +324,35 @@ min_clearance_z = 5.0       # rapids below this → warning
 require_spindle_before_cut = true
 retract_before_toolchange = true
 ```
+
+### Loading rules (T1.5)
+
+`load_profile(path)` / `load_profile_text(text)` → `MachineProfile`, all frozen dataclasses. The
+shipped profile is `profiles/default_4axis.toml`.
+
+**Absence means "unknown", never a fabricated value.** This plan already states it for work offsets;
+the same reasoning covers every limit. An invented `max_feed` of 3000 would produce confident
+diagnostics about a machine we know nothing about. So `max_feed`, `max_spindle_rpm`,
+`min_clearance_z`, per-axis limits and each offset are `| None`, and their absence *disables* the
+corresponding check rather than inventing a bound. **Tolerances are the one exception** and carry
+real defaults, because tessellation cannot proceed without a number.
+
+- **Unset ≠ zero.** `[offsets]` with only `g54` leaves g55–g59 unset; `g54 = [0,0,0,0]` is *set to
+  zero*. Collapsing them would turn "assumes zero offset" warnings into hard errors.
+- **Offsets are keyed `'54'`…`'59'`**, matching `ModalState.offset`, so lookup needs no conversion.
+- **A work offset mixes units.** `g54 = [x, y, z, a]` is three lengths and one **angle**: an inch
+  profile scales the first three and never the fourth. Same rule for `[axes.a]`, where travel *and*
+  rate are degrees. An unlabelled `[axes.b]`/`[axes.c]` is assumed rotary, because guessing
+  "rotary" is recoverable while guessing "linear" corrupts the values by 25.4×.
+- **`rotary_chord` scales despite its name** — it is a chord *height* in mm, measured at the path's
+  maximum radius from the centerline.
+- **Head mount without `pivot_to_tip` is refused at load time.** The tip translates as the head
+  swings, so its path is unknowable without that distance; refusing beats rendering a wrong path.
+- **Unknown keys are reported, not raised** (`MachineProfile.unknown_keys`), so a profile written
+  for a newer version still loads — but the CLI **must** surface them, because `max_fed = 3000` is a
+  typo that would otherwise silently disable the feed check.
+- **Zero is a real value.** `value or default` is wrong here: `rotary_wrap_warn = 0` legitimately
+  means "warn on any rotary move" and must not become 360.
 
 ## Supported G-code Subset (v1)
 

@@ -1,0 +1,76 @@
+#
+# FourSight machine profile — generic 4-axis mill (XYZ + A rotary table).
+#
+# This is the default profile. Copy it and edit for a real machine; the values here are plausible
+# rather than authoritative.
+#
+# Anything omitted is treated as UNKNOWN, not as zero, and the corresponding check is skipped or
+# downgraded rather than run against an invented value. That is deliberate: a confident diagnostic
+# about a machine we know nothing about is worse than no diagnostic.
+#
+
+[machine]
+name = "Generic 4-axis mill"
+units = "mm" # units the values in THIS file are expressed in ("mm" or "inch")
+
+[limits]
+max_feed = 3000.0        # mm/min
+max_spindle_rpm = 24000.0
+# Degrees of rotary travel in one block before warning. Multi-turn wrapping is legitimate, so this
+# is tunable; 0 would warn on any rotary move at all.
+rotary_wrap_warn = 360.0
+
+[tolerance]
+arc_radius_mismatch = 0.005 # mm — |r_start - r_end| above this is an error
+arc_chord = 0.01            # mm — max chord deviation when tessellating arcs
+rotary_chord = 0.01         # mm — same, measured at max path radius from the centerline
+
+[axes.x]
+min = 0.0
+max = 400.0
+max_rapid = 5000.0 # mm/min
+
+[axes.y]
+min = 0.0
+max = 300.0
+max_rapid = 5000.0 # mm/min
+
+[axes.z]
+min = -150.0
+max = 0.0
+max_rapid = 3000.0 # mm/min
+
+[axes.a]
+type = "rotary"
+wrap = true        # 0-360 wraparound; when false, min/max below are enforced
+min = -360.0
+max = 360.0
+max_rapid = 3600.0 # deg/min
+
+# Work offsets are NOT in the G-code file — they live in the controller. Without them the
+# travel-limit check cannot run in machine coordinates, so any offset left unset makes limit
+# violations WARNINGS ("assumes zero offset") rather than errors.
+#
+# Note the distinction: `g54 = [0, 0, 0, 0]` means "set, and it is zero". Commenting the line out
+# means "unknown". Those are different, and the verifier treats them differently.
+#
+# The fourth component is A in DEGREES; the first three are lengths in this file's units.
+[offsets]
+g54 = [0.0, 0.0, 0.0, 0.0]
+# g55 = [0.0, 0.0, 0.0, 0.0]
+# g56 = ...
+
+[kinematics]
+rotary_mount = "table" # "table" (part rotates) | "head" (tool swings)
+rotary_axis = "x"      # A rotates about machine X
+# Point the rotary axis passes through. For rotary_axis = "x" only the Y and Z components are
+# meaningful; the X term cancels through the rotation.
+centerline_offset = [0.0, 0.0, 50.0]
+# Required when rotary_mount = "head": distance from the swing pivot to the tool tip. The tip
+# translates as the head swings, so the profile will refuse to load without it.
+# pivot_to_tip = 120.0
+
+[safety]
+min_clearance_z = 5.0 # rapids below this → warning
+require_spindle_before_cut = true
+retract_before_toolchange = true

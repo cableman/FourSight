@@ -1,0 +1,350 @@
+"""Machine profile tests (T1.5).
+
+The DoD list — the shipped profile loads, head-mount-without-pivot is refused, unset offsets stay
+distinct from zero, inch conversion, unknown keys — plus the mm/degrees split, which is where a
+silent corruption would hide.
+"""
+
+import dataclasses
+from pathlib import Path
+
+import pytest
+
+from foursight.machine.profile import (
+    INCH_TO_MM,
+    MachineProfile,
+    ProfileError,
+    WorkOffset,
+    load_profile,
+    load_profile_text,
+)
+
+DEFAULT_PROFILE = Path(__file__).resolve().parent.parent / "profiles" / "default_4axis.toml"
+
+MINIMAL = """
+[machine]
+name = "test"
+units = "mm"
+"""
+
+
+# --------------------------------------------------------------------------- the shipped profile
+
+
+def test_default_profile_loads() -> None:
+    profile = load_profile(DEFAULT_PROFILE)
+    assert profile.name == "Generic 4-axis mill"
+    assert profile.declared_units == "mm"
+    assert profile.path == DEFAULT_PROFILE
+
+
+def test_default_profile_has_no_unknown_keys() -> None:
+    """A typo in the shipped profile would silently disable a check."""
+    assert load_profile(DEFAULT_PROFILE).unknown_keys == ()
+
+
+def test_default_profile_sections() -> None:
+    profile = load_profile(DEFAULT_PROFILE)
+    assert profile.limits.max_feed == 3000.0
+    assert profile.limits.max_spindle_rpm == 24000.0
+    assert profile.limits.rotary_wrap_warn == 360.0
+    assert profile.tolerance.arc_chord == 0.01
+    assert profile.tolerance.arc_radius_mismatch == 0.005
+    assert profile.tolerance.rotary_chord == 0.01
+    assert set(profile.axes) == {"X", "Y", "Z", "A"}
+    assert profile.kinematics.rotary_mount == "table"
+    assert profile.kinematics.rotary_axis == "x"
+    assert profile.kinematics.centerline_offset == (0.0, 0.0, 50.0)
+    assert profile.safety.min_clearance_z == 5.0
+    assert profile.safety.retract_before_toolchange is True
+
+
+def test_default_profile_rotary_axis_is_marked_rotary() -> None:
+    axis = load_profile(DEFAULT_PROFILE).axes["A"]
+    assert axis.is_rotary is True
+    assert axis.wrap is True
+    assert axis.max_rapid == 3600.0  # deg/min, not scaled
+
+
+# --------------------------------------------------------------------------- unset vs zero
+
+
+def test_unset_offset_is_none_not_zero() -> None:
+    """This distinction is what downgrades travel-limit violations to warnings."""
+    profile = load_profile_text(MINIMAL + "\n[offsets]\ng54 = [1.0, 2.0, 3.0, 4.0]\n")
+    assert profile.offset("54") == WorkOffset(1.0, 2.0, 3.0, 4.0)
+    assert profile.offset("55") is None
+    assert profile.offset("59") is None
+
+
+def test_offset_set_to_zero_is_not_the_same_as_unset() -> None:
+    profile = load_profile_text(MINIMAL + "\n[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n")
+    assert profile.offset("54") == WorkOffset(0.0, 0.0, 0.0, 0.0)
+    assert profile.offset("54") is not None, "set-to-zero must not read as unset"
+    assert profile.offset("55") is None
+
+
+def test_no_offsets_section_means_all_unset() -> None:
+    profile = load_profile_text(MINIMAL)
+    assert profile.offsets == {}
+    assert all(profile.offset(code) is None for code in ("54", "55", "56", "57", "58", "59"))
+
+
+def test_offset_lookup_keys_match_modal_state_codes() -> None:
+    """`ModalState.offset` holds '54', so the profile is keyed the same way — no conversion."""
+    profile = load_profile_text(MINIMAL + "\n[offsets]\ng57 = [1.0, 0.0, 0.0]\n")
+    assert set(profile.offsets) == {"57"}
+    assert profile.offset(None) is None
+
+
+def test_three_component_offset_defaults_a_to_zero() -> None:
+    profile = load_profile_text(MINIMAL + "\n[offsets]\ng54 = [1.0, 2.0, 3.0]\n")
+    assert profile.offset("54") == WorkOffset(1.0, 2.0, 3.0, 0.0)
+
+
+def test_malformed_offset_is_refused() -> None:
+    with pytest.raises(ProfileError, match="3 or 4"):
+        load_profile_text(MINIMAL + "\n[offsets]\ng54 = [1.0, 2.0]\n")
+
+
+# --------------------------------------------------------------------------- head mount
+
+
+def test_head_mount_without_pivot_to_tip_is_refused() -> None:
+    """The tip translates as the head swings, so its path is unknowable without this distance."""
+    with pytest.raises(ProfileError, match="pivot_to_tip"):
+        load_profile_text(MINIMAL + "\n[kinematics]\nrotary_mount = 'head'\n")
+
+
+def test_head_mount_with_pivot_to_tip_loads() -> None:
+    profile = load_profile_text(
+        MINIMAL + "\n[kinematics]\nrotary_mount = 'head'\npivot_to_tip = 120.0\n"
+    )
+    assert profile.kinematics.rotary_mount == "head"
+    assert profile.kinematics.pivot_to_tip == 120.0
+
+
+def test_table_mount_does_not_need_pivot_to_tip() -> None:
+    profile = load_profile_text(MINIMAL + "\n[kinematics]\nrotary_mount = 'table'\n")
+    assert profile.kinematics.pivot_to_tip is None
+
+
+def test_unknown_rotary_mount_is_refused() -> None:
+    with pytest.raises(ProfileError, match="rotary_mount"):
+        load_profile_text(MINIMAL + "\n[kinematics]\nrotary_mount = 'gantry'\n")
+
+
+def test_unknown_rotary_axis_is_refused() -> None:
+    with pytest.raises(ProfileError, match="rotary_axis"):
+        load_profile_text(MINIMAL + "\n[kinematics]\nrotary_axis = 'w'\n")
+
+
+# --------------------------------------------------------------------------- inch conversion
+
+
+INCH = """
+[machine]
+units = "inch"
+
+[limits]
+max_feed = 100.0
+max_spindle_rpm = 24000.0
+
+[tolerance]
+arc_chord = 0.001
+rotary_chord = 0.001
+arc_radius_mismatch = 0.0002
+
+[axes.x]
+min = 0.0
+max = 10.0
+max_rapid = 200.0
+
+[axes.a]
+type = "rotary"
+min = -360.0
+max = 360.0
+max_rapid = 3600.0
+
+[offsets]
+g54 = [1.0, 2.0, 3.0, 90.0]
+
+[kinematics]
+centerline_offset = [0.0, 0.0, 2.0]
+
+[safety]
+min_clearance_z = 0.2
+"""
+
+
+def test_inch_profile_converts_lengths() -> None:
+    profile = load_profile_text(INCH)
+    assert profile.declared_units == "inch"
+    assert profile.limits.max_feed == pytest.approx(100.0 * INCH_TO_MM)
+    assert profile.axes["X"].max == pytest.approx(10.0 * INCH_TO_MM)
+    assert profile.axes["X"].max_rapid == pytest.approx(200.0 * INCH_TO_MM)
+    assert profile.safety.min_clearance_z == pytest.approx(0.2 * INCH_TO_MM)
+    assert profile.kinematics.centerline_offset[2] == pytest.approx(2.0 * INCH_TO_MM)
+
+
+def test_inch_profile_converts_tolerances() -> None:
+    """rotary_chord is a chord height in mm despite its name, so it scales too."""
+    profile = load_profile_text(INCH)
+    assert profile.tolerance.arc_chord == pytest.approx(0.001 * INCH_TO_MM)
+    assert profile.tolerance.rotary_chord == pytest.approx(0.001 * INCH_TO_MM)
+    assert profile.tolerance.arc_radius_mismatch == pytest.approx(0.0002 * INCH_TO_MM)
+
+
+def test_inch_profile_never_scales_degrees() -> None:
+    """The mm/degrees split again: scaling A by 25.4 would corrupt every rotary limit."""
+    profile = load_profile_text(INCH)
+    axis = profile.axes["A"]
+    assert (axis.min, axis.max, axis.max_rapid) == (-360.0, 360.0, 3600.0)
+
+
+def test_inch_profile_scales_offset_lengths_but_not_its_angle() -> None:
+    """`g54 = [x, y, z, a]` is three lengths and one angle in a single list."""
+    offset = load_profile_text(INCH).offset("54")
+    assert offset.x == pytest.approx(1.0 * INCH_TO_MM)
+    assert offset.z == pytest.approx(3.0 * INCH_TO_MM)
+    assert offset.a == 90.0, "A is degrees and must not be scaled"
+
+
+def test_inch_profile_does_not_scale_spindle_rpm() -> None:
+    assert load_profile_text(INCH).limits.max_spindle_rpm == 24000.0
+
+
+def test_unknown_units_is_refused() -> None:
+    with pytest.raises(ProfileError, match="units"):
+        load_profile_text("[machine]\nunits = 'furlongs'\n")
+
+
+# --------------------------------------------------------------------------- absence vs default
+
+
+def test_absent_limits_are_none_not_invented() -> None:
+    """An invented max_feed would produce confident diagnostics about an unknown machine."""
+    profile = load_profile_text(MINIMAL)
+    assert profile.limits.max_feed is None
+    assert profile.limits.max_spindle_rpm is None
+    assert profile.safety.min_clearance_z is None
+    assert profile.axes == {}
+
+
+def test_tolerances_do_have_defaults() -> None:
+    """Tessellation cannot proceed without a number, so these are the one exception."""
+    tolerance = load_profile_text(MINIMAL).tolerance
+    assert tolerance.arc_chord == 0.01
+    assert tolerance.rotary_chord == 0.01
+    assert tolerance.arc_radius_mismatch == 0.005
+
+
+def test_zero_is_a_real_value_not_a_missing_one() -> None:
+    """`value or default` would silently turn `rotary_wrap_warn = 0` into 360."""
+    profile = load_profile_text(MINIMAL + "\n[limits]\nrotary_wrap_warn = 0.0\nmax_feed = 0.0\n")
+    assert profile.limits.rotary_wrap_warn == 0.0
+    assert profile.limits.max_feed == 0.0
+
+
+def test_defaults_apply_with_no_sections_at_all() -> None:
+    profile = load_profile_text("")
+    assert profile.name == "unnamed"
+    assert profile.declared_units == "mm"
+    assert profile.kinematics.rotary_mount == "table"
+    assert profile.safety.require_spindle_before_cut is True
+
+
+# --------------------------------------------------------------------------- unknown keys
+
+
+def test_unknown_key_is_reported_not_ignored() -> None:
+    """`max_fed = 3000` is a typo that would otherwise silently disable the feed check."""
+    profile = load_profile_text(MINIMAL + "\n[limits]\nmax_fed = 3000.0\n")
+    assert "limits.max_fed" in profile.unknown_keys
+    assert profile.limits.max_feed is None
+
+
+def test_unknown_section_is_reported() -> None:
+    profile = load_profile_text(MINIMAL + "\n[toolchanger]\ncapacity = 20\n")
+    assert "toolchanger" in profile.unknown_keys
+
+
+def test_unknown_axis_key_is_reported() -> None:
+    profile = load_profile_text(MINIMAL + "\n[axes.x]\nmax = 1.0\nbacklash = 0.01\n")
+    assert "axes.x.backlash" in profile.unknown_keys
+    assert profile.axes["X"].max == 1.0
+
+
+def test_unknown_offset_key_is_reported() -> None:
+    profile = load_profile_text(MINIMAL + "\n[offsets]\ng99 = [1.0, 2.0, 3.0]\n")
+    assert "offsets.g99" in profile.unknown_keys
+    assert profile.offsets == {}
+
+
+def test_unknown_keys_do_not_prevent_loading() -> None:
+    """A profile written for a newer version must still load."""
+    profile = load_profile_text(MINIMAL + "\n[limits]\nmax_feed = 10.0\nfuture_thing = 1\n")
+    assert profile.limits.max_feed == 10.0
+    assert profile.unknown_keys == ("limits.future_thing",)
+
+
+# --------------------------------------------------------------------------- malformed input
+
+
+def test_invalid_toml_is_refused() -> None:
+    with pytest.raises(ProfileError, match="invalid TOML"):
+        load_profile_text("[machine\nname = 'x'")
+
+
+def test_non_numeric_limit_is_refused() -> None:
+    with pytest.raises(ProfileError, match="number"):
+        load_profile_text(MINIMAL + "\n[limits]\nmax_feed = 'fast'\n")
+
+
+def test_boolean_is_not_accepted_as_a_number() -> None:
+    """`True` is an int in Python; accepting it would make max_feed = 1.0 mm/min."""
+    with pytest.raises(ProfileError, match="number"):
+        load_profile_text(MINIMAL + "\n[limits]\nmax_feed = true\n")
+
+
+def test_axis_min_above_max_is_refused() -> None:
+    with pytest.raises(ProfileError, match="exceeds max"):
+        load_profile_text(MINIMAL + "\n[axes.x]\nmin = 10.0\nmax = 1.0\n")
+
+
+def test_bad_centerline_offset_is_refused() -> None:
+    with pytest.raises(ProfileError, match="centerline_offset"):
+        load_profile_text(MINIMAL + "\n[kinematics]\ncenterline_offset = [1.0, 2.0]\n")
+
+
+def test_section_that_is_not_a_table_is_refused() -> None:
+    """`limits` must come before any table header to be a top-level key rather than machine.limits."""
+    with pytest.raises(ProfileError, match="must be a table"):
+        load_profile_text("limits = 5\n\n[machine]\nname = 'x'\n")
+
+
+def test_axis_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(ProfileError, match="must be a table"):
+        load_profile_text(MINIMAL + "\n[axes]\nx = 5\n")
+
+
+def test_missing_profile_file_raises_oserror(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        load_profile(tmp_path / "nope.toml")
+
+
+# --------------------------------------------------------------------------- shape
+
+
+def test_profile_is_frozen() -> None:
+    profile = load_profile_text(MINIMAL)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        profile.name = "other"  # type: ignore[misc]
+
+
+def test_profile_defaults_are_not_shared_between_instances() -> None:
+    """A mutable default would let one profile's axes leak into another."""
+    first = MachineProfile()
+    second = MachineProfile()
+    first.axes["X"] = load_profile(DEFAULT_PROFILE).axes["X"]
+    assert second.axes == {}
