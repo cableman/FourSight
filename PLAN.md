@@ -386,6 +386,37 @@ The old rule — "unknown codes → warning, never crash" — is right for inert
 
 An unrecognized code that never touches position stays a warning. An unrecognized or unimplemented code that *changes how subsequent motion is interpreted* is **unsupported**, never a warning.
 
+### Verifier infrastructure (T1.6)
+
+`Diagnostic(rule_id, severity, line, message, fix_ids, offset)` in `verify/report.py`; `Rule`,
+`Program`, the registry and `verify()` in `verify/rules.py`.
+
+- **`Severity` is a `StrEnum`** so CLI output and string comparisons need no conversion.
+- **`Diagnostic` is frozen and hashable**, because the fixture strategy diffs the *set* of
+  diagnostics a mutated file produces against its baseline. `fix_ids` is a `tuple` rather than a
+  `list` so the dataclass can stay frozen — the plurality this plan calls for is what matters.
+- **`rule_id` is not in the original sketch but is required.** Tests assert on it instead of on
+  message text, and any future suppression mechanism keys on it. `offset` is carried when known,
+  since `ParseError` already has it and discarding held information costs precise highlighting.
+- **Rules see the whole `Program`**, not one command at a time: "no work offset before motion",
+  "lacks M30" and "G91 active at program end" cannot be answered from a single block.
+- **`Program` has no program-wide `units` field.** A program may switch G20/G21 mid-file, so the
+  units that matter for a message are those in force at the offending block.
+- **`Program.parse_errors` is carried unconverted.** Turning a `ParseError` into a `Diagnostic`
+  means choosing a severity, which is a check's judgment (T1.7), not the driver's.
+- **A rule that raises becomes one diagnostic about itself** and the others still run; the verifier
+  exists to list every problem it can find. Diagnostics yielded before the failure are kept.
+- **Registration is by `@register_rule` at class-definition time**, and `load_builtin_checks()` uses
+  `importlib.import_module` rather than a plain `import`. An import kept purely for its registration
+  side effect looks unused: `ruff check --fix` deleted exactly that line as F401, leaving the
+  registry permanently empty. **A verifier that finds nothing is indistinguishable from a clean
+  program**, so that failure was silent. Two tests guard it — one that the package really is
+  imported, one that every module in `checks/` appears in `checks/__init__.py`.
+- **Duplicate or empty `rule_id` is refused**, since a silent collision makes one rule invisible.
+- Positions render in the program's declared units via `format_length` / `format_feed`;
+  `format_angle` deliberately takes **no** units argument, because rotary values are degrees in
+  every unit mode and a parameter there could only be misused.
+
 ### Unsupported motion codes (v1)
 
 These are common enough that silently mis-drawing them is the most likely way FourSight produces a wrong picture:

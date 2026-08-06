@@ -403,13 +403,40 @@ taxonomy gets teeth.
       Files: `src/foursight/machine/profile.py`, `profiles/default_4axis.toml`,
       `tests/test_profile.py`, `PLAN.md`
 
-- [ ] **T1.6 — `verify/report.py` + `verify/rules.py`**
-      `Diagnostic(severity, line, message, fix_ids)` — `fix_ids` is a **list**. Severity is the
-      three-tier enum: `error` | `unsupported` | `warning`, per PLAN.md § *Diagnostic severity
-      taxonomy*. `Rule` base class + registry so checks self-register.
-      Diagnostic messages render positions **in the program's declared units**.
-      **DoD:** registry test (registering, listing, no duplicate rule ids); a unit-formatting test
-      asserting an inch program reports inches.
+- [x] **T1.6 — `verify/report.py` + `verify/rules.py`** — *done*
+      `Diagnostic`, three-tier `Severity` (`StrEnum`), unit-aware formatting, `Rule` base class,
+      `Program`, the `@register_rule` registry and the `verify()` driver. Recorded in PLAN.md
+      § Verifier infrastructure.
+      **DoD met:** 35 tests in `tests/test_verify.py`; 255 across the suite. Registry covered
+      (registering, ordered listing, duplicate ids refused, empty id refused, idempotent
+      re-registration) and the inch-formatting requirement asserted — `format_length(400, "inch")`
+      → `"15.748 in"`.
+      **A silent failure mode found and fixed mid-task.** `load_builtin_checks()` originally held a
+      plain `import foursight.verify.checks` for its registration side effect. `ruff check --fix`
+      **deleted it as F401**, turning the function into a no-op and leaving the registry permanently
+      empty — and *a verifier that finds nothing looks exactly like a clean program*, so nothing
+      would have complained. Switched to `importlib.import_module`, which no linter can mistake for
+      unused, and added two guards: one asserting the package really gets imported, one comparing
+      the modules on disk in `checks/` against those named in `checks/__init__.py`.
+      **Design additions beyond PLAN's sketch, all recorded there:** `rule_id` (tests assert on it
+      rather than brittle message text; suppression will key on it); `offset` carried when known
+      since `ParseError` already has it; `fix_ids` as a `tuple` so `Diagnostic` can be frozen and
+      **hashable**, which is what lets T1.10 diff diagnostic *sets*.
+      **Judgment calls:** rules see the whole `Program` because many checks are program-scoped;
+      `Program` has no program-wide `units` field, since a program may switch G20/G21 mid-file;
+      `parse_errors` are carried unconverted because choosing their severity is T1.7's judgment; a
+      rule that raises becomes one diagnostic about itself while the rest still run, with
+      already-yielded findings kept; and `format_angle` takes **no** units argument, because a
+      parameter there could only be misused.
+      **Also fixed:** `format_length(-0.0001, "mm")` rendered `-0 mm`, which reads like a real
+      quantity. Values that round to zero now render `0`.
+      **Mutation-verified, all four caught:** neutering `load_builtin_checks`, allowing duplicate
+      rule ids, letting a broken rule propagate (2 tests), and adding a check module that
+      `checks/__init__.py` does not import.
+      Blocked by: T1.3, T1.5
+      Files: `src/foursight/verify/report.py`, `src/foursight/verify/rules.py`,
+      `src/foursight/verify/checks/__init__.py`, `tests/test_verify.py`, `PLAN.md`
+
       Blocked by: T1.3, T1.5
 
 - [ ] **T1.7 — Structural checks** — `verify/checks/structural.py`
