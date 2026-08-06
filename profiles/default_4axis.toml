@@ -36,8 +36,11 @@ max = 300.0
 max_rapid = 5000.0 # mm/min
 
 [axes.z]
+# Machine Z, with the g54 origin at 0. The positive headroom is not cosmetic: `min_clearance_z`
+# below requires rapids to stay above Z+5, so a Z range capping at 0.0 would make every possible
+# program non-compliant — there would be nowhere legal to retract to.
 min = -150.0
-max = 0.0
+max = 100.0
 max_rapid = 3000.0 # mm/min
 
 [axes.a]

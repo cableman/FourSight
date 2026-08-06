@@ -472,17 +472,42 @@ taxonomy gets teeth.
       tolerance value.
       Blocked by: T1.6
 
-- [ ] **T1.10 — Fixture corpus: clean baseline + single-mutation siblings**
-      One known-clean 4-axis `.nc` baseline. Each broken fixture is that baseline with **exactly
-      one** mutation. Test helper asserts on the *newly added* diagnostic set — never
-      "exactly one diagnostic per file" (a file missing G21 also trips "no work offset" and
-      "lacks M30"). Plus targeted fixtures for: G18 arc direction, helical arc, full-circle IJK,
-      R-format >180°, canned-cycle span, cutter-comp span, inch program, block delete, `%` framing,
-      `Oxxxx` header.
-      **DoD:** every fixture parses without exception; the baseline yields a known, asserted
-      diagnostic set that all mutation tests diff against.
+- [x] **T1.10 — Fixture corpus: clean baseline + single-mutation siblings** — *done (built early,
+      ahead of T1.7–T1.9, because the corpus is an input to the checks rather than an output)*
+      `tests/fixtures/baseline_4axis.nc` plus 9 targeted fixtures, and **20 mutations declared
+      in `tests/conftest.py`** covering the whole PLAN.md § Verifier Rules checklist.
+      **Mutations are derived, not stored.** Each broken fixture is the baseline plus one
+      declarative edit, so the single-mutation property cannot rot the way 20 hand-maintained
+      near-copies of the baseline would.
+      `test_every_mutation_changes_exactly_one_line` **enforces** it rather than trusting it, and
+      `apply_mutation` refuses unless its `find` string matches exactly one line.
+      **Each mutation declares the `rule_id` it must add**, so T1.7–T1.9 have a written contract.
+      Until a rule registers, its test **skips naming the missing rule** — an unimplemented check is
+      visible as pending, never as passing. `test_pending_rules_are_visible` prints the outstanding
+      list (currently 19 rules).
+      **DoD met, with one part necessarily deferred:** all 10 fixtures load through the real loader
+      and parse without raising; every command in every fixture slices its own source line back out;
+      the baseline's diagnostic set is asserted (empty today, and the test reports any drift). The
+      per-mutation *diagnostic* assertions cannot pass until their rules exist — that is the 20
+      skips, and they convert to real assertions automatically as T1.7–T1.9 land.
+      **A profile bug found by trying to write a genuinely clean program:** `default_4axis.toml` had
+      `axes.z.max = 0.0` while `safety.min_clearance_z = 5.0` required rapids to stay above Z+5.
+      **No program could satisfy both** — there was nowhere legal to retract to, so a clean baseline
+      was impossible. Z max raised to 100.0 with the reasoning recorded in the profile.
+      **A fixture bug caught by the corpus's own guard:** `arc_g18_direction.nc` had **nested
+      parentheses** in a comment. G-code comments do not nest, so the comment ended at the first
+      `)` and the remainder tokenized as code, yielding 14 spurious errors. Exactly the failure
+      `test_targeted_fixtures_have_no_parse_errors` exists to prevent — a typo in a fixture would
+      otherwise surface later as a mystery diagnostic blamed on the construct under test.
+      Baseline geometry verified independently before building on it: both arcs are exact quarter
+      circles, zero radius mismatch, and they chain endpoint-to-endpoint.
+      **Note for T1.8:** `min_clearance_z` is ambiguous — the check reads machine Z, but a
+      machinist thinks of clearance above the *part*. With `g54 = [0,0,0,0]` they coincide, which is
+      why the baseline passes; decide explicitly when implementing the rule.
       Blocked by: T1.3
-      Files: `tests/fixtures/*.nc`, `tests/conftest.py`
+      Files: `tests/fixtures/*.nc` (10), `tests/conftest.py`, `tests/test_fixtures.py`,
+      `profiles/default_4axis.toml`
+
 
 - [ ] **T1.11 — CLI: `foursight parse` / `foursight check`**
       `parse` dumps commands; `check` runs the verifier and reports `severity line message`.
