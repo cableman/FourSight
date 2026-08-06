@@ -465,6 +465,29 @@ it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated 
   separate programming decision to change.
 - Coolant state is tracked inside its rule rather than added to `ModalState`; nothing else needs it.
 
+### Geometry checks (T1.9)
+
+`verify/checks/geometry.py`, 5 rules. **Travel limits here are endpoint-only** — T2.8 re-runs the
+same check over interpolated points, because an arc can bulge past a limit mid-sweep while both of
+its endpoints sit comfortably inside it. Nothing in this module proves a program stays in bounds.
+
+- **Arc radius comparison happens in programmed coordinates**, deliberately: a work offset is a
+  uniform translation and cannot change a radius, so applying one would add rounding for nothing.
+- **`tolerance.arc_radius_mismatch` has exactly one source**, the profile — asserted by a test that
+  the same arc is accepted under a loose profile and rejected under a strict one, so the T5.2 fix
+  cannot drift from the check.
+- **`geometry.arc-r-invalid`** covers the two ways an R-format arc fails to describe an arc:
+  coincident endpoints (which is why a full circle is IJK-only), and |R| below half the chord, where
+  no such circle exists. A semicircle, `2R == chord`, is the limiting valid case.
+- **Linear travel downgrades `error` → `warning` on an unknown work offset**, per this plan. **Rotary
+  travel does not** — the downgrade is attached specifically to the linear bullet, and a non-zero
+  rotary work offset is rare; the assumption is stated in the message instead.
+- **Rotary and linear limits are checked by separate rules.** A rotary axis is skipped by the linear
+  rule, or every rotary violation would be reported twice.
+- **`geometry.rotary-wrap` measures the block's *delta*, not its target.** A350 → A400 is a 50°
+  move. It assumes A started at 0 when the axis has no established position, and says so: refusing
+  to judge would skip the very first block, often the largest move in a wrapping program.
+
 ### Unsupported motion codes (v1)
 
 These are common enough that silently mis-drawing them is the most likely way FourSight produces a wrong picture:

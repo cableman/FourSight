@@ -113,6 +113,13 @@ MUTATIONS: tuple[Mutation, ...] = (
         "geometry.arc-radius-mismatch", "E: arc radius mismatch beyond tolerance",
     ),
     Mutation(
+        "arc_r_coincident",
+        "N100 G2 X40.0 Y20.0 I0.0 J10.0",
+        "N100 G2 X50.0 Y10.0 R10.0",
+        "geometry.arc-r-invalid",
+        "E: R-format arc with coincident endpoints is undefined",
+    ),
+    Mutation(
         "rotary_wrap_warning", "N130 G1 A90.0 F1800", "N130 G1 A900.0 F1800",
         "geometry.rotary-wrap", "W: rotary move exceeds limits.rotary_wrap_warn (360)",
     ),

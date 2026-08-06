@@ -511,15 +511,40 @@ taxonomy gets teeth.
       `src/foursight/verify/checks/__init__.py`, `tests/test_checks_process.py`,
       `tests/conftest.py`, `tests/fixtures/arc_r_format.nc`, `PLAN.md`
 
-- [ ] **T1.9 — Sim-free geometry checks** — `verify/checks/geometry.py`
-      What is checkable without interpolation: arc radius mismatch beyond
-      `tolerance.arc_radius_mismatch`; R-format arc with coincident endpoints (error);
-      rotary move > `rotary_wrap_warn` degrees in one block; endpoint-only axis-limit check.
-      Tolerance comes from the profile, **one source only** — the check and the fix (T5.2) must
-      not each hard-code it. Interpolated-point limit checking arrives with the simulator (T2.8).
-      **DoD:** fixtures per check; a test asserting the check and the arc fix read the same
-      tolerance value.
+- [x] **T1.9 — Sim-free geometry checks** — `verify/checks/geometry.py` — *done*
+      5 rules: `geometry.arc-radius-mismatch`, `.arc-r-invalid`, `.axis-travel-exceeded`,
+      `.rotary-travel-exceeded`, `.rotary-wrap`. Recorded in PLAN.md § Geometry checks.
+      **DoD met, and the verifier is complete:** 41 tests in `tests/test_checks_geometry.py`;
+      **498 across the suite with zero skips** — every one of the corpus's 22 mutations now asserts a
+      real diagnostic, and the clean baseline still reports nothing. 23 rules registered in total.
+      **`tolerance.arc_radius_mismatch` has one source**, asserted rather than assumed: the same arc
+      is accepted under a loose profile and rejected under a strict one, so the T5.2 fix cannot
+      drift from the check. PLAN.md warns specifically against hard-coding it at both sites.
+      **Arc tests check hand-computed values**, not whatever the code returns — G17/G18/G19 IJK
+      mappings, G90.1 vs G91.1 centres, helical arcs measured in-plane only, and omitted axis words.
+      **Added `geometry.arc-r-invalid` beyond the checklist's coincident-endpoint case:** |R| below
+      half the chord describes no circle at all. Same class of "undefined, not imprecise", so it
+      shares the rule. A semicircle (`2R == chord`) is the limiting valid case and is accepted.
+      **A deliberate asymmetry, and a deviation worth knowing:** linear travel downgrades
+      `error` → `warning` on an unknown work offset per PLAN, but rotary travel does **not** — PLAN
+      attaches that downgrade to the linear bullet only, and a non-zero rotary work offset is rare.
+      The assumption is stated in the message so the severity follows the plan while the uncertainty
+      stays visible.
+      **Three problems caught while writing it:** a dummy `Command` constructed just to read the
+      start position (replaced by separate start/end helpers); a lambda built inside a loop; and
+      rotary axes being checked by *both* travel rules, which would have reported every rotary
+      violation twice.
+      **Mutation-verified — 6 mutations, and the sixth exposed a non-discriminating test.**
+      Swapping G18's K for J failed 2; treating every centre as absolute failed 15; hard-coding the
+      tolerance failed 1; removing the offset downgrade failed 1; accepting coincident-endpoint R
+      arcs failed 2. But making rotary wrap read the absolute target instead of the delta failed
+      **nothing**: the test used A350 → A360, where neither reading exceeds the 360 threshold.
+      Re-pointed at A350 → A400, where the delta (50) and the target (400) fall on opposite sides of
+      it.
       Blocked by: T1.6
+      Files: `src/foursight/verify/checks/geometry.py`,
+      `src/foursight/verify/checks/__init__.py`, `tests/test_checks_geometry.py`,
+      `tests/conftest.py`, `PLAN.md`
 
 - [x] **T1.10 — Fixture corpus: clean baseline + single-mutation siblings** — *done (built early,
       ahead of T1.7–T1.9, because the corpus is an input to the checks rather than an output)*
