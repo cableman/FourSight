@@ -268,6 +268,27 @@ class SegmentStore:
 
 **`kind` is motion type only.** The earlier `'rapid' | 'feed' | 'arc'` conflated motion type with geometry: an arc is always a cutting move, and after interpolation everything is a line segment anyway. Rendering groups by rapid vs feed. If the originating motion code is needed, it is recoverable via `line[i]`.
 
+### Segment store implementation (T2.1)
+
+`SegmentStore` plus a `SegmentBuilder`. **Measured 38.5 MB at N = 500k (77 bytes/segment)**, against
+this plan's ~38 MB prediction and the 200 MB+ a per-object layout would cost.
+
+- **`vertices` is a genuine zero-copy view.** `lin.reshape(-1, 3)` returns a view whose `.base` *is*
+  `lin`, asserted with `np.shares_memory`. Converting to float32 for upload is the renderer's job;
+  doing it in the store would double the resident cost.
+- **Growth is chunked, then concatenated once.** A doubling realloc would leave up to 2× the needed
+  capacity resident, which the 250 MB budget cannot spare; the single concatenate at `finalize` is
+  the price of exactly-sized final arrays.
+- **`add_polyline` is the vectorized path** interpolation should use. Appending 500k segments one at
+  a time through Python would cost more than the interpolation itself. `rotations` is a **separate
+  argument**, never a fourth column of `points`, so `(M, 4)` input is rejected rather than
+  interpreted — the mm/degrees split is enforced at the call site, not just in storage.
+- **`finalize` refuses a store containing `line == 0`.** An untraceable segment silently breaks
+  editor sync, diagnostics and fixes, so it cannot be constructed in the first place.
+- `set_part_coordinates` validates shape and dtype and **rejects an array aliasing `lin`**;
+  `validate()` additionally checks C-contiguity, since non-contiguous data cannot be uploaded
+  without a repack whatever its shape claims.
+
 ### Coordinate frames
 
 `lin` is **always machine coordinates**. Verification (travel limits) requires machine coordinates; table-mount display requires part coordinates. The rotary transform depends on A at every interpolation step, so it is nonlinear along the path and *cannot* be expressed as a view matrix — it must be baked into vertex positions. The buffer builder therefore fills `lin_part` as a second array for display. Never transform `lin` in place; doing so silently destroys the ability to verify.

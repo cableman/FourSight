@@ -717,15 +717,32 @@ Carried into M2:
 Built on the **4-axis-shaped data model from day one**, kinematics transform as identity until M4.
 Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially changes T2.5–T2.7.
 
-- [ ] **T2.1 — `sim/segments.py`: `SegmentStore`**
-      Columnar parallel numpy arrays exactly as specified: `lin (N,2,3) f64`, `rot (N,2) f64`,
-      `kind (N,) uint8`, `line (N,) int32`, `duration (N,) f64`, `lin_part (N,2,3) | None`.
-      Never per-object segments. `rot` stays **out** of the position vector. `kind` is motion type
-      only (RAPID | FEED) — arcs are already lines after interpolation.
-      Amortized growth (chunked append + finalize), since segment count is unknown up front.
-      **DoD:** `lin.reshape(-1, 3)` is a zero-copy contiguous view; a test asserts memory for
-      N = 500k is within the ~38 MB expectation and that every segment has a nonzero `line[i]`.
+- [x] **T2.1 — `sim/segments.py`: `SegmentStore`** — *done*
+      Columnar arrays exactly as PLAN specifies, plus a `SegmentBuilder`. Recorded in PLAN.md
+      § Segment store implementation.
+      **DoD met:** 39 tests in `tests/test_segments.py`; **586 across the suite**. `lin.reshape(-1, 3)`
+      is a genuine zero-copy view (`.base is lin`, `np.shares_memory`), and **memory at N = 500k is
+      38.5 MB (77 bytes/segment)** — against PLAN's ~38 MB and the 200 MB+ per-object storage would
+      cost. The figure is printed in the terminal summary like the other measurements.
+      **Chunked growth rather than a doubling realloc**, because doubling leaves up to 2× the needed
+      capacity resident and the 250 MB budget cannot spare it. One concatenate at `finalize` buys
+      exactly-sized arrays.
+      **`add_polyline` is vectorized** — 500k per-segment Python calls would cost more than the
+      interpolation that feeds them. `rotations` is a **separate argument**, so `(M, 4)` points are
+      *rejected* rather than silently interpreted: the mm/degrees split is enforced at the call site,
+      not only in storage. A test also scans the public API for any 4-wide array accessor, since a
+      convenience helper returning one is the obvious way this invariant would erode.
+      **`finalize` refuses `line == 0`.** An untraceable segment silently breaks editor sync,
+      diagnostics and fixes, so it cannot be built at all.
+      **Mutation-verified, all six caught:** returning a copy from `vertices` (1 test), widening `lin`
+      to 4 (33), accepting a zero line number (1), storing `lin` as float32 (32 — note this *halves*
+      memory, so the memory assertion alone would have welcomed it), having
+      `set_part_coordinates` also write `lin` (1), and keeping whole chunks at finalize (30).
+      One mutation initially printed nothing and looked like a survivor; the cause was a literal
+      `\n` in a bash-quoted replacement making the file invalid Python. Re-run properly, it is
+      caught — a broken mutation is not evidence of a robust test.
       Blocked by: T1.13
+      Files: `src/foursight/sim/segments.py`, `tests/test_segments.py`, `PLAN.md`
 
 - [ ] **T2.2 — `machine/state.py`: `MachineState`**
       Live position + modal groups during simulation. G53 non-modal machine coords, G28/G30
