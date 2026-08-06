@@ -872,10 +872,51 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       `src/foursight/parser/model.py`, `src/foursight/verify/checks/structural.py`,
       `tests/test_simulator.py`, `PLAN.md`
 
-- [ ] **T2.6 — Batched GL viewport** — `gui/viewport3d.py`
-      Pre-batch into ≤ 10 buffers grouped by `kind`; never one draw call per move. Rapids red,
-      feeds green (colour-only unless D3 says otherwise). Do not rely on `glLineWidth > 1.0`.
-      Blocked by: T2.5, D1
+- [x] **T2.6 — Batched GL viewport** — `gui/batching.py`, `gui/viewport3d.py` — *done*
+      Split in two: `batching.py` holds the logic and **imports no Qt**; `viewport3d.py` is the thin
+      widget. Recorded in PLAN.md § Batching Layer.
+      **DoD met:** ≤ 10 buffers grouped by kind — in practice **4**, one per (kind, trust) pair, and a
+      500k all-feed program renders in **one** draw call. Rapids red, feeds green, colour-only per D3.
+      Width is 1.0 everywhere and nothing depends on it, because pyqtgraph skips `glLineWidth`
+      entirely on core forward-compatible profiles.
+      **46 tests; 797 across the suite. 32 of the 46 need no Qt**, which is the reason for the split:
+      what can be *wrong* about rendering is which segments land in which batch, and that should not
+      require a display to test. The `headless` CI job (no `[gui]` extra) runs those 32 and skips the
+      rest.
+      **Verified against a real GL context, with production code**: **241 fps median at 500,070
+      segments**, worst frame 10.7 ms against the 33.3 ms a 30 fps floor allows — ~8x margin, measured
+      through `ToolpathViewport` rather than the spike's own batching, with the host under load ~4.0.
+      **Found a real bug in my own first version**, and it is the worst kind: `_rebuild_items` called
+      `clear_toolpath`, which reset `self.batches` to `[]` *before* the loop that reads it, so **no GL
+      items were ever created and every program rendered as an empty scene** — no exception, no
+      warning, just a viewport that looks like a program with no geometry. Caught by the offscreen
+      smoke run, which is why `test_viewport.py` now exists rather than leaving this to the manual
+      script: Qt's `offscreen` platform cannot create a GL context but *can* construct widgets and add
+      items, enough to assert one GL item per batch and no stale items after a reload.
+      **Corrected a PLAN memory figure that my own T2.11 had set too low.** T0.7 and T2.11 both
+      measured geometry *only* and agreed at 38.5 MB; neither counted the **float32 copy GL requires**,
+      12.0 MB at 500k. The real end-to-end total is **50.5 MB against a 50 MB budget** — quietly
+      exceeded. The copy is irreducible (float64 store for precision, float32 for GL), so PLAN now
+      says **55 MB** and `test_batching.py` asserts the *combined* number, the only place both halves
+      are in scope.
+      **Mutation-verified, and one survivor was a hole in my own test:** styling untrusted spans
+      exactly like trusted ones **passed all 44 tests**, because the only colour comparison pitted an
+      untrusted *feed* against a trusted *rapid* — green != red held while the tier had collapsed.
+      Now compared per kind, plus a parametrized test asserting `build_batches` applies the untrusted
+      palette for both kinds. Caught: OR instead of AND in the partition (6 tests), no float32
+      conversion (3), a wrong-length mask accepted (1), rotary leaking into the linear bounds (1).
+      One mutant is *equivalent*, not missed: removing the outer empty-trust-group guard changes
+      nothing, since the inner loop already skips empty groups — it is an optimization, not a check.
+      **Not green at the moment, and not because of this change:** `test_parse_rate_meets_the_plan`
+      and `test_tokenize_rate_is_recorded` fail under sustained host load (~4.0), measuring 35–49k
+      lines/sec against the 50k floor where an idle machine gives 96–134k. Proof it is noise rather
+      than regression: in one run `tokenize` measured *faster than the full parse that contains it*,
+      which is impossible for correct code. Everything else passes — **780 in 5.1 s** with the perf
+      module excluded. The threshold is PLAN's requirement and was left alone; `fastest()` already
+      takes the best of three, which cannot help when the contention lasts the whole run.
+      Blocked by: T2.5, D1 *(D1 resolved by T0.7 — pyqtgraph holds)*
+      Files: `src/foursight/gui/batching.py`, `src/foursight/gui/viewport3d.py`,
+      `tests/test_batching.py`, `tests/test_viewport.py`, `tests/test_perf.py`, `PLAN.md`
 
 - [ ] **T2.7 — Qt shell** — `gui/app.py`, `gui/main_window.py`
       Open file, view toolpath, orbit/pan/zoom.

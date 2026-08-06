@@ -49,7 +49,9 @@ LARGE = 50_000
 TARGET_SEGMENTS = 500_000
 # PLAN.md § Performance Requirements, restated after T0.7 measured a 233 MB fixed Python+Qt+Mesa
 # baseline: the original "≤ 250 MB resident" cannot be met by any data model, so the budget binds on
-# what the data model controls — geometry ≤ 50 MB per 500k segments. Measured 38.5 MB.
+# what the data model controls. This is the **store half** of it — measured 38.5 MB. The GL half is
+# the float32 upload copy (12.0 MB at 500k), asserted in `test_batching.py`, and PLAN's *combined*
+# budget is 55 MB. Keeping the two apart is deliberate: this module must not need the [gui] extra.
 MAX_GEOMETRY_MB_PER_500K = 50.0
 # Blocks, not lines and not segments, because that is the unit the cost actually scales with. This
 # floor is what stops the simulate cost decaying; the gate *seconds* below are deliberately not

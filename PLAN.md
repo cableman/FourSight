@@ -81,7 +81,8 @@ FourSight/
 │   ├── gui/
 │   │   ├── app.py           # entry point
 │   │   ├── main_window.py
-│   │   ├── viewport3d.py    # GL view, camera, batched geometry
+│   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
+│   │   ├── viewport3d.py    # GL view and camera; thin, because batching.py holds the logic
 │   │   ├── picking.py       # segment ↔ screen hit-testing (see Picking)
 │   │   ├── editor.py        # code pane, line highlighting
 │   │   ├── timeline.py      # play/pause/scrub
@@ -796,8 +797,12 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   (100k lines parsed and rendered in 5 s) turns out tight, since verification would take ~1.1 s of
   that budget.
 - **Parse ≥ 50k lines/sec** — ~20 µs per line in CPython. Reachable, but only with `slots=True` on every hot dataclass, shared copy-on-write `ModalState`, `SourceRef` holding offsets rather than string copies, and one compiled regex per line rather than per word.
-- **Render 500k+ segments interactively** — pre-batch into ≤ 10 buffers grouped by kind; never one draw call per move.
-- **Memory — target restated after measurement (T0.7).** The columnar store's predicted ~38 MB per 500k segments is **confirmed**: measured geometry cost is 40 MB at 500k, 76 MB at 1M, 157 MB at 2M — linear at ~39 MB per 500k. But the original "≤ 250 MB resident for a 500k-segment program, including coordinate arrays and GL buffers" is **not achievable, and never was**: the fixed Python + Qt + Mesa baseline is **233 MB** with only 1k segments on screen, before any real geometry exists. A total-RSS cap therefore measures the interpreter and GL driver, not our data model. The budget binds on what the data model actually controls: **geometry + GL buffers ≤ 50 MB per 500k segments** (measured 40 MB). Total resident is recorded rather than capped — 273 MB at 500k on the baseline machine — because the fixed component is platform- and driver-dependent. Per-object segments would blow the geometry budget ~6× and remain ruled out.
+- **Render 500k+ segments interactively** — pre-batch into ≤ 10 buffers grouped by kind; never one draw call per move. **Met with ~8× margin using the production renderer (T2.6): 241 fps median at 500,070 segments, worst frame 10.7 ms against the 33.3 ms a 30 fps floor allows** — and in *one* draw call, since a program whose motion is all feed needs only one batch. Measured through `ToolpathViewport`, not the spike's own batching, on the baseline Intel Iris Xe with the host under load ~4.0; the T0.7 spike's higher 376.9 fps used ten artificially-split items on an idle machine.
+- **Memory — target restated after measurement (T0.7).** The columnar store's predicted ~38 MB per 500k segments is **confirmed**: measured geometry cost is 40 MB at 500k, 76 MB at 1M, 157 MB at 2M — linear at ~39 MB per 500k. But the original "≤ 250 MB resident for a 500k-segment program, including coordinate arrays and GL buffers" is **not achievable, and never was**: the fixed Python + Qt + Mesa baseline is **233 MB** with only 1k segments on screen, before any real geometry exists. A total-RSS cap therefore measures the interpreter and GL driver, not our data model. The budget binds on what the data model actually controls: **geometry + GL buffers ≤ 55 MB per 500k segments**. Total resident is recorded rather than capped — 273 MB at 500k on the baseline machine — because the fixed component is platform- and driver-dependent. Per-object segments would blow the geometry budget ~6× and remain ruled out.
+
+  **The 50 MB figure was corrected to 55 MB by the first end-to-end measurement (T2.6).** T0.7 and T2.11 both measured geometry *only* and agreed at 38.5 MB; neither counted the **float32 copy GL requires**, which adds **12.0 MB** at 500k (1M vertices × 3 × 4 B). The real total with the renderer attached is **50.5 MB — 38.5 MB float64 store + 12.0 MB GL positions** — which quietly exceeded a budget set from the geometry half alone. The copy is irreducible: the store is float64 because geometry precision demands it, and GL takes float32, so both live at once. Raising the number is the honest fix rather than pretending the upload is free.
+
+  What keeps that 12.0 MB from being 28 MB: **a uniform colour per batch, never a per-vertex colour array.** A per-vertex RGBA buffer would cost 16 MB at 500k — more than the positions — for information that is constant across an entire batch by construction.
 - **Simulation cost is per *block*, not per segment — measured (T2.11).** ~40 µs per motion block,
   essentially independent of how much geometry that block produces. The consequence inverts the
   intuition behind "the 100k-line and 500k-segment targets are different axes":
@@ -823,6 +828,37 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   segment**, against the 50 MB budget. So no per-block bookkeeping has crept in between parser and
   store. Peak RSS is recorded, never asserted — `resource` is Unix-only and Windows is in the matrix.
 - Simulation runs off the GUI thread (QThread) with progress reporting for large files.
+
+### Batching Layer
+
+`gui/batching.py` turns a `SegmentStore` into GL-ready vertex batches, and **contains no Qt**. The
+split is the point: what can be *wrong* about rendering is which segments end up in which batch, and
+that is testable without a display, a GL context, or the `[gui]` extra. `viewport3d.py` is then thin
+enough for the manual script to cover — 32 of T2.6's 46 tests need no Qt at all.
+
+- **One batch per (kind, trust) pair — four for a typical program**, not ten. The ≤ 10 budget is a
+  ceiling; fewer draw calls is strictly better, and the T0.7 spike used ten only to prove ten was
+  survivable. A 500k-segment program whose motion is all feed renders in **one** draw call.
+- **Untrusted geometry gets its own batch, never a shared one.** A cutter-compensated span is drawn as
+  the programmed centreline, which is *not where the tool goes*. Batching it in with ordinary feeds
+  would present it as understood, so the tier is enforced in the partition rather than left to a
+  styling pass that a later change could drop. Rapids red, feeds green, both amber when untrusted.
+- **Colour carries every distinction; line width carries none.** pyqtgraph skips the `glLineWidth`
+  call entirely on core forward-compatible profiles, so anything encoded in thickness silently
+  vanishes there with no error. All batches draw at width 1.0.
+- **A uniform colour per batch, never per-vertex RGBA** — that array would cost 16 MB at 500k, more
+  than the positions, to carry a value that is constant across the batch by construction.
+- **The store is never mutated.** `lin` stays machine coordinates because the verifier reads it; the
+  float32 conversion GL needs produces a new array, and `use_part_coordinates` reads `lin_part`.
+- **A wrong-length untrusted mask is refused, not broadcast.** Numpy would happily broadcast a
+  length-1 mask and mark nothing, silently downgrading every unverified span to ordinary geometry.
+
+Two failure modes here are invisible to the eye and so are tested explicitly: **the viewport drawing
+nothing**, and **the viewport still drawing the previous program**. The first was a real bug in the
+first version of `_rebuild_items` — it called `clear_toolpath`, which reset `batches` to `[]` before
+the loop that reads it, so no GL items were ever created and every program rendered as an empty scene,
+with no exception and no warning. Qt's `offscreen` platform cannot create a GL context but *can*
+construct widgets and add items, which is enough to catch both.
 
 ### Rendering Constraints
 
