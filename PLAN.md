@@ -170,7 +170,7 @@ class Word:                       # one address word
     value: float
 
 @dataclass(slots=True, frozen=True)
-class TokenError:                 # malformed input, REPORTED not raised
+class ParseError:                 # malformed input, REPORTED not raised
     offset: int                   # absolute offset into the source text
     text: str                     # the offending characters, as written
     message: str
@@ -183,15 +183,40 @@ class TokenizedLine:
     line_number: float | None = None      # N
     program_number: float | None = None    # Fanuc Oxxxx
     comments: list[str] | None = None
-    errors: list[TokenError] | None = None
+    errors: list[ParseError] | None = None
 ```
 
-- **`TokenError` is deliberately not a `Diagnostic`.** The dependency direction forbids the parse layer from naming a `verify` type, so the tokenizer reports neutral facts and the verifier attaches severity (T1.7).
+- **`ParseError` is deliberately not a `Diagnostic`.** The dependency direction forbids the parse layer from naming a `verify` type, so the tokenizer reports neutral facts and the verifier attaches severity (T1.7).
 - **`comments` and `errors` are `None` when empty**, not `[]`. Both are empty on the overwhelming majority of lines, and a 100k-line file would otherwise allocate 200k throwaway lists against a ~20 µs/line budget. Read them as `line.comments or ()`.
 - **N and O never appear in `words`.** An N-number labels the line; a bare `Oxxxx` is a Fanuc program number, consumed silently.
 - **Comments are stripped before words are scanned**, matching LinuxCNC, which makes `X (why not) 10` a legal spelling of `X10`. They are blanked in place rather than deleted, so every later offset — and therefore every error position — stays correct. Tokenizing them inline instead produced two *false* errors on valid input.
 - **LinuxCNC O-word flow control** (`O100 sub`, `o<name> while`, …) is detected and reported as a single unsupported construct. Without that, the letters of `sub` surfaced as three bogus "address has no value" errors, which would have hidden a construct that decides *which motion runs* — `unsupported`, never a warning.
 - **Measured: 159k lines/sec (6.27 µs/line)** on the baseline machine for a realistic mix, or 31% of the 20 µs/line budget, leaving ~13.7 µs for the resolver.
+
+### Resolver layer (T1.3)
+
+`resolve(lines)` → `ParseResult(commands, errors)`; `parse(text)` tokenizes and resolves in one
+call and is the entry point the CLI uses. Errors from both stages land in one list, in source
+order.
+
+- **Modal groups** use LinuxCNC numbering, restricted to the v1 subset. Two codes from one group in
+  a block is an error. **Group 1 includes the canned cycles G80–G89**: they are not *interpreted*,
+  but they must be resolved as motion modes, because that is exactly what makes a following bare
+  `X10 Y10` a drill cycle rather than a straight line.
+- **M-code groups** follow LinuxCNC too, which puts M7/M8/M9 in one group — so `M7 M8` is reported
+  as a conflict even though mist plus flood is physically meaningful. The normative dialect wins.
+- **`ModalState` has no motion field**, so the resolver carries the motion mode itself and puts the
+  resolved value on `Command.motion`. G80 sets it back to `None`; non-modal codes (G4, G53, G28, …)
+  leave it untouched, so `G53 G0 X0` keeps G0 active and a mid-contour dwell does not cancel G1.
+- **A repeated address word is an error, not last-one-wins.** `G1 X10 X20` would otherwise lose the
+  conflict silently in a letter-keyed dict.
+- **`G43`/`G44` with no H word keeps the active offset** rather than clearing it; LinuxCNC falls
+  back to the current tool's offset, and clearing would silently drop a real Z shift.
+- **Unrecognized codes are passed through untouched**, not dropped: they stay in `Command.gcodes`
+  so the verifier can classify them (warning if inert, `unsupported` if motion-affecting).
+- **Measured: 118.6k lines/sec (8.43 µs/line) for the full parse — 2.4× the 50k target.** The
+  resolver adds 2.31 µs/line on top of the tokenizer. On a 43k-command file, **one** `ModalState`
+  instance is shared by every command, which is the copy-on-write design working as intended.
 
 ### Segment store — columnar, not per-object
 

@@ -283,10 +283,10 @@ taxonomy gets teeth.
 
 - [x] **T1.2 — `parser/tokenizer.py`** — *done*
       Module-level compiled regexes, one `finditer` pass per line; nothing is compiled or matched
-      per word. `model.py` gained `Word`, `TokenError` and `TokenizedLine` (the layout already
+      per word. `model.py` gained `Word`, `ParseError` and `TokenizedLine` (the layout already
       promised `Word`); all recorded in PLAN.md § Tokenizer layer.
       **DoD met:** `tests/test_tokenizer.py`, 51 tests — every listed construct plus malformed
-      input (`X`, `XY`, `X1.2.3`, stray punctuation) reported as `TokenError` records, never raised.
+      input (`X`, `XY`, `X1.2.3`, stray punctuation) reported as `ParseError` records, never raised.
       `X1.2.3` keeps the valid `X1.2` and flags only `.3`; adjacent stray characters merge into one
       error rather than one per character.
       **Measured 159,476 lines/sec (6.27 µs/line)** for a realistic mix on the baseline machine —
@@ -302,7 +302,7 @@ taxonomy gets teeth.
          O-word flow control is now detected and reported as a single unsupported construct. This
          mattered beyond tidiness: flow control decides *which motion runs*, so it must reach T1.7
          as `unsupported`, and a malformed-word diagnosis would have buried it.
-      **Known gap, deliberate:** `TokenError` carries no severity — the parse layer cannot name a
+      **Known gap, deliberate:** `ParseError` carries no severity — the parse layer cannot name a
       `verify` type without violating the dependency direction. T1.7 converts these to
       `Diagnostic`s, and is where the O-word error becomes `unsupported` rather than `error`.
       A second `N` on one line is silently ignored (first wins); flagging duplicates is the
@@ -311,19 +311,36 @@ taxonomy gets teeth.
       Files: `src/foursight/parser/tokenizer.py`, `src/foursight/parser/model.py`,
       `tests/test_tokenizer.py`, `PLAN.md`
 
-- [ ] **T1.3 — `parser/resolver.py` — modal groups**
-      Words → `Command`. Canonicalize G-codes to strings: `G01`, `G1`, `G1.0` → `'1'`;
-      `G90.1` stays `'90.1'` — **never floats**. Resolve modal groups (motion, plane, distance,
-      arc-distance, feed mode, offset, units, tool-length, cutter-comp), carry modal motion onto
-      blocks with axis words only, and detect two codes from the same modal group in one block.
-      `ModalState` is copy-on-write: emit a new instance only when something changes, so
-      consecutive commands share one object.
-      G20 (inch) input converts to mm **at parse time**, while `ModalState.units` records the
-      program's declared units for diagnostics.
-      **DoD:** `tests/test_parser.py` covers canonicalization, modal carry-over, same-group
-      conflict, G20 conversion, multiple G- and M-words per block (`G90 G21 G17 G54`, `M3 M8`),
-      and `ModalState` instance sharing across unchanged blocks.
+- [x] **T1.3 — `parser/resolver.py` — modal groups** — *done*
+      `resolve(lines)` → `ParseResult(commands, errors)`, plus a `parse(text)` convenience the CLI
+      will use in T1.11. All four required behaviours verified: canonicalization
+      (`G01`/`G1`/`G1.0` → `'1'`, `G90.1` stays `'90.1'`, always strings), modal carry-over,
+      same-group conflicts for both G and M codes, G20 conversion, and `ModalState` sharing.
+      **DoD met:** 61 tests in `tests/test_parser.py` (40 new), 142 across the suite, ruff clean.
+      **Measured 118,569 lines/sec (8.43 µs/line) for the full parse — 2.4× the 50k target**, the
+      resolver adding only 2.31 µs/line. On a 43k-command file **one** `ModalState` is shared by
+      every command.
+      **A real perf bug, found by probing rather than by the tests I wrote first.** `feed` is
+      applied after unit conversion, so it bypassed the "only if it differs" filter that `S`/`T` go
+      through: restating an identical `F` allocated a fresh `ModalState` every line. CAM output
+      repeats `F` on **every** line, so copy-on-write was defeated on the single most common input
+      there is — 100 repeated-`F` lines produced 100 states instead of 1. Fixed, with a regression
+      test that states why. My first sharing test only covered `F` stated once, which is the easy
+      direction and passed throughout.
+      **Two bugs caught by re-reading before testing:** `("6")` is a string rather than a tuple, so
+      the M-code toolchange group was iterating characters; and `G43` with no `H` word cleared the
+      active length offset instead of keeping it, which would silently drop a real Z shift.
+      **Judgment calls recorded in PLAN.md:** canned cycles G80–G89 resolve *as motion modes* (that
+      is what makes a following bare `X10 Y10` a drill cycle); `M7 M8` is a conflict because
+      LinuxCNC groups them, even though mist+flood is physically meaningful; a repeated address word
+      is an error rather than last-one-wins; unrecognized codes pass through untouched so the
+      verifier can classify them.
+      Also renamed `TokenError` → **`ParseError`**: it now carries resolver-level problems such as
+      modal-group conflicts, and the old name would have been misleading. One commit old, no
+      external consumers.
       Blocked by: T1.2
+      Files: `src/foursight/parser/resolver.py`, `src/foursight/parser/model.py`,
+      `tests/test_parser.py`, `PLAN.md`
 
 - [ ] **T1.4 — `fileio/loader.py` (minimum viable)**
       Read a file to text + line offsets. Encoding detection with latin-1 fallback, BOM, CRLF.

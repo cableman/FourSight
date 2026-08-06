@@ -70,7 +70,7 @@ class Word:
 
 
 @dataclass(slots=True, frozen=True)
-class TokenError:
+class ParseError:
     """A malformed piece of a line.
 
     The tokenizer reports these rather than raising: one bad word must not cost us the rest of the
@@ -109,7 +109,7 @@ class TokenizedLine:
     line_number: float | None = None  # N
     program_number: float | None = None  # Fanuc Oxxxx
     comments: list[str] | None = None
-    errors: list[TokenError] | None = None
+    errors: list[ParseError] | None = None
 
     @property
     def has_errors(self) -> bool:

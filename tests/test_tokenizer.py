@@ -1,7 +1,7 @@
 """Tokenizer tests (T1.2).
 
 Every construct PLAN.md § Supported G-code Subset lists as tokenizer-level, plus malformed input,
-which must come back as ``TokenError`` records rather than exceptions.
+which must come back as ``ParseError`` records rather than exceptions.
 """
 
 import pytest

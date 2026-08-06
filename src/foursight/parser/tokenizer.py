@@ -6,7 +6,7 @@ compiling anything inside the loop. ``_TOKEN_RE`` is module-level and every line
 ``finditer`` pass.
 
 Malformed input is **reported, not raised**: a bad word must not cost us the rest of the file, and
-the verifier's job is to list every problem at once. Errors come back as ``TokenError`` records on
+the verifier's job is to list every problem at once. Errors come back as ``ParseError`` records on
 the ``TokenizedLine``.
 
 Creates each ``SourceRef`` once per line, shared by every ``Command`` and segment derived from it.
@@ -18,17 +18,15 @@ case-insensitivity, and words with no separating whitespace (``X1.0Y2.0``).
 
 import re
 
-from foursight.parser.model import SourceRef, TokenError, TokenizedLine, Word
+from foursight.parser.model import ParseError, SourceRef, TokenizedLine, Word
 
-# A single alternation, tried in order. Group order is the precedence:
+# A single alternation over the comment-free line, tried in order:
 #
-#   comment  ( ... )   — possibly unterminated, which is an error we detect after matching
-#   eol      ; ...     — to end of line; LinuxCNC accepts this, Fanuc does not (both accepted)
-#   word     X1.0      — a letter with a value; whitespace between the two is legal
-#   naked    X         — a letter with NO value: worth its own group so the message can say so,
-#                        rather than lumping it in with stray punctuation
-#   space              — skipped
-#   bad      .         — one stray character; consecutive ones are merged into a single error
+#   word   X1.0   — a letter with a value; whitespace between the two is legal
+#   naked  X      — a letter with NO value. Worth its own group so the message can say exactly
+#                   that, rather than lumping it in with stray punctuation.
+#   space         — skipped
+#   bad    .      — one stray character; consecutive ones merge into a single error
 #
 # The number pattern accepts '1', '1.', '1.0', '.5' and a leading sign. It deliberately does not
 # accept '1.2.3': that matches as '1.2' and leaves '.3' to `bad`, which is the diagnosis we want.
@@ -212,7 +210,7 @@ def _flush_bad(line: TokenizedLine, ref: SourceRef, pending: list[re.Match[str]]
 
 
 def _add_error(line: TokenizedLine, ref: SourceRef, at: int, text: str, message: str) -> None:
-    _append(line, "errors", TokenError(offset=ref.start + at, text=text, message=message))
+    _append(line, "errors", ParseError(offset=ref.start + at, text=text, message=message))
 
 
 def _append(line: TokenizedLine, attribute: str, item: object) -> None:
