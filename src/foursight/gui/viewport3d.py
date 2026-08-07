@@ -19,8 +19,10 @@ outside ``gui/`` imports it. ``gui.batching`` stays Qt-free so its tests need no
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl import GLViewWidget
+from PySide6.QtCore import Qt, Signal
 
 from foursight.gui.batching import Batch, bounds, build_batches
+from foursight.gui.picking import ScreenProjection, pick, project_store
 from foursight.sim.segments import SegmentStore
 from foursight.sim.simulator import Simulation
 
@@ -39,9 +41,14 @@ class ToolpathViewport(GLViewWidget):
     """Draws a ``Simulation`` as a small number of batched line items.
 
     Orbit, pan and zoom come from ``GLViewWidget`` itself: left-drag orbits, middle-drag pans, wheel
-    zooms. T2.7 wires this into a window; picking is T3.0 and deliberately absent, because with 500k
-    segments in four buffers Qt item picking is unavailable and the strategy is still undecided.
+    zooms. Clicking emits `segment_picked` with a segment index (T3.3), using the CPU screen-space
+    strategy decided in T3.0 — Qt item picking is unavailable with 500k segments in a handful of buffers.
     """
+
+    #: Emitted with the index of the segment under a click. Not emitted when the click hits nothing,
+    #: so a miss leaves the current selection alone rather than clearing it — a slightly-off click
+    #: should not undo the selection the user was looking at.
+    segment_picked = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -50,6 +57,8 @@ class ToolpathViewport(GLViewWidget):
         self._highlight: gl.GLLinePlotItem | None = None
         self.batches: list[Batch] = []
         self.highlighted_segments = 0
+        self._store: SegmentStore | None = None
+        self._projection: ScreenProjection | None = None
         self.setCameraPosition(distance=DEFAULT_DISTANCE_MM, elevation=30, azimuth=-60)
         self._add_grid()
 
@@ -83,6 +92,8 @@ class ToolpathViewport(GLViewWidget):
         # changes — and a mask of the wrong length would either raise or, worse, silently highlight
         # arbitrary segments of the new program.
         self.clear_highlight()
+        self._store = store
+        self._projection = None
         self._rebuild_items()
         self.fit_to(store, use_part_coordinates=use_part_coordinates)
 
@@ -171,6 +182,57 @@ class ToolpathViewport(GLViewWidget):
                 f"highlight mask has shape {mask.shape}, expected ({len(store)},) — one per segment"
             )
         return store.lin[mask].astype(np.float32, copy=False).reshape(-1, 3)
+
+    # ------------------------------------------------------------------ picking (T3.3)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """A left click without a drag picks a segment.
+
+        Distinguished from an orbit by comparing against the press position: `GLViewWidget` uses
+        left-drag to orbit, so picking on *press* would fire on every orbit and jump the editor around
+        while the user is just looking at the part.
+        """
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.LeftButton:
+            return
+        index = self.pick_at(event.position().x(), event.position().y())
+        if index is not None:
+            self.segment_picked.emit(index)
+
+    def pick_at(self, x: float, y: float) -> int | None:
+        """The segment under widget coordinates ``(x, y)``, or None."""
+        projection = self.projection()
+        return None if projection is None else pick(projection, (x, y))
+
+    def projection(self) -> ScreenProjection | None:
+        """The cached screen projection, reprojecting only when the camera or geometry has changed.
+
+        The cache is keyed on the **matrix itself** rather than on a dirty flag set by camera setters.
+        A flag has to be maintained at every mutation site — `setCameraPosition`, mouse drag, wheel,
+        resize, a direct `opts` poke — and a single missed one returns the wrong segment with nothing in
+        the picture to suggest it. Comparing the matrix cannot miss.
+        """
+        if self._store is None or len(self._store) == 0:
+            return None
+        mvp = self.pick_matrix()
+        width, height = self.width(), self.height()
+        if self._projection is not None and self._projection.matches(
+            mvp, width, height, len(self._store)
+        ):
+            return self._projection
+        self._projection = project_store(self._store, mvp, width, height)
+        return self._projection
+
+    def pick_matrix(self) -> np.ndarray:
+        """``projection @ view`` as a 4x4 numpy array, matching what the renderer used.
+
+        pyqtgraph 0.14 takes `(region, viewport)` on `projectionMatrix()` — older versions took nothing —
+        and `QMatrix4x4.data()` is column-major, hence the transposes. Both were pinned by the T3.0 spike.
+        """
+        viewport = (0, 0, self.width(), self.height())
+        projection = np.array(self.projectionMatrix(viewport, viewport).data(), dtype=np.float64)
+        view = np.array(self.viewMatrix().data(), dtype=np.float64)
+        return projection.reshape(4, 4).T @ view.reshape(4, 4).T
 
     # ------------------------------------------------------------------ camera
 

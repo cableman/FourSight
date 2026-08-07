@@ -25,7 +25,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from foursight.fileio.loader import FileLoadError
-from foursight.gui.session import open_program
+from foursight.gui.session import open_program, verify_program
 from foursight.machine.profile import MachineProfile
 from foursight.sim.simulator import SimulationCancelled
 
@@ -35,6 +35,9 @@ PROGRESS_INTERVAL = 2000
 
 PARSING = "Parsing"
 SIMULATING = "Simulating"
+#: The stage-two label. Not emitted as progress (see `_verify`); the diagnostics panel owns
+#: reporting that a check is running.
+VERIFYING = "Checking"
 
 
 class ProgramLoader(QThread):
@@ -47,6 +50,10 @@ class ProgramLoader(QThread):
     #: (done, total, stage) — `total` is 0 while the stage has no measurable extent, as parsing does not.
     progressed = Signal(int, int, str)
     loaded = Signal(object)  # OpenedProgram
+    #: Diagnostics, emitted *after* `loaded`. A second stage on purpose: verification costs 5.93 s at
+    #: 100k lines, and the toolpath is what the user opened the file to see. Geometry first, findings
+    #: after — the way a linter fills in behind an editor.
+    verified = Signal(object)  # tuple[Diagnostic, ...]
     failed = Signal(str)
     cancelled = Signal()
 
@@ -97,6 +104,30 @@ class ProgramLoader(QThread):
             self.failed.emit(str(error))
         else:
             self.loaded.emit(program)
+            self._verify(program)
+
+    def _verify(self, program) -> None:
+        """Stage two. Failures here must not retract the toolpath that already loaded successfully.
+
+        A rule raising is a bug in us, not in the user's file, and `verify` already converts a raising
+        rule into an `internal.rule-failed` diagnostic. Anything escaping that is reported as a failed
+        *check* while the geometry stays on screen — the alternative would throw away a good toolpath
+        because the verifier tripped.
+        """
+        if self._stop.is_set():
+            self.cancelled.emit()
+            return
+        # Deliberately *no* progress emit here. Stage one owns the status bar and leaves the program
+        # summary in it; announcing "Checking…" there would overwrite the blocks/segments/time line the
+        # user just got, and replace information with a transient. The diagnostics panel's own header
+        # says "Checking…", which is where check status belongs.
+        try:
+            diagnostics = verify_program(program, self.profile, block_delete=self.block_delete)
+        except Exception as error:  # noqa: BLE001 - see the docstring; the toolpath must survive
+            self.failed.emit(f"the check could not be completed: {error}")
+            return
+        if not self._stop.is_set():
+            self.verified.emit(diagnostics)
 
     def _report(self, done: int, total: int) -> None:
         self.progressed.emit(done, total, SIMULATING)

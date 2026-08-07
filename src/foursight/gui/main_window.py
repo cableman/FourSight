@@ -35,9 +35,11 @@ from PySide6.QtWidgets import (
 )
 
 from foursight.gui.background import ProgramLoader
+from foursight.gui.diagnostics_panel import DiagnosticsPanel
 from foursight.gui.editor import CodeEditor
 from foursight.gui.selection import LineSelection, select_line
 from foursight.gui.session import OpenedProgram
+from foursight.gui.timeline_bar import TimelineBar
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.profile import MachineProfile
 
@@ -63,6 +65,8 @@ class MainWindow(QMainWindow):
 
         self.viewport = ToolpathViewport()
         self.editor = CodeEditor()
+        self.diagnostics = DiagnosticsPanel()
+        self.timeline = TimelineBar()
         self.banner = QLabel()
         self.banner.setStyleSheet(_BANNER_STYLE)
         self.banner.setWordWrap(True)
@@ -72,9 +76,28 @@ class MainWindow(QMainWindow):
         # Code on the left, toolpath on the right. A splitter rather than a fixed layout because the
         # useful ratio depends entirely on the task: reading code wants width, judging geometry wants it
         # all. Sizes are a starting point, not a constraint.
+        # Code left, toolpath and diagnostics right. Diagnostics sit *under* the viewport rather than
+        # beside the editor: a finding is read and then looked at, so the geometry has to stay in view
+        # while the list is scanned.
+        # The scrubber sits directly under the viewport, inside the same pane, because it is a control
+        # *for* the view rather than a separate one.
+        viewport_pane = QWidget()
+        viewport_layout = QVBoxLayout(viewport_pane)
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        viewport_layout.setSpacing(0)
+        viewport_layout.addWidget(self.viewport, stretch=1)
+        viewport_layout.addWidget(self.timeline)
+
+        self.right = QSplitter(Qt.Vertical)
+        self.right.addWidget(viewport_pane)
+        self.right.addWidget(self.diagnostics)
+        self.right.setStretchFactor(0, 4)
+        self.right.setStretchFactor(1, 1)
+        self.right.setSizes([560, 200])
+
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.editor)
-        self.splitter.addWidget(self.viewport)
+        self.splitter.addWidget(self.right)
         self.splitter.setStretchFactor(0, 2)
         self.splitter.setStretchFactor(1, 3)
         self.splitter.setSizes([480, 800])
@@ -102,6 +125,11 @@ class MainWindow(QMainWindow):
         # The cursor drives the highlight, not just a click: following it costs 0.8 ms at 500k segments
         # (T3.2), and arrow-keying down a program while watching the toolpath light up is the point.
         self.editor.cursorPositionChanged.connect(self._on_cursor_moved)
+        # The reverse direction (T3.3). Together these close the sync loop, which is why the click
+        # handler must not feed back: see `_on_segment_picked`.
+        self.viewport.segment_picked.connect(self._on_segment_picked)
+        self.diagnostics.line_activated.connect(self._on_diagnostic_activated)
+        self.timeline.scrubbed.connect(self._on_scrubbed)
 
         self._build_menus()
         self.statusBar().showMessage("Open a G-code file to begin  (Ctrl+O)")
@@ -161,6 +189,12 @@ class MainWindow(QMainWindow):
         self._loader.loaded.connect(self._on_loaded)
         self._loader.failed.connect(lambda message: self._on_failed(path, message))
         self._loader.cancelled.connect(lambda: self._on_cancelled(path))
+        self._loader.verified.connect(self._on_verified)
+        # `_loader` is cleared by the thread's own `finished`, not by `loaded`. Verification runs as a
+        # second stage *after* `loaded`, so clearing it there left a live QThread with nothing holding it:
+        # `closeEvent` would not wait for it, which is exactly the crash-on-shutdown it exists to prevent.
+        # It also keeps Cancel working during the check, which is a 5.9 s stage at 100k lines.
+        self._loader.finished.connect(self._on_loader_finished)
         self._loading_path = path
 
         self._set_busy(True, f"Loading {path.name}…")
@@ -212,23 +246,29 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{stage} {self._loading_name()}…")
 
     def _on_loaded(self, program: OpenedProgram) -> None:
-        self._loader = None
         self._set_busy(False)
         self._show(program)
         if program.path is not None:
             self._last_directory = str(program.path.parent)
 
     def _on_failed(self, path: Path, message: str) -> None:
-        self._loader = None
         self._set_busy(False)
         self._report_failure(path, message)
 
     def _on_cancelled(self, path: Path) -> None:
         """A cancelled load draws nothing — `simulate` raises rather than returning a partial store."""
-        self._loader = None
         self._set_busy(False)
         kept = self.program.path.name if self.program and self.program.path else "nothing"
         self.statusBar().showMessage(f"Cancelled {path.name} — still showing {kept}")
+
+    def _on_loader_finished(self) -> None:
+        """The thread has actually exited, so it is safe to forget it.
+
+        Guarded against a superseded loader finishing later and clearing a *newer* one out from under the
+        window — `_cancel_running_load` detaches the old thread but cannot make it stop instantly.
+        """
+        if self._loader is not None and self._loader.isFinished():
+            self._loader = None
 
     def _loading_name(self) -> str:
         return self._loading_path.name if self._loading_path else ""
@@ -272,6 +312,10 @@ class MainWindow(QMainWindow):
         # removal — not a re-read of the file. Anything else and the line numbers in the gutter could
         # disagree with the ones in `SourceRef`, which is what T3.2 and T3.4 sync on.
         self.selection = None
+        # "Checking…" rather than an empty list: an empty diagnostics panel reads as "no problems found",
+        # which is a claim we have not made yet at this point.
+        self.diagnostics.set_pending()
+        self.timeline.set_simulation(program.simulation)
         self.editor.setPlainText(program.loaded.text)
         self.viewport.set_simulation(program.simulation)
         self.reload_action.setEnabled(program.path is not None)
@@ -334,6 +378,57 @@ class MainWindow(QMainWindow):
         self.selection = select_line(self.program.simulation, line_no)
         self.viewport.set_highlight(self.program.simulation.store, self.selection.mask)
         self.statusBar().showMessage(self.selection.describe())
+
+    def _on_verified(self, diagnostics) -> None:
+        """Stage two arrived. Ignored if a different program has since been loaded."""
+        if self.program is None:
+            return
+        self.diagnostics.set_diagnostics(diagnostics)
+
+    def _on_diagnostic_activated(self, line_no: int) -> None:
+        """Clicking a finding jumps the editor there, which highlights the line via the T3.2 path."""
+        self.editor.goto_line(line_no)
+
+    # ------------------------------------------------------------------ timeline (T3.5)
+
+    def _on_scrubbed(self, index: int) -> None:
+        """Move the editor to the line of the segment at the scrub position.
+
+        The cursor move highlights the line through the T3.2 path, so the scrubber needs no highlight
+        machinery of its own — and watching the code scroll past as the tool advances is what makes a
+        timeline worth having in an editor rather than a player.
+        """
+        if self.program is None:
+            return
+        store = self.program.simulation.store
+        if not 0 <= index < len(store):
+            return
+        line_no = int(store.line[index])
+        self.editor.goto_line(line_no)
+        # Fed back so the readout can name the line. Safe from a loop: `show_line` only sets a label.
+        self.timeline.show_line(line_no)
+
+    # ------------------------------------------------------------------ viewport -> editor (T3.3)
+
+    def _on_segment_picked(self, index: int) -> None:
+        """Move the editor to the source line of the clicked segment.
+
+        `SegmentStore.line[index]` is the whole mechanism — every segment has carried its source line
+        since T2.1 precisely so this is a lookup rather than a search.
+
+        Moving the cursor fires `cursorPositionChanged`, which runs `_on_cursor_moved` and highlights the
+        line. That is deliberate reuse rather than an accident: a click should light up **the whole line**
+        the segment belongs to, not the single segment under the cursor, because that is what tells the
+        user how far the block they clicked actually travels. It also terminates — `goto_line` moves the
+        cursor once, and the resulting selection does not move it again.
+        """
+        if self.program is None:
+            return
+        store = self.program.simulation.store
+        if not 0 <= index < len(store):
+            return
+        self.editor.goto_line(int(store.line[index]))
+        self.editor.setFocus()
 
     # ------------------------------------------------------------------ view
 

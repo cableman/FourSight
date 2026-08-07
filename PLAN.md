@@ -83,6 +83,9 @@ FourSight/
 │   │   ├── main_window.py
 │   │   ├── highlighting.py # G-code -> coloured spans, using the parser's own regexes (NO Qt)
 │   │   ├── selection.py    # line -> segments, and why there are none (NO Qt)
+│   │   ├── picking.py      # click -> segment, matrix-keyed projection cache (NO Qt)
+│   │   ├── timeline.py     # time <-> segment from SegmentStore.duration (NO Qt)
+│   │   ├── timeline_bar.py # the scrubber widget
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
@@ -843,6 +846,63 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   window keeps whatever it had — the same rule as a failed open. Cancellation is also checked between
   parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
   own, so a user who cancels during it should not then wait out the simulation.
+
+### M3 — Editor, Diagnostics and Timeline
+
+Four views of one program, and the design rule throughout is that **the logic that can be wrong is
+Qt-free**: `highlighting`, `selection`, `picking` and `timeline` all import no Qt and hold the judgement,
+while `editor`, `diagnostics_panel` and `timeline_bar` are thin widgets over them.
+
+#### Picking (T3.3)
+
+`gui/picking.py` implements the strategy T3.0 measured. **The projection cache is keyed on the camera
+matrix itself**, not on a dirty flag: a flag must be maintained at every mutation site —
+`setCameraPosition`, mouse drag, wheel, resize, a direct `opts` poke — and one missed site returns the
+*wrong segment* with nothing in the picture to suggest it. Comparing the matrix cannot miss. The store size
+is part of the key too, so a different program under an unchanged camera also invalidates.
+
+Clicking is bound to mouse **release**, not press, because `GLViewWidget` orbits on left-drag: picking on
+press would jump the editor on every orbit. A miss emits nothing, so a slightly-off click leaves the
+selection alone rather than clearing it.
+
+#### Diagnostics panel (T3.4)
+
+**Verification is a second background stage.** It costs **5.93 s at 100k lines** with interpolated-point
+checking — comparable to parse-and-simulate — so running it eagerly would nearly double the time before
+anything appears. The toolpath is what the user opened the file to see; findings arrive after, the way a
+linter fills in behind an editor. Measured end to end: geometry at ~6 s, diagnostics by ~12.5 s.
+
+Consequences that had to be handled rather than discovered:
+
+- The panel shows **"Checking…"**, never an empty list, while the stage runs. An empty list reads as a
+  clean bill of health, which is a claim not yet earned.
+- A **verifier crash does not retract the toolpath**. A raising rule is our bug, not the user's file.
+- `_loader` is cleared by the thread's `finished` signal rather than by `loaded`, because the thread
+  outlives stage one — clearing it early left a live QThread nothing was holding, and `closeEvent` would
+  not have waited for it.
+- Rows are **capped at 2000 and the cap is stated**: a 100k-line program with no feed rates produces
+  **155,958** diagnostics. "Showing everything" and "showing the first 2000" look identical otherwise.
+
+The three tiers get their own colour **and** their own symbol. `unsupported` must not read as a warning —
+a warning says "look at this", `unsupported` says "part of the picture is missing" — and colour alone
+collapses that for a colour-blind reader. `SEVERITY_RANK` was promoted from private to public in
+`verify/report.py` so the panel and the CLI order findings identically rather than drifting.
+
+#### Timeline (T3.5)
+
+`SegmentStore.duration` cumulated once, then `searchsorted` per scrub. Scrubbing moves the **editor
+cursor**, which highlights through the T3.2 path, so the scrubber needs no highlight machinery of its own.
+The slider works in thousandths of the total rather than seconds, so a 2-second program and a 40-hour one
+get the same resolution.
+
+Two honesty constraints: an **incomplete total is never presented as the cycle time** — `sim/timing`
+counts segments with no usable rate precisely so the readout can say the total is short — and the slider is
+**disabled when the total is zero**, since a slider that moves without changing anything is worse than one
+that plainly cannot move.
+
+A known and inherent limitation: **zero-duration segments are not addressable by time.** A dwell or a
+stationary block occupies one instant, so several segments share a cumulative time and no scrub position
+distinguishes them. The editor and click-to-pick reach those, which is part of why all three exist.
 
 ### Editor ↔ Viewport Sync
 

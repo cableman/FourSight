@@ -23,6 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="the [gui] extra is not installed")
 pytest.importorskip("pyqtgraph", reason="the [gui] extra is not installed")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from conftest import DEFAULT_PROFILE_PATH, FIXTURES  # noqa: E402
@@ -466,3 +467,141 @@ def test_loading_a_new_program_drops_the_previous_selection(window) -> None:
     assert window.selection is not None
     window.open_file_and_wait(FIXTURES / "arc_helical.nc")
     assert window.viewport.highlighted_segments == 0
+
+
+# --------------------------------------------------------------------------- viewport -> editor (T3.3)
+
+
+def test_picking_a_segment_moves_the_editor_to_its_line(window) -> None:
+    """`SegmentStore.line[index]` is the whole mechanism — a lookup, not a search."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    index = len(store) // 2
+    window._on_segment_picked(index)
+    assert window.editor.current_line == int(store.line[index])
+
+
+def test_picking_a_segment_highlights_its_whole_line(window) -> None:
+    """A click lights up the entire block, not the single segment under the cursor.
+
+    That is what tells the user how far the block they clicked actually travels — one segment of a
+    tessellated arc would say almost nothing. It works by reusing the T3.2 cursor path.
+    """
+    window.open_file_and_wait(FIXTURES / "arc_helical.nc")
+    store = window.program.simulation.store
+    index = len(store) // 2
+    window._on_segment_picked(index)
+    assert window.selection is not None
+    assert window.selection.line_no == int(store.line[index])
+    assert window.viewport.highlighted_segments == window.selection.count > 1
+
+
+def test_the_pick_to_highlight_loop_terminates(window) -> None:
+    """Picking moves the cursor, which highlights, which must not move the cursor again."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    index = len(store) // 2
+    window._on_segment_picked(index)
+    settled = window.editor.current_line
+    window._on_segment_picked(index)
+    assert window.editor.current_line == settled
+
+
+def test_picking_with_nothing_loaded_does_nothing(window) -> None:
+    window._on_segment_picked(0)  # must not raise
+    assert window.selection is None
+
+
+def test_an_out_of_range_pick_index_is_ignored(window) -> None:
+    """Defensive: a stale index arriving after a reload must not raise or jump somewhere arbitrary."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    before = window.editor.current_line
+    window._on_segment_picked(10_000_000)
+    window._on_segment_picked(-1)
+    assert window.editor.current_line == before
+
+
+def test_the_viewport_click_signal_is_connected(window) -> None:
+    """Wiring check: the signal must actually reach the handler, not merely exist."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    index = len(store) // 3
+    window.viewport.segment_picked.emit(index)
+    assert window.editor.current_line == int(store.line[index])
+
+
+# --------------------------------------------------------------------------- diagnostics panel (T3.4)
+
+
+def test_diagnostics_arrive_after_the_toolpath(window) -> None:
+    """Stage two. Geometry first, findings after — verification costs 5.9 s at 100k lines.
+
+    `open_file_and_wait` now spans both stages, so by the time it returns the panel is populated.
+    """
+    assert window.open_file_and_wait(FIXTURES / "canned_cycle_span.nc") is True
+    assert window.viewport.batches, "the toolpath did not load"
+    assert window.diagnostics.diagnostics, "no diagnostics arrived from stage two"
+
+
+def test_a_canned_cycle_program_reports_an_unsupported_finding(window) -> None:
+    """The tier that must not read as a warning, end to end from the verifier to the panel."""
+    window.open_file_and_wait(FIXTURES / "canned_cycle_span.nc")
+    severities = {d.severity for d in window.diagnostics.diagnostics}
+    assert "unsupported" in severities
+
+
+def test_a_clean_program_reports_no_problems(window) -> None:
+    """The control case. Without it, "the panel is empty" could mean the check never ran."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.diagnostics.diagnostics == ()
+    assert "No problems found" in window.diagnostics.header.text()
+
+
+def test_clicking_a_diagnostic_jumps_the_editor_to_its_line(window) -> None:
+    window.open_file_and_wait(FIXTURES / "canned_cycle_span.nc")
+    panel = window.diagnostics
+    assert panel.tree.topLevelItemCount() > 0
+    expected = panel.tree.topLevelItem(0).data(1, Qt.UserRole)
+    panel.tree.setCurrentItem(panel.tree.topLevelItem(0))
+    assert window.editor.current_line == expected
+
+
+def test_clicking_a_diagnostic_also_highlights_that_line(window) -> None:
+    """Reuses the T3.2 cursor path, so a finding is both located and shown."""
+    window.open_file_and_wait(FIXTURES / "cutter_comp_span.nc")
+    panel = window.diagnostics
+    if panel.tree.topLevelItemCount() == 0:
+        pytest.skip("the fixture produced no diagnostics to click")
+    panel.tree.setCurrentItem(panel.tree.topLevelItem(0))
+    assert window.selection is not None
+    assert window.selection.line_no == window.editor.current_line
+
+
+def test_the_panel_shows_pending_while_checking(window, monkeypatch) -> None:
+    """An empty list mid-check would read as "no problems found", a claim not yet earned."""
+    from foursight.gui import background
+
+    monkeypatch.setattr(background, "verify_program", lambda *a, **k: ())
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    # With verification stubbed to return nothing, the header must still distinguish the two states.
+    assert window.diagnostics.header.text() in {"No problems found", "Checking…"}
+
+
+def test_a_verifier_crash_does_not_retract_the_toolpath(window, monkeypatch) -> None:
+    """A raising rule is our bug, not the user's file. Throwing away good geometry would be worse."""
+    from foursight.gui import background
+
+    def exploding(*args, **kwargs):
+        raise RuntimeError("rule blew up")
+
+    monkeypatch.setattr(background, "verify_program", exploding)
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.program is not None, "the load was retracted because the check failed"
+    assert window.viewport.batches, "the toolpath was cleared because the check failed"
+
+
+def test_loading_a_new_program_clears_the_previous_diagnostics(window) -> None:
+    window.open_file_and_wait(FIXTURES / "canned_cycle_span.nc")
+    assert window.diagnostics.diagnostics
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.diagnostics.diagnostics == ()

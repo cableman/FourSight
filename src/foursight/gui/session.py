@@ -37,6 +37,8 @@ from foursight.sim.simulator import (
     Span,
     simulate,
 )
+from foursight.verify.report import Diagnostic
+from foursight.verify.rules import Program, verify
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +174,30 @@ def open_loaded(
         simulation=simulation,
         summary=summarize(loaded, result.commands, result.errors, simulation),
     )
+
+
+def verify_program(
+    opened: "OpenedProgram", profile: MachineProfile, *, block_delete: bool = False
+) -> tuple[Diagnostic, ...]:
+    """Run the verifier over an already-loaded program.
+
+    **Kept out of `open_program` deliberately.** Verification costs **5.93 s at 100k lines** with
+    interpolated-point checking enabled — comparable to the whole parse-and-simulate pass — so doing it
+    eagerly would nearly double the time before anything appears on screen. The toolpath is what the user
+    opened the file to see; diagnostics can arrive a moment later, the way a linter fills in behind an
+    editor. `background.ProgramLoader` runs this as a second stage after the geometry is already drawn.
+
+    The segments are passed in, so travel limits are checked over *interpolated points* rather than block
+    endpoints — an arc can bulge past a limit mid-sweep with both endpoints inside it (T2.8).
+    """
+    program = Program(
+        commands=list(opened.commands),
+        profile=profile,
+        parse_errors=list(opened.parse_errors),
+        segments=opened.simulation.store,
+        block_delete=block_delete,
+    )
+    return tuple(verify(program))
 
 
 def summarize(

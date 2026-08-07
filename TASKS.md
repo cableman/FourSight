@@ -1297,11 +1297,75 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       `src/foursight/gui/main_window.py`, `tests/test_selection.py`, `tests/test_viewport.py`,
       `tests/test_main_window.py`, `PLAN.md`
 
-- [ ] **T3.3 — Click a segment → jump to line** — `gui/picking.py`, per D4. Budget real time here.
-- [ ] **T3.4 — Diagnostics panel** — click → jump to line; `unsupported` spans visually distinct
-      from warnings and errors.
-- [ ] **T3.5 — Timeline scrubber** — `gui/timeline.py`, driven by `SegmentStore.duration`.
-- [ ] **T3.6 — Manual GUI test script** — `docs/manual_tests/m3.md`
+- [x] **T3.3 — Click a segment → jump to line** — `gui/picking.py` — *done*
+      Implements the strategy T3.0 measured, per D4. Recorded in PLAN.md § M3.
+      **24 tests (17 Qt-free in `test_picking.py`, +6 viewport, +6 window).**
+      **The projection cache is keyed on the camera matrix itself**, not a dirty flag. A flag must be
+      maintained at every mutation site — `setCameraPosition`, drag, wheel, resize, a direct `opts` poke —
+      and one missed site returns the **wrong segment** with nothing in the picture to suggest it.
+      Comparing the matrix cannot miss. Store size is in the key too, so a new program under an unchanged
+      camera also invalidates. Tests move the camera, resize the viewport and swap programs rather than
+      merely picking twice.
+      Bound to mouse **release**, not press: `GLViewWidget` orbits on left-drag, so picking on press would
+      jump the editor on every orbit. A miss emits nothing, leaving the selection alone.
+      A click highlights the **whole line**, reusing T3.2 — one facet of a tessellated arc would say almost
+      nothing about how far the block travels — and the loop provably terminates.
+      **Mutation-verified, all 7 caught.**
+
+- [x] **T3.4 — Diagnostics panel** — `gui/diagnostics_panel.py` — *done*
+      Click → jump to line; `unsupported` visually distinct from warnings and errors, as required.
+      **28 tests (20 panel, +8 window).**
+      **Verification runs as a second background stage**, because it costs **5.93 s at 100k lines** —
+      comparable to parse-and-simulate. Running it eagerly would nearly double the time before anything
+      appeared. Measured end to end: geometry at ~6 s, diagnostics by ~12.5 s.
+      **Each tier gets its own colour *and* symbol.** `unsupported` says "part of the picture is missing"
+      where a warning says "look at this"; colour alone collapses that for a colour-blind reader, and this
+      panel is the only place the three appear side by side.
+      **`SEVERITY_RANK` promoted from private to public** in `verify/report.py` so the panel and the CLI
+      order findings identically — its own comment already said it was relied upon.
+      **Rows capped at 2000, and the cap is stated**: a 100k-line program with no feed rates produces
+      **155,958** diagnostics. Silent truncation and completeness look identical otherwise.
+      **"Checking…" never an empty list** while the stage runs — an empty panel reads as a clean bill of
+      health, which is not a claim we can make yet. A **verifier crash does not retract the toolpath**,
+      since a raising rule is our bug rather than the user's file.
+      **Found and fixed a threading bug I had just introduced:** `_on_loaded` cleared `_loader`, but the
+      thread runs on into stage two — leaving a live QThread nothing held, so `closeEvent` would not wait
+      for it. That is exactly the crash-on-shutdown `closeEvent` exists to prevent. Now cleared by the
+      thread's own `finished`, which also keeps Cancel working during the 5.9 s check.
+      Also fixed a UX regression of my own: the verify stage's progress message **overwrote the program
+      summary** in the status bar. The panel header owns check status; the status bar keeps the summary.
+      **Mutation-verified, all 5 caught.**
+
+- [x] **T3.5 — Timeline scrubber** — `gui/timeline.py`, `gui/timeline_bar.py` — *done*
+      Driven by `SegmentStore.duration`, as specified. **32 tests.**
+      Scrubbing moves the **editor cursor**, which highlights via the T3.2 path — so the scrubber needs no
+      highlight machinery, and watching code scroll past as the tool advances is what makes a timeline
+      belong in an editor rather than a player.
+      The slider works in **thousandths of the total**, not seconds, so a 2-second program and a 40-hour
+      one get the same resolution.
+      **An incomplete total is never presented as the cycle time.** `sim/timing` counts segments with no
+      usable rate precisely so the readout can say the total is short. The slider is **disabled when the
+      total is zero** — one that moves without changing anything is worse than one that plainly cannot.
+      Two time formats, deliberately: `1h 05m` for a cycle time compared against a job sheet, `4:12.3` for
+      a moving position. A test asserts they differ so a later tidy-up cannot collapse them.
+      **Corrected an over-claim in my own docstring.** It said `side="left"` makes zero-duration segments
+      reachable. It does not: they occupy no time, several share one cumulative value, and **no scrub
+      position can address them** — that is inherent. The docstring and test now say so, and point at the
+      editor and click-to-pick as the ways to reach them.
+      **Mutation-verified, all 5 caught** (including the `searchsorted` side, which needed re-running: the
+      first attempt patched the docstring occurrence rather than the code).
+
+- [x] **T3.6 — Manual GUI test script** — `docs/manual_tests/m3.md` — *done*
+      Six sections, ~15 minutes, scoped to what only a human can judge: not whether the four views agree —
+      1049 tests cover that — but whether the agreement is **legible**. Is the highlight findable? Does
+      `unsupported` read differently from a warning at a glance (squint, or desaturate a screenshot)? Does
+      scrubbing feel like following a tool?
+      Calls out **orbit-then-click** as the case to attack, since a stale projection is invisible when it
+      fails, and the **"not drawn" versus "no motion"** distinction as the one that would misrepresent a
+      program. Ends with what is deliberately absent, naming M4's machine-vs-part coordinates as the
+      biggest remaining gap and the one most likely to look wrong to a machinist.
+
+**M3 COMPLETE** — all 7 tasks. 1049 tests pass, ruff clean.
 
 ---
 

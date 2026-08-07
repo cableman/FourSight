@@ -34,8 +34,10 @@ class Severity(StrEnum):
 
 
 # Sort order for presentation: worst first. Not the enum's definition order by accident — it is
-# relied on, so it is written down.
-_SEVERITY_RANK = {Severity.ERROR: 0, Severity.UNSUPPORTED: 1, Severity.WARNING: 2}
+# relied on, so it is written down. **Public**, because the CLI and the GUI diagnostics panel both order
+# by it and a second ordering that drifted would make the same program read differently in the two front
+# ends.
+SEVERITY_RANK = {Severity.ERROR: 0, Severity.UNSUPPORTED: 1, Severity.WARNING: 2}
 
 
 @dataclass(slots=True, frozen=True)
@@ -71,7 +73,7 @@ class Diagnostic:
 
 def sort_key(diagnostic: Diagnostic) -> tuple[int, int, str]:
     """Source order first, then worst-severity, then rule id for a stable result."""
-    return (diagnostic.line, _SEVERITY_RANK[diagnostic.severity], diagnostic.rule_id)
+    return (diagnostic.line, SEVERITY_RANK[diagnostic.severity], diagnostic.rule_id)
 
 
 def sort_diagnostics(diagnostics: list[Diagnostic]) -> list[Diagnostic]:

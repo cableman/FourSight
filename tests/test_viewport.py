@@ -298,3 +298,61 @@ def test_the_highlight_stays_inside_the_plan_buffer_budget(viewport, profile) ->
     viewport.set_simulation(sim)
     viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
     assert len(viewport.items) - GRID_ITEMS <= 10
+
+
+# --------------------------------------------------------------------------- picking (T3.3)
+
+
+def test_the_projection_is_cached_between_picks(viewport, profile) -> None:
+    """27 ms warm versus 94 ms cold at 500k, so reusing it is the difference between usable and not."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    first = viewport.projection()
+    assert first is not None
+    assert viewport.projection() is first
+
+
+def test_moving_the_camera_invalidates_the_cached_projection(viewport, profile) -> None:
+    """The failure the matrix-keyed cache exists to prevent, exercised through the real widget.
+
+    A pick against a pre-orbit projection returns a confidently wrong segment with nothing in the picture
+    to suggest it. This asserts the *widget* notices, not just that `matches()` can tell.
+    """
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    before = viewport.projection()
+    viewport.setCameraPosition(azimuth=viewport.opts["azimuth"] + 45)
+    after = viewport.projection()
+    assert after is not before, "the projection survived a camera move"
+    assert not np.array_equal(before.mvp, after.mvp)
+
+
+def test_loading_a_new_program_invalidates_the_cached_projection(viewport, profile) -> None:
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    first = viewport.projection()
+    viewport.set_simulation(simulation(fixture_text("arc_helical.nc"), profile))
+    second = viewport.projection()
+    assert second is not first
+    assert second.segments != first.segments
+
+
+def test_there_is_no_projection_without_geometry(viewport) -> None:
+    assert viewport.projection() is None
+    assert viewport.pick_at(10.0, 10.0) is None
+
+
+def test_picking_a_visible_segment_returns_a_valid_index(viewport, profile) -> None:
+    """Sweeps the viewport rather than guessing one position, since the camera framing is not fixed here."""
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    hits = [
+        viewport.pick_at(float(x), float(y))
+        for x in range(0, viewport.width(), 17)
+        for y in range(0, viewport.height(), 19)
+    ]
+    found = [index for index in hits if index is not None]
+    assert found, "nothing was pickable anywhere in the viewport"
+    assert all(0 <= index < len(sim.store) for index in found)
+
+
+def test_the_pick_matrix_is_a_four_by_four(viewport, profile) -> None:
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    assert viewport.pick_matrix().shape == (4, 4)
