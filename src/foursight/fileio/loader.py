@@ -25,6 +25,13 @@ from pathlib import Path
 # silently claiming success on a non-UTF-8 file is not.
 FALLBACK_ENCODING = "latin-1"
 
+#: Refuse a file larger than this. PLAN.md's target is 100k lines, which is roughly 3 MB of G-code, so
+#: 256 MB leaves two orders of magnitude of headroom for a genuinely enormous program while still refusing
+#: an obvious mistake. Without a ceiling, `read_bytes` on a 5 GB file exhausts memory before anything gets
+#: to report a problem — and decoding doubles it. A clear refusal beats an OOM kill, which tells the user
+#: nothing about what they did.
+MAX_FILE_BYTES = 256 * 1024 * 1024
+
 _BOMS: tuple[tuple[bytes, str], ...] = (
     (codecs.BOM_UTF8, "utf-8"),
     # UTF-16 before UTF-8 would be wrong; UTF-32's BOM starts with UTF-16-LE's, but G-code in
@@ -59,9 +66,20 @@ class LoadedFile:
         return self.encoding == FALLBACK_ENCODING
 
 
-def load(path: str | Path) -> LoadedFile:
-    """Read and decode a file. `OSError` propagates: a missing file is the caller's problem."""
+def load(path: str | Path, *, max_bytes: int = MAX_FILE_BYTES) -> LoadedFile:
+    """Read and decode a file. `OSError` propagates: a missing file is the caller's problem.
+
+    Refuses anything over ``max_bytes`` **before reading it**, by checking the size on disk. Checking
+    afterwards would be pointless: the memory is already gone by then.
+    """
     resolved = Path(path)
+    size = resolved.stat().st_size
+    if size > max_bytes:
+        raise FileLoadError(
+            f"{resolved} is {size / 1e6:.0f} MB, over the {max_bytes / 1e6:.0f} MB limit. "
+            "A G-code program of 100,000 lines is roughly 3 MB, so this is almost certainly not one — "
+            "check the path."
+        )
     return load_text(resolved.read_bytes(), path=resolved)
 
 

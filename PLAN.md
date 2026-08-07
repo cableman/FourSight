@@ -847,6 +847,64 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
   own, so a user who cancels during it should not then wait out the simulation.
 
+### M5 — Fix Engine and Packaging
+
+`fix/differ.py` generates and applies unified diffs, `fix/engine.py` holds the contract and the registry,
+`fix/fixes.py` the eight transforms. All Qt-free; `gui/diff_dialog.py` is the review UI.
+
+**The one-fix contract is arithmetic, not caution.** A fix that inserts or removes a line shifts every line
+number after it, so every `Diagnostic.line` and every `SegmentStore.line` entry is stale the instant it
+applies. `apply_fix` therefore returns new *text* and nothing else, and the window re-runs load → parse →
+simulate → verify through `BufferLoader` — the same threaded, cancellable path T2.9 built. `apply_unified_diff`
+refuses on a context mismatch as a backstop. Undo keeps **text snapshots, not reversed diffs**: reversing a
+diff is exactly the rebasing the contract forbids.
+
+**Refusal is a first-class result.** Two fixes decline by design, and the reason is the useful part:
+
+- **Arc-centre recomputation beyond 10× tolerance.** Within a small mismatch the centre is a rounding
+  artefact and the endpoints are the intent. Past that, three inconsistent numbers describe no arc, and
+  choosing which to keep is a guess about which the programmer got right.
+- **IJK→R on a full circle.** R gives a radius and its sign picks the minor or major arc; coincident
+  endpoints make every R the same degenerate case.
+
+`RefusalDialog` has **no Apply button at all**, not a disabled one — a greyed-out button invites the user to
+try again harder at something that cannot work. Tolerances come from the profile, shared with the checks that
+reported the problem, so a fix and a diagnostic cannot disagree about what counts as a mismatch.
+
+**N-word stripping is destructive and never the default.** Operators restart mid-cut on N-numbers and some
+dialects use them as jump targets, so the diff shows the changed lines but not that a `GOTO N120` lost its
+target. It gets a banner rather than a footnote, and no shortcut.
+
+**The feed-rate fix is prompted, never inferred.** A feed rate is a machining decision about tool, material
+and depth of cut; choosing one would put a number in the program that nobody chose and the machine would obey.
+
+#### Packaging — two bugs no test could have found
+
+The suite imports normally, so it cannot see what PyInstaller omits. Both of these were found by running the
+bundle:
+
+1. **Package data is not collected.** `default_profile_path()` resolved to a path absent from the bundle;
+   the app started and refused with the exact missing filename (T2.7's profile refusal earning its keep).
+   Fixed with `--collect-data foursight`.
+2. **Dynamically imported modules are invisible to static analysis.** `verify.rules.load_builtin_checks` and
+   `fix.engine.load_builtin_fixes` both use `importlib.import_module` **deliberately**, so `ruff --fix`
+   cannot delete the import as F401 and leave a silently empty registry. PyInstaller cannot see through that
+   either, so `foursight.fix.fixes` was simply absent — `ModuleNotFoundError` on startup. Fixed with
+   `--collect-submodules foursight`.
+
+   The two requirements pull in opposite directions and both are real: the dynamic import protects the
+   registry from the linter, and the flag protects it from the packager. Worth remembering that an empty
+   rule registry reports "no problems found", which looks exactly like good news.
+
+Verified from the bundle: `foursight-cli check canned_cycle_span.nc` reports its one `unsupported`
+diagnostic, which an empty registry could not do.
+
+#### The G43 rule, owed since M1
+
+`structural.tool-length-not-modelled`, `unsupported`, one diagnostic per activation. The simulator had always
+emitted a *note*, but a note only ever reached the status bar — so once M3 built the diagnostics panel, the
+one modelling caveat that changes what Z *means* was the only one missing from it.
+
 ### M4 — Rotary Kinematics
 
 `machine/kinematics.py` implements both mounts. **`lin` is never mutated**; the transform writes `lin_part`,

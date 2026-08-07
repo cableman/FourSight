@@ -703,3 +703,142 @@ def test_loading_a_new_program_resets_the_toggle(window) -> None:
 
 def test_toggling_with_nothing_loaded_does_nothing(window) -> None:
     window.part_coordinates_action.setChecked(True)  # must not raise
+
+
+# --------------------------------------------------------------------------- fixes (T5.1, T5.5)
+
+
+@pytest.fixture
+def auto_accept(monkeypatch):
+    """Accept the diff dialog without showing it, and answer the parameter prompt."""
+    from PySide6.QtWidgets import QDialog, QInputDialog
+
+    from foursight.gui import diff_dialog
+
+    monkeypatch.setattr(diff_dialog.DiffDialog, "exec", lambda self: QDialog.Accepted)
+    monkeypatch.setattr(diff_dialog.RefusalDialog, "exec", lambda self: QDialog.Rejected)
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(lambda *a, **k: (450.0, True)))
+
+
+def write_program(tmp_path, text: str):
+    path = tmp_path / "p.nc"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_applying_a_fix_reruns_the_whole_pipeline(window, tmp_path, auto_accept) -> None:
+    """The one-fix contract. The buffer goes back through load → parse → simulate → verify.
+
+    Asserted on the *rebuilt* artefacts, not just the text: a fix that changed the buffer without
+    re-simulating would leave every `SegmentStore.line` entry pointing at the old numbering.
+    """
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG0 Z5\nG1 X10 F600\n"))
+    before_blocks = len(window.program.commands)
+
+    assert window.run_fix("fix.append-program-end") is True
+    wait_for_load(window)
+
+    assert "M30" in window.editor.toPlainText()
+    assert len(window.program.commands) == before_blocks + 1, "the program was not re-parsed"
+    assert len(window.program.simulation.store) > 0, "segments were not rebuilt"
+
+
+def test_a_fix_that_shifts_lines_rebuilds_the_line_numbers(window, tmp_path, auto_accept) -> None:
+    """The reason the contract exists: an inserted line invalidates every number after it."""
+    window.open_file_and_wait(write_program(tmp_path, "G1 X10 F600\nG1 X20\n"))
+    first_motion_before = min(int(line) for line in window.program.simulation.store.line)
+
+    assert window.run_fix("fix.add-safety-preamble") is True
+    wait_for_load(window)
+
+    first_motion_after = min(int(line) for line in window.program.simulation.store.line)
+    assert first_motion_after > first_motion_before, "segment line numbers were not rebuilt"
+
+
+def test_the_file_on_disk_is_never_written(window, tmp_path, auto_accept) -> None:
+    """PLAN.md: fixes modify the editor buffer; the user saves explicitly."""
+    path = write_program(tmp_path, "G21 G90 G94\nG1 X10 F600\n")
+    original = path.read_bytes()
+    window.open_file_and_wait(path)
+    window.run_fix("fix.append-program-end")
+    wait_for_load(window)
+    assert path.read_bytes() == original
+
+
+def test_a_refused_fix_leaves_the_buffer_alone(window, tmp_path, auto_accept) -> None:
+    """A refusal is a result, not a failed attempt: nothing changes and the reason is shown."""
+    window.open_file_and_wait(
+        write_program(tmp_path, "G21 G90 G94 G17\nG0 X0 Y0\nG2 X20 Y0 I12 J0 F600\n")
+    )
+    before = window.editor.toPlainText()
+    window.editor.goto_line(3)
+    assert window.run_fix("fix.recompute-arc-centre") is False
+    assert window.editor.toPlainText() == before
+
+
+def test_cancelling_the_diff_dialog_applies_nothing(window, tmp_path, monkeypatch) -> None:
+    """Review means review: nothing is applied until Apply is pressed."""
+    from PySide6.QtWidgets import QDialog
+
+    from foursight.gui import diff_dialog
+
+    monkeypatch.setattr(diff_dialog.DiffDialog, "exec", lambda self: QDialog.Rejected)
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG1 X10 F600\n"))
+    before = window.editor.toPlainText()
+    assert window.run_fix("fix.append-program-end") is False
+    assert window.editor.toPlainText() == before
+
+
+def test_a_parameterized_fix_prompts_and_uses_the_value(window, tmp_path, auto_accept) -> None:
+    """The prompt is stubbed to 450; the value must reach the program rather than a default."""
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG1 X10\n"))
+    assert window.run_fix("fix.inject-feed-rate") is True
+    wait_for_load(window)
+    assert "F450" in window.editor.toPlainText()
+
+
+def test_declining_the_prompt_applies_nothing(window, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QInputDialog
+
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(lambda *a, **k: (0.0, False)))
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG1 X10\n"))
+    before = window.editor.toPlainText()
+    assert window.run_fix("fix.inject-feed-rate") is False
+    assert window.editor.toPlainText() == before
+
+
+def test_undo_restores_the_previous_buffer(window, tmp_path, auto_accept) -> None:
+    """Snapshots, not reversed diffs — reversing one is the rebasing the contract forbids."""
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG1 X10 F600\n"))
+    before = window.editor.toPlainText()
+    window.run_fix("fix.append-program-end")
+    wait_for_load(window)
+    assert window.editor.toPlainText() != before
+
+    window.undo_fix()
+    wait_for_load(window)
+    assert window.editor.toPlainText() == before
+    assert window.undo_fix_action.isEnabled() is False
+
+
+def test_undo_with_no_history_does_nothing(window, tmp_path) -> None:
+    window.open_file_and_wait(write_program(tmp_path, "G21 G90 G94\nG1 X10 F600\n"))
+    window.undo_fix()  # must not raise
+
+
+def test_running_a_fix_with_nothing_loaded_does_nothing(window) -> None:
+    assert window.run_fix("fix.append-program-end") is False
+
+
+def test_every_fix_appears_in_the_menu(window) -> None:
+    """The menu is built from the registry, so a new fix needs no UI change — and none can be forgotten."""
+    from foursight.fix.engine import load_builtin_fixes
+
+    assert set(window.fix_actions) == set(load_builtin_fixes())
+
+
+def test_a_destructive_fix_is_labelled_and_has_no_shortcut(window) -> None:
+    """It must never be the easy default; PLAN.md keeps N-word stripping off by default."""
+    action = window.fix_actions["fix.strip-line-numbers"]
+    assert "destructive" in action.text()
+    assert action.shortcut().isEmpty()

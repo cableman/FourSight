@@ -1464,31 +1464,85 @@ The data model is already 4-axis-shaped, so this milestone is the transform itse
 
 ## M5 — Fixer + packaging
 
-- [ ] **T5.0 — `fix/differ.py`** — unified diff generation and application.
-- [ ] **T5.1 — Fix engine + the one-fix contract**
-      **Apply exactly one fix → re-parse the whole buffer → re-verify → rebuild segments.**
-      No batch application, no diff rebasing: a fix invalidates every line number, so every
-      `Diagnostic` and every `SegmentStore.line` entry is stale afterwards. Fixes never write the
-      original file — they modify the editor buffer and the user saves explicitly.
-- [ ] **T5.2 — Geometry fixes**
-      Recompute arc centers (IJK) to the point equidistant from both endpoints along the
-      perpendicular bisector, preserving both endpoints — **refuse when the mismatch exceeds
-      10× tolerance** (past that, the intent is ambiguous and the "fix" invents geometry).
-      R→IJK conversion; IJK→R **refuses on full circles** (inexpressible) and honours the >180°
-      sign convention. Tolerance read from the profile, shared with T1.9's check.
-- [ ] **T5.3 — Text fixes**
-      Safety preamble (`G90 G21 G17` + safe-Z retract, prompted); inject feed rate on first cutting
-      move (prompted, user supplies the value); normalize whitespace/case; append M30 if missing;
-      strip/renumber N-words **off by default** (operators restart mid-program on N-numbers and
-      some dialects use them as jump targets — destructive in ways the diff does not show).
-- [ ] **T5.4 — Harden `fileio/loader.py`** — large files, encoding detection, latin-1 fallback,
-      BOM, CRLF.
-- [ ] **T5.5 — Diff preview dialog** — reviewable before application.
-- [ ] **T5.6 — `tests/test_fixes.py`** — including the refusal cases, which are the point.
-- [ ] **T5.7 — PyInstaller one-dir builds for Ubuntu and Windows**, smoke-tested on both,
-      applying whatever T0.8 learned.
-- [ ] **T5.8 — README with screenshots.**
-- [ ] **T5.9 — Manual GUI test script** — `docs/manual_tests/m5.md`
+- [x] **T5.0 — `fix/differ.py`** — *done* — generation for review, application for verification.
+      Application exists so the diff shown to the user can be **proved** to reproduce the text that would be
+      written: a preview that does not match what gets applied is worse than no preview. Refuses on a
+      context mismatch, which is the one-fix contract's backstop. `restore_newlines` keeps a CRLF program
+      CRLF — an unrequested change that a unified diff cannot even show, since it carries no line endings.
+
+- [x] **T5.1 — Fix engine + the one-fix contract** — *done*
+      `apply_fix` returns text and nothing else; the window re-runs load → parse → simulate → verify via
+      `BufferLoader`, reusing T2.9's threaded cancellable path. Undo keeps **text snapshots, not reversed
+      diffs** — reversing one is the rebasing the contract forbids. Fixes never write the file; a test
+      asserts the bytes on disk are unchanged after three fixes.
+      Tested on the *rebuilt artefacts*, not the text: a fix that changed the buffer without re-simulating
+      would leave every `SegmentStore.line` pointing at the old numbering.
+
+- [x] **T5.2 — Geometry fixes** — *done* — arc centre onto the perpendicular bisector preserving both
+      endpoints, R→IJK, IJK→R. **Refuses beyond 10× tolerance** and **on full circles**, with the >180° sign
+      convention honoured (a flip substitutes the complementary arc: same endpoints, same radius, the tool
+      going the long way round). Tolerance read from the profile, shared with T1.9's check. An end-to-end
+      test confirms the corrected arc no longer trips the rule that reported it.
+
+- [x] **T5.3 — Text fixes** — *done* — preamble (adds only what is missing, below `%`/`Oxxxx` framing),
+      feed injection (**prompted**, never inferred), whitespace/case normalization (**comments untouched** —
+      that prose was written by a human for humans), M30 append (above trailing framing, since `%` closes a
+      Fanuc program), N-word stripping **off by default and marked destructive**.
+
+- [x] **T5.4 — Harden `fileio/loader.py`** — *done* — BOM, encoding detection, latin-1 fallback, binary
+      detection and CRLF were already covered; the gap was **size**. `read_bytes` on a multi-gigabyte file
+      exhausts memory before anything can report a problem, and decoding doubles it, so the size is checked
+      **on disk before reading**. 42 tests.
+
+- [x] **T5.5 — Diff preview dialog** — *done* — coloured unified diff, Apply only on confirmation.
+      **`RefusalDialog` has no Apply button at all**, not a disabled one: a greyed-out button invites the
+      user to try again harder at something that cannot work. A destructive fix gets a banner rather than a
+      footnote, because the diff cannot show what it breaks.
+
+- [x] **T5.6 — `tests/test_fixes.py`** — *done* — 38 tests, weighted toward the refusals as the task
+      requires. Both refusals are tested **at the boundary as well as well past it**, because a refusal that
+      fires everywhere is as useless as one that never fires; the boundary case derives its threshold from
+      the profile so tightening the tolerance cannot make it silently meaningless. Also asserts that **every
+      fix id a diagnostic promises is registered** — a diagnostic offering an unregistered fix is a dead
+      button.
+
+- [x] **T5.7 — PyInstaller one-dir builds** — *done on Linux; Windows still needs T0.8's VM*
+      **Two real packaging bugs, neither visible to any test** — the suite imports normally, so it cannot see
+      what PyInstaller omits. Both were found by running the bundle:
+      • **Package data is not collected.** The bundled profile TOML was absent; the app started and refused
+      with the exact missing path, which is T2.7's profile refusal earning its keep. Fixed with
+      `--collect-data foursight`.
+      • **Dynamic imports are invisible to static analysis.** Both registries use `importlib.import_module`
+      *deliberately*, so `ruff --fix` cannot delete the import and leave them silently empty — and
+      PyInstaller cannot see through that either, so `foursight.fix.fixes` was simply missing
+      (`ModuleNotFoundError` on startup). Fixed with `--collect-submodules foursight`. The two requirements
+      pull in opposite directions and both are real.
+      Verified from the bundle: `foursight-cli check canned_cycle_span.nc` reports its one `unsupported`
+      diagnostic — which an empty registry could not do, and an empty registry reports "no problems found",
+      which looks exactly like good news.
+
+- [x] **T5.8 — README with screenshots** — *done* — three screenshots, captured by
+      `scripts/screenshots.py` so they can be regenerated after a UI change rather than drifting out of
+      date. A README showing a version of the tool that no longer exists is confidently wrong about what the
+      user will see. The lead image is the governing principle visible in one picture: a `G81` span with a
+      genuine **gap** in the toolpath, the banner, and the `unsupported` row.
+
+- [x] **T5.9 — Manual GUI test script** — `docs/manual_tests/m5.md` — *done*
+      Eight sections. Scoped to what tests cannot judge — whether a diff is **reviewable**, which is the
+      whole safety mechanism of the milestone — plus the bundle, which no test in this repository can cover.
+      Tells the tester to check the diagnostics panel in the bundle specifically, and why: an empty rule
+      registry reports "no problems found".
+
+- [x] **Owed from M1 — a verifier rule for the unmodelled G43 tool length** — *done*
+      `structural.tool-length-not-modelled`, `unsupported`, one diagnostic per activation rather than per
+      affected line (a program cutting 40,000 lines under one G43 has one thing wrong with it, not 40,000).
+      The simulator had always emitted a *note*, but a note only reached the status bar — so once M3 built
+      the diagnostics panel, the one modelling caveat that changes what Z *means* was the only one absent
+      from it.
+
+**M5 COMPLETE** — all 10 tasks plus the owed G43 rule. **1152 tests pass**, ruff clean.
+
+**Project status: M0–M5 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

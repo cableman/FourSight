@@ -217,3 +217,70 @@ def test_the_emitted_line_is_the_diagnostic_line_not_the_row_index(panel) -> Non
     panel.set_diagnostics((diagnostic(Severity.ERROR, 5), diagnostic(Severity.ERROR, 99)))
     panel.tree.setCurrentItem(panel.tree.topLevelItem(1))
     assert received[-1] == 99
+
+
+# --------------------------------------------------------------------------- diff preview (T5.5)
+
+
+def test_a_destructive_fix_gets_a_banner_not_a_footnote(qt_app) -> None:
+    """The diff cannot show what N-word stripping breaks, so the warning must be impossible to miss."""
+    from PySide6.QtWidgets import QLabel
+
+    from conftest import DEFAULT_PROFILE_PATH
+    from foursight.fix.engine import FixContext, apply_fix, get_fix, load_builtin_fixes
+    from foursight.gui.diff_dialog import DiffDialog
+    from foursight.machine.profile import load_profile
+
+    load_builtin_fixes()
+    profile = load_profile(DEFAULT_PROFILE_PATH)
+    result = apply_fix(
+        "fix.strip-line-numbers", FixContext(text="N10 G1 X10 F600\n", profile=profile)
+    )
+    dialog = DiffDialog(get_fix("fix.strip-line-numbers"), result)
+    labels = [label.text().lower() for label in dialog.findChildren(QLabel)]
+    assert any("destructive" in text for text in labels)
+    assert any("jump target" in text for text in labels), "the note must reach the dialog"
+
+
+def test_a_non_destructive_fix_gets_no_banner(qt_app) -> None:
+    """A warning on every fix stops being read."""
+    from PySide6.QtWidgets import QLabel
+
+    from conftest import DEFAULT_PROFILE_PATH
+    from foursight.fix.engine import FixContext, apply_fix, get_fix, load_builtin_fixes
+    from foursight.gui.diff_dialog import DiffDialog
+    from foursight.machine.profile import load_profile
+
+    load_builtin_fixes()
+    result = apply_fix(
+        "fix.append-program-end",
+        FixContext(text="G1 X10 F600\n", profile=load_profile(DEFAULT_PROFILE_PATH)),
+    )
+    dialog = DiffDialog(get_fix("fix.append-program-end"), result)
+    labels = [label.text().lower() for label in dialog.findChildren(QLabel)]
+    assert not any("destructive" in text for text in labels)
+
+
+def test_a_refusal_dialog_offers_nothing_to_apply(qt_app) -> None:
+    """A greyed-out Apply would suggest the user could get it to work by trying again."""
+    from PySide6.QtWidgets import QPushButton
+
+    from conftest import DEFAULT_PROFILE_PATH
+    from foursight.fix.engine import FixContext, apply_fix, get_fix, load_builtin_fixes
+    from foursight.gui.diff_dialog import RefusalDialog
+    from foursight.machine.profile import load_profile
+
+    load_builtin_fixes()
+    result = apply_fix(
+        "fix.recompute-arc-centre",
+        FixContext(
+            text="G21 G17\nG0 X0 Y0\nG2 X20 Y0 I12 J0 F600\n",
+            profile=load_profile(DEFAULT_PROFILE_PATH),
+            line=3,
+        ),
+    )
+    assert result.refused
+    dialog = RefusalDialog(get_fix("fix.recompute-arc-centre"), result)
+    assert not any(button.text() == "Apply" for button in dialog.findChildren(QPushButton)), (
+        "a refusal must offer no Apply"
+    )

@@ -25,7 +25,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from foursight.fileio.loader import FileLoadError
-from foursight.gui.session import open_program, verify_program
+from foursight.gui.session import open_loaded, open_program, verify_program
 from foursight.machine.profile import MachineProfile
 from foursight.sim.simulator import SimulationCancelled
 
@@ -131,3 +131,47 @@ class ProgramLoader(QThread):
 
     def _report(self, done: int, total: int) -> None:
         self.progressed.emit(done, total, SIMULATING)
+
+
+class BufferLoader(ProgramLoader):
+    """The same staged load, over **edited text** rather than a file.
+
+    This is what makes the one-fix contract cheap: applying a fix re-runs load → parse → simulate → verify
+    exactly as opening the file does, so no line number anywhere has to be rebased. The file on disk is
+    never read and never written — PLAN.md requires fixes to modify the editor buffer with the user saving
+    explicitly.
+    """
+
+    def __init__(
+        self,
+        text: str,
+        profile: MachineProfile,
+        *,
+        path: Path | None = None,
+        block_delete: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(path or Path("buffer"), profile, block_delete=block_delete, parent=parent)
+        self._text = text
+        self._display_path = path
+
+    def run(self) -> None:  # pragma: no cover - exercised via `start()` in the GUI
+        from foursight.fileio.loader import load_text
+
+        try:
+            self.progressed.emit(0, 0, PARSING)
+            loaded = load_text(self._text.encode("utf-8"), path=self._display_path)
+            program = open_loaded(
+                loaded,
+                self.profile,
+                block_delete=self.block_delete,
+                progress=self._report,
+                cancelled=self._stop.is_set,
+            )
+        except SimulationCancelled:
+            self.cancelled.emit()
+        except (OSError, FileLoadError, ValueError) as error:
+            self.failed.emit(str(error))
+        else:
+            self.loaded.emit(program)
+            self._verify(program)

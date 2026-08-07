@@ -280,3 +280,46 @@ def test_cutter_comp_fixture_reports_exactly_one_span(profile) -> None:
 def test_structurally_clean_fixtures_report_nothing(name: str, profile) -> None:
     """These exercise geometry and framing, so a structural diagnostic here means a fixture bug."""
     assert check(fixture_text(name), profile) == []
+
+
+# --------------------------------------------------------------------------- tool length (owed from M1)
+
+
+def test_g43_is_reported_as_unsupported_not_a_warning(profile) -> None:
+    """The taxonomy's whole point. G43 affects how subsequent motion is interpreted, and v1 does not
+    interpret it — so it is `unsupported`, and a warning would say "look at this" about something that
+    changes what Z *means*."""
+    diagnostics = diagnose("G21 G90 G94\nG43 H1\nG1 X10 Z-5 F600\n", profile)
+    found = [d for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"]
+    assert len(found) == 1
+    assert found[0].severity == "unsupported"
+
+
+def test_the_tool_length_message_says_what_the_drawn_z_means(profile) -> None:
+    """The path's shape is right and its datum is shifted; saying only "unsupported" would not help."""
+    diagnostics = diagnose("G21 G90 G94\nG44 H2\nG1 Z-5 F600\n", profile)
+    message = next(
+        d.message for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"
+    )
+    assert "spindle position, not the tool tip" in message
+    assert "shape is correct" in message
+
+
+def test_one_diagnostic_per_activation_not_per_affected_line(profile) -> None:
+    """A program cutting 40,000 lines under one G43 has one thing wrong with it, not 40,000."""
+    body = "".join(f"G1 X{n} F600\n" for n in range(40))
+    diagnostics = diagnose(f"G21 G90 G94\nG43 H1\n{body}", profile)
+    found = [d for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"]
+    assert len(found) == 1
+    assert found[0].line == 2
+
+
+def test_g49_alone_reports_nothing(profile) -> None:
+    """Cancelling an offset needs no diagnostic — there is no unmodelled offset in force."""
+    diagnostics = diagnose("G21 G90 G94\nG49\nG1 X10 F600\n", profile)
+    assert not [d for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"]
+
+
+def test_a_program_without_tool_length_reports_nothing(profile) -> None:
+    diagnostics = diagnose("G21 G90 G94\nG1 X10 F600\n", profile)
+    assert not [d for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"]

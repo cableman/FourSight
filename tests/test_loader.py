@@ -241,3 +241,52 @@ def test_cr_only_file_tokenizes_with_correct_offsets() -> None:
     assert line_starts(text) == [0, 4, 10]
     for line in tokenize(text):
         assert text[line.ref.start : line.ref.end] == text.splitlines()[line.ref.line_no - 1]
+
+
+# --------------------------------------------------------------------------- large files (T5.4)
+
+
+def test_an_oversized_file_is_refused_before_it_is_read(tmp_path) -> None:
+    """Checked from the size on disk, not after reading: afterwards the memory is already gone.
+
+    Without a ceiling, `read_bytes` on a multi-gigabyte file exhausts memory before anything can report a
+    problem — and decoding doubles it. An OOM kill tells the user nothing about what they did.
+    """
+    from foursight.fileio.loader import FileLoadError, load
+
+    path = tmp_path / "huge.nc"
+    path.write_bytes(b"G1 X1\n" * 1000)
+    with pytest.raises(FileLoadError, match="over the"):
+        load(path, max_bytes=100)
+
+
+def test_the_refusal_says_what_a_real_program_looks_like(tmp_path) -> None:
+    """A bare size limit invites the question of whether the limit is wrong; the message answers it."""
+    from foursight.fileio.loader import FileLoadError, load
+
+    path = tmp_path / "huge.nc"
+    path.write_bytes(b"G1 X1\n" * 1000)
+    with pytest.raises(FileLoadError, match="100,000 lines"):
+        load(path, max_bytes=100)
+
+
+def test_a_file_at_the_limit_is_accepted(tmp_path) -> None:
+    """Off-by-one on a boundary check would refuse a file that is exactly allowed."""
+    from foursight.fileio.loader import load
+
+    body = b"G1 X1\n" * 10
+    path = tmp_path / "ok.nc"
+    path.write_bytes(body)
+    assert load(path, max_bytes=len(body)).text.count("G1") == 10
+
+
+def test_the_default_limit_accepts_a_realistic_large_program() -> None:
+    """The ceiling must not refuse the 100k-line program PLAN.md targets."""
+    import sys
+
+    from foursight.fileio.loader import MAX_FILE_BYTES
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_perf import generate
+
+    assert len(generate(100_000).encode("utf-8")) < MAX_FILE_BYTES

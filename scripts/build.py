@@ -69,6 +69,25 @@ def pyinstaller_command(args: argparse.Namespace) -> list[str]:
         "--paths",
         str(REPO_ROOT / "src"),
     ]
+    # PyInstaller collects Python *modules* automatically but not package **data**, so the bundled
+    # profile TOML is left out unless asked for. Found by running the bundle rather than by reading the
+    # docs: `foursight` started, then refused with "No such file or directory:
+    # .../_internal/foursight/profiles/default_4axis.toml". `--collect-data` is the portable form;
+    # `--add-data` needs a platform-dependent separator (':' vs ';') and is easy to get wrong once.
+    cmd += ["--collect-data", "foursight"]
+
+    # And every submodule, because two registries are populated by **dynamic** import:
+    # `verify.rules.load_builtin_checks` and `fix.engine.load_builtin_fixes` both use
+    # `importlib.import_module`, deliberately, so `ruff --fix` cannot delete the import as F401 and leave
+    # a silently empty registry. PyInstaller's static analysis cannot see through that, so the modules are
+    # simply absent from the bundle — the app started and then died with
+    # "ModuleNotFoundError: No module named 'foursight.fix.fixes'".
+    #
+    # The two requirements pull in opposite directions and both are real: the dynamic import protects the
+    # registry from the linter, and this flag protects it from the packager. Found by running the bundle;
+    # nothing in the test suite could have caught it, since the suite imports normally.
+    cmd += ["--collect-submodules", "foursight"]
+
     if args.windowed:
         cmd.append("--windowed")
     if args.clean:

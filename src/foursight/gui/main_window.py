@@ -24,6 +24,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -34,8 +35,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from foursight.gui.background import ProgramLoader
+from foursight.fix.engine import FixContext, FixHistory, apply_fix, get_fix, load_builtin_fixes
+from foursight.gui.background import BufferLoader, ProgramLoader
 from foursight.gui.diagnostics_panel import DiagnosticsPanel
+from foursight.gui.diff_dialog import DiffDialog, RefusalDialog
 from foursight.gui.editor import CodeEditor
 from foursight.gui.selection import LineSelection, select_line
 from foursight.gui.session import OpenedProgram
@@ -60,6 +63,7 @@ class MainWindow(QMainWindow):
         self._loader: ProgramLoader | None = None
         self._loading_path: Path | None = None
         self.selection: LineSelection | None = None
+        self.fix_history = FixHistory()
 
         self.setWindowTitle("FourSight")
         self.resize(1280, 800)
@@ -144,6 +148,25 @@ class MainWindow(QMainWindow):
         self.reload_action.setEnabled(False)
         file_menu.addSeparator()
         self._add(file_menu, "&Quit", QKeySequence.Quit, self.close)
+
+        fix_menu = self.menuBar().addMenu("Fi&x")
+        self.fix_actions: dict[str, QAction] = {}
+        for fix_id, fix in sorted(load_builtin_fixes().items(), key=lambda item: item[1].title):
+            # A destructive fix is present but must never be the easy default: no shortcut, and the title
+            # says so. PLAN.md keeps N-word stripping off by default for reasons the diff cannot show.
+            label = f"{fix.title}…" if fix.needs_parameter else fix.title
+            if fix.destructive:
+                label += "  (destructive)"
+            action = QAction(label, self)
+            action.setStatusTip(fix.description)
+            action.triggered.connect(lambda _checked=False, fix_id=fix_id: self.run_fix(fix_id))
+            fix_menu.addAction(action)
+            self.fix_actions[fix_id] = action
+        fix_menu.addSeparator()
+        self.undo_fix_action = self._add(
+            fix_menu, "&Undo last fix", QKeySequence.Undo, self.undo_fix
+        )
+        self.undo_fix_action.setEnabled(False)
 
         view_menu = self.menuBar().addMenu("&View")
         self._add(view_menu, "&Fit to program", QKeySequence("Ctrl+0"), self.fit_view)
@@ -330,7 +353,10 @@ class MainWindow(QMainWindow):
         # which is a claim we have not made yet at this point.
         self.diagnostics.set_pending()
         self.timeline.set_simulation(program.simulation)
-        self.editor.setPlainText(program.loaded.text)
+        # Only rewrite the pane when the text actually differs. Re-setting identical text after a
+        # buffer reload would reset the cursor and scroll position on every applied fix.
+        if self.editor.toPlainText() != program.loaded.text:
+            self.editor.setPlainText(program.loaded.text)
         self.viewport.set_simulation(program.simulation)
         self.reload_action.setEnabled(program.path is not None)
 
@@ -402,6 +428,101 @@ class MainWindow(QMainWindow):
     def _on_diagnostic_activated(self, line_no: int) -> None:
         """Clicking a finding jumps the editor there, which highlights the line via the T3.2 path."""
         self.editor.goto_line(line_no)
+
+    # ------------------------------------------------------------------ fixes (T5.1)
+
+    def run_fix(self, fix_id: str) -> bool:
+        """Apply exactly one fix, then re-run the whole pipeline. Returns whether it was applied.
+
+        **This is the one-fix contract, and the reload is the contract.** A fix that inserts or removes a
+        line shifts every line number after it, so every `Diagnostic.line` and every `SegmentStore.line`
+        entry is stale the moment it applies. Rather than trying to rebase anything, the buffer goes back
+        through load → parse → simulate → verify exactly as if it had been opened again. T2.9 made that
+        cheap enough to be practical: it is the same threaded, cancellable path.
+        """
+        if self.program is None:
+            return False
+        fix = get_fix(fix_id)
+        if fix is None:
+            return False
+
+        parameter = None
+        if fix.needs_parameter:
+            # Prompted, never invented. A feed rate is a machining decision about tool, material and
+            # depth of cut; choosing one here would put a number in the program that nobody chose.
+            value, accepted = QInputDialog.getDouble(
+                self, fix.title, fix.parameter_prompt, 600.0, 0.0001, 1_000_000.0, 4
+            )
+            if not accepted:
+                return False
+            parameter = value
+
+        text = self.editor.toPlainText()
+        result = apply_fix(
+            fix_id,
+            FixContext(
+                text=text,
+                profile=self.profile,
+                line=self.selection.line_no if self.selection else self.editor.current_line,
+                parameter=parameter,
+                block_delete=self.block_delete,
+            ),
+        )
+
+        if result.refused:
+            RefusalDialog(fix, result, self).exec()
+            self.statusBar().showMessage(f"{fix.title}: not applied")
+            return False
+        if result.changed_nothing:
+            self.statusBar().showMessage(f"{fix.title}: {result.note or 'nothing to change'}")
+            return False
+        if DiffDialog(fix, result, self).exec() != DiffDialog.Accepted:
+            self.statusBar().showMessage(f"{fix.title}: cancelled")
+            return False
+
+        self.fix_history.record(fix_id, text)
+        self.undo_fix_action.setEnabled(True)
+        self._reload_from_buffer(result.text, f"{fix.title} applied")
+        return True
+
+    def undo_fix(self) -> None:
+        """Restore the buffer to before the last fix.
+
+        Snapshots, not reversed diffs — reversing a diff is exactly the rebasing the one-fix contract
+        forbids, and a snapshot cannot be applied to the wrong place.
+        """
+        entry = self.fix_history.undo()
+        if entry is None:
+            return
+        fix_id, previous = entry
+        self.undo_fix_action.setEnabled(self.fix_history.depth > 0)
+        fix = get_fix(fix_id)
+        self._reload_from_buffer(previous, f"undid {fix.title if fix else fix_id}")
+
+    def _reload_from_buffer(self, text: str, message: str) -> None:
+        """Re-run the pipeline over edited text, off the GUI thread.
+
+        The file on disk is untouched: PLAN.md requires fixes to modify the editor buffer with the user
+        saving explicitly. So this loads from *text*, and the path is kept only for the title bar.
+        """
+        self.editor.setPlainText(text)
+        self._cancel_running_load()
+        self._loader = BufferLoader(
+            text,
+            self.profile,
+            path=self.program.path if self.program else None,
+            block_delete=self.block_delete,
+            parent=self,
+        )
+        self._loader.progressed.connect(self._on_progress)
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.failed.connect(lambda reason: self._on_failed(Path("buffer"), reason))
+        self._loader.cancelled.connect(lambda: self._on_cancelled(Path("buffer")))
+        self._loader.verified.connect(self._on_verified)
+        self._loader.finished.connect(self._on_loader_finished)
+        self._loading_path = self.program.path if self.program else None
+        self._set_busy(True, message)
+        self._loader.start()
 
     # ------------------------------------------------------------------ display transform (T4.5)
 

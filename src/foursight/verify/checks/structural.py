@@ -180,6 +180,52 @@ class UnknownCodes(Rule):
         )
 
 
+#: G43/G44 activate a tool length offset; G49 cancels it and needs no diagnostic.
+_TOOL_LENGTH_CODES = frozenset({"43", "44"})
+
+
+@register_rule
+class ToolLengthNotModelled(Rule):
+    """G43/G44 is active, so drawn Z is the spindle position rather than the tool tip.
+
+    **Owed since M1 and recorded in PLAN.md until now.** The simulator has always emitted a *note* about
+    this, but a note only ever reached the status bar — so once M3 built the diagnostics panel, the one
+    modelling caveat that changes what Z *means* was the only one absent from it.
+
+    `unsupported`, not `warning`, and the distinction is the taxonomy's whole point: G43 affects how
+    subsequent motion is interpreted and v1 does not interpret it. PLAN.md § Supported G-code Subset makes
+    the deliberate trade — G43 appears in nearly every real program, so refusing to draw them all would
+    make the previewer useless, and the offset shifts the Z datum uniformly without changing the path's
+    *shape*. So the path is drawn and this says what it is: Z relative to the spindle, not the tip.
+
+    One diagnostic per activation, not per affected line. A program that cuts 40,000 lines under one G43
+    has one thing wrong with it, not 40,000.
+    """
+
+    rule_id = "structural.tool-length-not-modelled"
+    description = "G43/G44 tool length offset is not modelled; Z is relative to the spindle"
+    severity = Severity.UNSUPPORTED
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        for command in program.commands:
+            active = [code for code in command.gcodes if code in _TOOL_LENGTH_CODES]
+            if not active:
+                continue
+            offset = command.words.get("H")
+            names = "/".join(f"G{code}" for code in active)
+            suffix = "" if offset is None else f" (H{offset:g})"
+            yield Diagnostic(
+                rule_id=self.rule_id,
+                severity=Severity.UNSUPPORTED,
+                line=command.ref.line_no,
+                message=(
+                    f"{names}{suffix} tool length offset is not modelled: there is no tool table, so "
+                    "the drawn Z is the spindle position, not the tool tip. The path's shape is correct; "
+                    "its Z datum is shifted by the offset."
+                ),
+            )
+
+
 @register_rule
 class UnsupportedMotionCodes(Rule):
     """Recognized, motion-affecting, not interpreted in v1 — reported per span.
