@@ -290,3 +290,29 @@ def test_the_default_limit_accepts_a_realistic_large_program() -> None:
     from test_perf import generate
 
     assert len(generate(100_000).encode("utf-8")) < MAX_FILE_BYTES
+
+
+def test_a_missing_file_raises_the_same_way_it_always_did(tmp_path) -> None:
+    """The size guard must not change how a *missing* file is reported.
+
+    `os.stat` and `open` describe a missing file differently on Windows — stat surfaces the Win32 text
+    ("The system cannot find the file specified") while open surfaces the CRT's POSIX-style "No such file
+    or directory". The first version of the size check called `stat` unconditionally, which changed the
+    CLI's message on Windows and nowhere else. A platform-only wording change is exactly what a size guard
+    has no business introducing.
+    """
+    from foursight.fileio.loader import load
+
+    with pytest.raises(FileNotFoundError) as caught:
+        load(tmp_path / "absent.nc")
+    # errno 2 on every platform; the *message* is the CRT's because the failure comes from `open`.
+    assert caught.value.errno == 2
+    assert caught.value.strerror == "No such file or directory"
+
+
+def test_a_directory_is_still_reported_as_an_os_error(tmp_path) -> None:
+    """`is_file()` is False for a directory, so it must fall through and raise rather than be skipped."""
+    from foursight.fileio.loader import load
+
+    with pytest.raises(OSError):
+        load(tmp_path)

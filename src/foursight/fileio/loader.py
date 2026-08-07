@@ -73,8 +73,13 @@ def load(path: str | Path, *, max_bytes: int = MAX_FILE_BYTES) -> LoadedFile:
     afterwards would be pointless: the memory is already gone by then.
     """
     resolved = Path(path)
-    size = resolved.stat().st_size
-    if size > max_bytes:
+    # Only stat a file that exists. `os.stat` and `open` report a *missing* file differently on Windows —
+    # stat surfaces the Win32 text ("The system cannot find the file specified") while open surfaces the
+    # CRT's POSIX-style "No such file or directory", which is what every other platform says and what the
+    # CLI's contract has always shown. Checking the size unconditionally changed that wording on Windows
+    # and nowhere else, which is exactly the kind of platform-only regression a size guard has no business
+    # introducing. A missing file falls through to `read_bytes` and raises as it always did.
+    if resolved.is_file() and (size := resolved.stat().st_size) > max_bytes:
         raise FileLoadError(
             f"{resolved} is {size / 1e6:.0f} MB, over the {max_bytes / 1e6:.0f} MB limit. "
             "A G-code program of 100,000 lines is roughly 3 MB, so this is almost certainly not one — "
