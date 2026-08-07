@@ -751,7 +751,7 @@ Built on the **4-axis-shaped data model from day one**, with the kinematics tran
 
 - Code pane with syntax highlighting
 - Click a line → highlight segments
-- **Click a segment → jump to line.** This is not a one-liner: with 500k segments in ≤ 10 batched buffers, Qt item picking is unavailable. Implement GPU colour-picking to an offscreen target, or a CPU KD-tree over segment midpoints. Pick one in M3 planning and budget for it.
+- **Click a segment → jump to line.** Not a one-liner: with 500k segments in ≤ 10 batched buffers, Qt item picking is unavailable. **Resolved in T3.0 — see § Picking Strategy.**
 - Diagnostics panel listing verifier output, click → jump to line; unsupported spans visually distinct
 - Timeline scrubber animating tool position, driven by `SegmentStore.duration`
 
@@ -874,6 +874,44 @@ silently substituted default, which would make every limit and rapid rate wrong.
 
 Simulation still runs on the GUI thread, so a 100k-line file freezes the window for ~4.6 s. T2.9 moves
 it off; the wait cursor is the interim signal that the application is working rather than hung.
+
+### Picking Strategy
+
+**Decided by measurement in T3.0 (`spikes/picking.py`), resolving D4: CPU screen-space distance to the
+segment, with the projection cached per camera change.** Neither of the two options D4 named.
+
+| Segments | cold (projects everything) | **warm (per click)** |
+|---|---|---|
+| 10,000 | 0.84 ms | 0.45 ms |
+| 100,000 | 13.84 ms | 5.79 ms |
+| **500,000** | 93.96 ms | **27.34 ms** |
+| 1,000,000 | 154.40 ms | 57.07 ms |
+
+A click projects nothing: screen coordinates for all 2N vertices are cached and invalidated when the
+camera moves, so the 47.7 ms projection at 500k is paid once per camera settle rather than once per
+click. The camera never moves *between* the user stopping an orbit and clicking, which is what makes the
+cache sound. float32 was tried and does not help (48.0 ms vs 47.7 ms) — the matmul dominates, not
+memory bandwidth.
+
+Why not the two candidates D4 proposed:
+
+- **A KD-tree over segment midpoints answers the wrong question.** Midpoints are not the feature the
+  user is aiming at: clicking 1 px from the end of a 100 mm rapid, the nearest *midpoint* belongs to a
+  different segment 28.7 px away, and the tree returns the wrong source line. Measured, not argued. It
+  also wants scipy, a new dependency. Distance to the *segment* costs one extra clamp.
+- **GPU colour-picking costs memory and fights the batching design.** It needs a unique colour per
+  segment, so a per-vertex colour buffer — 4 MB at 500k as uint8 — purely so clicking works, plus an
+  extra full render pass and a framebuffer readback per click. Our batches deliberately use *one colour
+  per item*, which is what keeps GL memory at 12 MB rather than 28 MB (§ Performance Requirements).
+
+**Occlusion is a feature we do not want here.** Colour-picking is exactly occlusion-correct: it can only
+return what is visible. In a wireframe toolpath there are no surfaces, and wanting the line *behind*
+another line is ordinary — so "nearest on screen, front-most among the candidates within the pick
+radius" is the better semantic, not a compromise. Depth is used only to break ties.
+
+Recorded risk: at **1M segments the warm path is 57 ms**, which is noticeable. It is inside the 500k
+target with 4× margin, and if 1M ever has to be interactive the lever is a screen-space bounding-box
+prefilter per builder chunk, so most segments are rejected without a distance computation.
 
 ### Batching Layer
 

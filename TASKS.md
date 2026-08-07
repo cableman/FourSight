@@ -42,8 +42,14 @@ Record the answers **in `PLAN.md`**, then tick here.
       Dashes would have to be baked into geometry (~2× rapid vertices). Not worth it, and
       `width=` is not a fallback either — pyqtgraph skips `glLineWidth` entirely on core
       forward-compatible profiles. **Rapids are distinguished by colour.** Recorded in PLAN.md.
-- [ ] **D4 — Picking strategy: GPU colour-pick vs CPU KD-tree.** Decided in T3.0, informed by D1.
-      Do not defer past M3 planning; it is not a one-liner at 500k segments in ≤ 10 batches.
+- [x] **D4 — Picking strategy → CPU screen-space distance to the segment, projection cached per
+      camera change.** Neither option as framed. Measured in T3.0 (`spikes/picking.py`): **27.3 ms per
+      click at 500k segments** warm, against 93.9 ms if it reprojects every time. Midpoints were
+      rejected on *accuracy*, not speed — clicking 1 px from a long segment's end, the nearest midpoint
+      belongs to a different line 28.7 px away. GPU colour-pick was rejected on cost: a per-vertex
+      colour buffer (4 MB at 500k) plus a render pass and readback per click, and it fights the
+      one-colour-per-batch design that keeps GL memory at 12 MB. Full reasoning in PLAN.md
+      § Picking Strategy.
 - [x] **D5 — Baseline hardware → Intel Iris Xe Graphics (ADL GT2), Mesa 25.1.5, Pop!_OS 22.04,
       Python 3.12.10.** The machine T0.7 was measured on; recorded in PLAN.md against both the M0
       spike result and the M2 gate. **Measure that gate with vsync off** — with vsync on, every
@@ -1181,11 +1187,30 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
 
 ## M3 — Editor sync + diagnostics UI
 
-- [ ] **T3.0 — Decide the picking strategy** *(resolves D4)*
-      GPU colour-picking to an offscreen target vs a CPU KD-tree over segment midpoints. Qt item
-      picking is unavailable at 500k segments in ≤ 10 batches. Record the choice and its cost in
-      `PLAN.md` **before** T3.3.
+- [x] **T3.0 — Decide the picking strategy** *(resolves D4)* — *done*
+      `spikes/picking.py`, run against real `GLViewWidget` matrices. Recorded in PLAN.md
+      § Picking Strategy **before** T3.3, as the task required.
+      **Chose a third option neither candidate covered: CPU screen-space distance to the segment, with
+      the projection cached per camera change.** Per-click cost at the 500k target is **27.3 ms** (warm),
+      versus 93.9 ms if it reprojects on every click; 0.45 ms at 10k, 5.79 ms at 100k. A click projects
+      nothing — the camera does not move between the user stopping an orbit and clicking, which is what
+      makes the cache sound. float32 was tried and does not help (48.0 vs 47.7 ms): the matmul dominates.
+      **Midpoints were rejected on accuracy, not speed** — the flaw is baked into D4's phrasing. Clicking
+      1 px from the end of a 100 mm rapid, the nearest *midpoint* belongs to a different segment 28.7 px
+      away, so a KD-tree returns the wrong source line. Demonstrated in the spike rather than argued.
+      Distance to the segment itself costs one extra clamp, and needs no scipy.
+      **GPU colour-pick was rejected on cost and on fit** — a per-vertex colour buffer (4 MB at 500k as
+      uint8) purely so clicking works, plus an extra render pass and framebuffer readback per click, and
+      it contradicts the one-colour-per-batch choice that keeps GL memory at 12 MB rather than 28 MB.
+      **Its exact occlusion is a drawback here, not an advantage:** a wireframe toolpath has no surfaces,
+      and wanting the line *behind* another line is ordinary. "Nearest on screen, front-most among
+      candidates within the pick radius" is the better semantic; depth only breaks ties.
+      Recorded risk: **57 ms per click at 1M segments** is noticeable. That is 2x the target with 4x
+      margin at 500k; the lever if it ever matters is a screen-space bounding-box prefilter per chunk.
+      Also pinned a third pyqtgraph API that moved since PLAN was written: `projectionMatrix()` now takes
+      `(region, viewport)`, and `QMatrix4x4.data()` is column-major.
       Blocked by: T2.13
+      Files: `spikes/picking.py`, `PLAN.md`
 
 - [ ] **T3.1 — Code pane + syntax highlighting** — `gui/editor.py`
 - [ ] **T3.2 — Click a line → highlight segments** (uses `SegmentStore.line`)
