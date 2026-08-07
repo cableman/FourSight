@@ -29,11 +29,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from foursight.gui.background import ProgramLoader
+from foursight.gui.editor import CodeEditor
 from foursight.gui.session import OpenedProgram
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.profile import MachineProfile
@@ -58,18 +60,29 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.viewport = ToolpathViewport()
+        self.editor = CodeEditor()
         self.banner = QLabel()
         self.banner.setStyleSheet(_BANNER_STYLE)
         self.banner.setWordWrap(True)
         self.banner.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.banner.hide()
 
+        # Code on the left, toolpath on the right. A splitter rather than a fixed layout because the
+        # useful ratio depends entirely on the task: reading code wants width, judging geometry wants it
+        # all. Sizes are a starting point, not a constraint.
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(self.editor)
+        self.splitter.addWidget(self.viewport)
+        self.splitter.setStretchFactor(0, 2)
+        self.splitter.setStretchFactor(1, 3)
+        self.splitter.setSizes([480, 800])
+
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.banner)
-        layout.addWidget(self.viewport, stretch=1)
+        layout.addWidget(self.splitter, stretch=1)
         self.setCentralWidget(container)
 
         # Progress and Cancel live in the status bar so a long load never blocks the window (T2.9).
@@ -249,6 +262,10 @@ class MainWindow(QMainWindow):
 
     def _show(self, program: OpenedProgram) -> None:
         self.program = program
+        # The editor shows exactly the text that was parsed — `loaded.text`, after decoding and BOM
+        # removal — not a re-read of the file. Anything else and the line numbers in the gutter could
+        # disagree with the ones in `SourceRef`, which is what T3.2 and T3.4 sync on.
+        self.editor.setPlainText(program.loaded.text)
         self.viewport.set_simulation(program.simulation)
         self.reload_action.setEnabled(program.path is not None)
 
@@ -275,7 +292,7 @@ class MainWindow(QMainWindow):
         kept = self.program.path.name if self.program and self.program.path else "nothing"
         self.statusBar().showMessage(f"Could not open {path.name} — still showing {kept}")
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override, the name is not ours to choose
+    def closeEvent(self, event) -> None:
         """Stop a running load before the window goes away.
 
         A QThread outliving its parent widget is how a clean exit turns into a crash on shutdown: the

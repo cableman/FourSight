@@ -1223,7 +1223,46 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Blocked by: T2.13
       Files: `spikes/picking.py`, `PLAN.md`
 
-- [ ] **T3.1 — Code pane + syntax highlighting** — `gui/editor.py`
+- [x] **T3.1 — Code pane + syntax highlighting** — `gui/editor.py`, `gui/highlighting.py` — *done*
+      Split as before: `highlighting.py` decides what to colour and **imports no Qt**; `editor.py` is a
+      `QSyntaxHighlighter` plus a gutter. Recorded in PLAN.md § Editor.
+      **56 tests (41 Qt-free in `test_highlighting.py`, 15 in `test_editor.py`).**
+      **The rules are the parser's own, not a second opinion.** `highlighting.py` imports `_COMMENT_RE`,
+      `_TOKEN_RE` and `_FRAMING` from the tokenizer and applies them in its order. A separate regex would
+      drift, and the failure is specific: the editor showing a construct as a valid word that
+      `foursight check` rejects. A parametrized test walks **every line of all ten fixtures** asserting
+      nothing clean is marked malformed, and its converse asserts everything the parser errors on *is*.
+      Reusing the tokenizer made malformed input free, marked with a **wavy underline as well as colour**
+      — it is the one role meaning "this will not run", and colour alone fails a colour-blind reader.
+      **Two of my own mistakes, both caught by tests I had written:**
+      - `%` was marked malformed. The tokenizer consumes bare framing silently, so that was the editor
+        contradicting the parser about a construct every Fanuc program starts with.
+      - `X (c) 10` produced *overlapping* spans. The word legitimately covers the comment (it means X10),
+        so word spans are now clipped around comments — neither hiding the comment nor splitting the word.
+      **Two off-by-one traps, handled once so nothing downstream inherits them.** Qt blocks are 0-based
+      and every line number in this codebase is 1-based. Worse, `line_count` is **one more** than the
+      parser's count for newline-terminated text (`"G1 X10\n"` is 1 line and 2 blocks). Added
+      `source_line_count` for comparing against anything the parser produced, with both asserted —
+      T3.2/T3.4 must use it or every jump lands one line off, which looks plausible on screen.
+      Also found that `setUnderlineStyle(WaveUnderline)` makes `fontUnderline()` report **False**, which
+      had my underline test passing for the wrong reason.
+      **Mutation-verified, all 7 caught:** malformed treated as valid, N-numbers mis-coloured, framing
+      marked malformed, spans not clipped, block delete unrecognised, underline dropped, and
+      `source_line_count` off by one.
+      Replaced five scattered `# noqa: N802` with one scoped `per-file-ignores` entry for
+      `src/foursight/gui/*`: Qt override names (`closeEvent`, `paintEvent`, `resizeEvent`, `sizeHint`,
+      `highlightBlock`) are not ours to choose, and gui/ is the only package permitted to import Qt.
+      **⚠ This task breaks the M2 gate, measured and recorded rather than absorbed.** `setPlainText` on
+      100k lines costs **1.23 s**; with parse + simulate at 4.75 s the total is **5.97 s against the 5 s
+      gate T2.13 certified at 4.46 s**. The remedy is the already-sized `_durations` fast path (~35% of
+      simulate, ~1.66 s here) — the headroom T2.13 noted was in simulation, not rendering. Until it
+      lands, a 100k-line file takes ~6 s to open, and 1.23 s of that is a **GUI-thread freeze**, since Qt
+      widgets cannot be written from the T2.9 worker.
+      Blocked by: T2.13
+      Files: `src/foursight/gui/highlighting.py`, `src/foursight/gui/editor.py`,
+      `src/foursight/gui/main_window.py`, `pyproject.toml`, `tests/test_highlighting.py`,
+      `tests/test_editor.py`, `PLAN.md`
+
 - [ ] **T3.2 — Click a line → highlight segments** (uses `SegmentStore.line`)
 - [ ] **T3.3 — Click a segment → jump to line** — `gui/picking.py`, per D4. Budget real time here.
 - [ ] **T3.4 — Diagnostics panel** — click → jump to line; `unsupported` spans visually distinct

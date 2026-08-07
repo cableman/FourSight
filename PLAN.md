@@ -81,6 +81,7 @@ FourSight/
 │   ├── gui/
 │   │   ├── app.py           # entry point
 │   │   ├── main_window.py
+│   │   ├── highlighting.py # G-code -> coloured spans, using the parser's own regexes (NO Qt)
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
@@ -841,6 +842,53 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   window keeps whatever it had — the same rule as a failed open. Cancellation is also checked between
   parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
   own, so a user who cancels during it should not then wait out the simulation.
+
+### Editor
+
+`gui/highlighting.py` decides what to colour and **imports no Qt**; `gui/editor.py` is a
+`QSyntaxHighlighter` plus a line-number gutter over `QPlainTextEdit`.
+
+**The highlighting rules are the parser's own.** `highlighting.py` imports `_COMMENT_RE`, `_TOKEN_RE` and
+`_FRAMING` from `parser/tokenizer.py` and applies them in the tokenizer's order — comments blanked in
+place first, then words over the blanked text. A separate highlighting regex would drift, and the failure
+mode is specific: the editor would show a construct in confident "valid word" colour that
+`foursight check` rejects, or paint as a comment something the parser reads as motion. `X (c) 10` is that
+trap exactly — it means `X10`, so the word span legitimately *covers* the comment and is clipped around it
+rather than either hiding the comment or splitting the word into two unrelated ones.
+
+Reusing the tokenizer also makes malformed input free: `_TOKEN_RE` already separates a letter with no
+value from a stray character, so the editor marks precisely what the parser will reject. Marked with a
+**wavy underline as well as colour**, because malformed is the one role meaning "this will not run" and a
+red-green colour-blind reader would otherwise see ordinary text.
+
+**Two off-by-one traps, both handled in one place so nothing downstream inherits them:**
+
+- Qt text blocks are 0-based; `SourceRef.line_no`, `Diagnostic.line` and `SegmentStore.line` are 1-based.
+  `CodeEditor` converts once, and `goto_line` clamps rather than failing on a diagnostic past the end.
+- `line_count` is the Qt block count and is **one more** than the parser's for newline-terminated text —
+  `"G1 X10\n"` is one line to `splitlines()` and two blocks to Qt, since the position after the final
+  newline is a real cursor position. Both are correct. **`source_line_count` is the one to compare against
+  anything the parser produced**, and T3.2/T3.4 must use it.
+
+The buffer is **editable, not read-only**: § Fix Engine has fixes modifying the editor buffer with the
+user saving explicitly, so a read-only pane would make M5 impossible.
+
+Highlighting is per visible block — `QSyntaxHighlighter` only formats blocks Qt paints — so a 100k-line
+file costs nothing beyond loading the text.
+
+#### Cost, and a gate regression it causes
+
+`setPlainText` on a 100k-line program costs **1.23 s**, measured. With parse + simulate at 4.75 s the
+total is **5.97 s, past the 5 s M2 gate that T2.13 certified at 4.46 s**. Recorded rather than absorbed:
+the editor is a real feature and the gate is a real number, and one of them has to move.
+
+The remedy is already sized: the `_durations` fast path is ~35% of simulate, about **1.66 s** at this size
+— more than enough to get back under 5 s. That is the headroom T2.13 explicitly noted was left in
+simulation rather than rendering. Until it lands, a 100k-line file takes ~6 s to open.
+
+Note also that `setPlainText` runs on the **GUI thread**, since Qt widgets cannot be touched from a
+worker, so that 1.23 s is a freeze at the end of an otherwise-threaded load (T2.9). Chunked insertion or a
+lazy document would fix it if the fast path proves insufficient.
 
 ### GUI Shell
 

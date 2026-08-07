@@ -56,3 +56,8 @@ ignore = ["E501"]  # line length handled by formatter
 "tests/*" = ["S101"]                       # assert is the point
 "scripts/*" = ["S603", "S607"]             # build.py shells out to PyInstaller
 "src/foursight/machine/kinematics.py" = ["N806"]  # R for a rotation matrix is correct
+# Qt override names are camelCase and not ours to choose: closeEvent, paintEvent, resizeEvent,
+# sizeHint, highlightBlock. Scoped to gui/, which is the only package permitted to import Qt, so
+# a mis-named method of our own anywhere else is still caught. One declaration beats a noqa on
+# every override.
+"src/foursight/gui/*" = ["N802"]
