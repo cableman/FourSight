@@ -82,6 +82,7 @@ FourSight/
 │   │   ├── app.py           # entry point
 │   │   ├── main_window.py
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
+│   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
 │   │   ├── viewport3d.py    # GL view and camera; thin, because batching.py holds the logic
 │   │   ├── picking.py       # segment ↔ screen hit-testing (see Picking)
@@ -828,7 +829,18 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   `SegmentBuilder`; simulating an actual program to 500,070 segments also costs **38.5 MB, 77 B per
   segment**, against the 50 MB budget. So no per-block bookkeeping has crept in between parser and
   store. Peak RSS is recorded, never asserted — `resource` is Unix-only and Windows is in the matrix.
-- Simulation runs off the GUI thread (QThread) with progress reporting for large files.
+- **Simulation runs off the GUI thread — done (T2.9).** `open_file` returns in **0 ms** where it
+  previously blocked ~4.6 s; measured on the baseline machine, the event loop regained control **513
+  times** during a real 100k-line load. `simulate` takes `progress(done, total)` and
+  `cancelled() -> bool`, both Qt-free — a `threading.Event.is_set` satisfies the latter exactly — so
+  `gui/background.py` owns the threading and no Qt type crosses into `sim/`. Polling on the progress
+  interval keeps the cancel check free: ~43 calls for a 100k-line program against ~40 µs per block.
+  **A cancelled run raises `SimulationCancelled` rather than returning a partial `Simulation`.** A
+  half-stepped program is a truncated toolpath, and returning one invites a caller to draw it as though
+  the program ended there. There is no honest way to render "the first 40% of this program", so the
+  window keeps whatever it had — the same rule as a failed open. Cancellation is also checked between
+  parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
+  own, so a user who cancels during it should not then wait out the simulation.
 
 ### GUI Shell
 
@@ -917,6 +929,24 @@ raw `QOpenGLWidget` fallback is **not needed**; M2 builds on pyqtgraph.
 With vsync on, every configuration from 1k to 500k reports ~60 fps, because that measures the
 display refresh rate rather than the GPU. Always measure uncapped (`vblank_mode=0` on Mesa/GLX)
 before drawing conclusions about headroom; the spike now prints a warning when it detects this.
+
+#### M2 gate result — MEASURED, gate met (T2.13)
+
+End to end through `MainWindow` on the same baseline hardware: open the file, wait for the background
+load, force one `paintGL` with `glFinish`, then orbit 120 frames discarding 20 as warmup.
+
+| Criterion | Measured | Margin |
+|---|---|---|
+| 100k-line file parses and renders ≤ 5 s | **4.46 s** to first frame drawn | 11% |
+| ≥ 30 fps while orbiting (81,900 segments) | **316 fps**, worst frame 4.99 ms | 10.5× |
+| ≥ 30 fps at the 500k-segment target | **241 fps**, worst frame 10.7 ms | 8× |
+
+100,000 lines → 85,715 blocks → 81,900 segments in 2 batches; geometry 6.3 MB + 2.0 MB GL.
+
+**Rendering is not the constraint — simulation is.** Of the 4.46 s, roughly 4.44 s is parse and
+simulate and ~20 ms is drawing. The gate passes as written, so the `_durations` fast path sized above
+is not required for M2; it remains the lever if slower hardware ever has to meet this number, because
+11% is not much margin and none of it is in the renderer.
 
 #### Item and driver constraints
 

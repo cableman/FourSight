@@ -29,7 +29,14 @@ from foursight.fileio.loader import LoadedFile, load
 from foursight.machine.profile import MachineProfile
 from foursight.parser.model import Command, ParseError
 from foursight.parser.resolver import parse
-from foursight.sim.simulator import Simulation, Span, simulate
+from foursight.sim.simulator import (
+    CancelCheck,
+    ProgressCallback,
+    Simulation,
+    SimulationCancelled,
+    Span,
+    simulate,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,24 +126,45 @@ class OpenedProgram:
 
 
 def open_program(
-    path: str | Path, profile: MachineProfile, *, block_delete: bool = False
+    path: str | Path,
+    profile: MachineProfile,
+    *,
+    block_delete: bool = False,
+    progress: ProgressCallback | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> OpenedProgram:
     """Read, parse and simulate a file.
 
-    Exceptions propagate: `OSError` for an unreadable path and `FileLoadError` for something that is
-    not G-code at all. Both are the caller's to present, and swallowing either here would leave the
-    window showing the *previous* program under a new filename.
+    Exceptions propagate: `OSError` for an unreadable path, `FileLoadError` for something that is not
+    G-code at all, and `SimulationCancelled` if ``cancelled`` fires. All three are the caller's to
+    present, and swallowing any of them here would leave the window showing the *previous* program
+    under a new filename.
     """
     loaded = load(path)
-    return open_loaded(loaded, profile, block_delete=block_delete)
+    return open_loaded(
+        loaded, profile, block_delete=block_delete, progress=progress, cancelled=cancelled
+    )
 
 
 def open_loaded(
-    loaded: LoadedFile, profile: MachineProfile, *, block_delete: bool = False
+    loaded: LoadedFile,
+    profile: MachineProfile,
+    *,
+    block_delete: bool = False,
+    progress: ProgressCallback | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> OpenedProgram:
-    """The same, for text already in hand — an editor buffer in M3, and every test here."""
+    """The same, for text already in hand — an editor buffer in M3, and every test here.
+
+    Parsing has no progress seam of its own and accounts for roughly a quarter of the wall clock on a
+    large file (1.2 s of 4.6 s at 100k lines), so it is reported as a single step rather than pretended
+    to be incremental. Cancellation is checked once after it, because a user who clicks Cancel during a
+    long parse should not then wait out the whole simulation.
+    """
     result = parse(loaded.text, block_delete=block_delete)
-    simulation = simulate(result.commands, profile)
+    if cancelled is not None and cancelled():
+        raise SimulationCancelled("cancelled after parsing")
+    simulation = simulate(result.commands, profile, progress=progress, cancelled=cancelled)
     return OpenedProgram(
         loaded=loaded,
         commands=tuple(result.commands),

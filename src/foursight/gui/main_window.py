@@ -10,14 +10,16 @@ So a banner appears above the viewport and stays until a program loads without s
 *"A previewer that refuses to draw is recoverable; one that draws the wrong path is worse than no
 previewer"* — a refusal nobody notices forfeits that.
 
-Simulation runs on the GUI thread here, so a 100k-line file freezes the window for several seconds.
-That is T2.9's job; until then the wait cursor at least says the application is working rather than
-hung.
+Loading runs on a background thread (T2.9), so a 100k-line file no longer freezes the window for the
+~4.6 s parse-and-simulate takes. `open_file` therefore **returns immediately** and the outcome arrives
+on a signal; `open_file_and_wait` is the synchronous wrapper for tests and for a path given on the
+command line. Whatever was loaded before stays on screen until a *successful* load replaces it —
+through the wait, a failure, or a cancellation.
 """
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDeadlineTimer, QEventLoop, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,12 +27,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from foursight.fileio.loader import FileLoadError
-from foursight.gui.session import OpenedProgram, open_program
+from foursight.gui.background import ProgramLoader
+from foursight.gui.session import OpenedProgram
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.profile import MachineProfile
 
@@ -47,6 +51,8 @@ class MainWindow(QMainWindow):
         self.block_delete = block_delete
         self.program: OpenedProgram | None = None
         self._last_directory = str(Path.home())
+        self._loader: ProgramLoader | None = None
+        self._loading_path: Path | None = None
 
         self.setWindowTitle("FourSight")
         self.resize(1280, 800)
@@ -65,6 +71,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.banner)
         layout.addWidget(self.viewport, stretch=1)
         self.setCentralWidget(container)
+
+        # Progress and Cancel live in the status bar so a long load never blocks the window (T2.9).
+        self.progress = QProgressBar()
+        self.progress.setMaximumWidth(220)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_load)
+        self.cancel_button.hide()
+        # Added to the status bar only while a load is running; see `_set_busy` for why they cannot
+        # simply be hidden in place.
+        self._busy_shown = False
 
         self._build_menus()
         self.statusBar().showMessage("Open a G-code file to begin  (Ctrl+O)")
@@ -99,37 +117,130 @@ class MainWindow(QMainWindow):
         if path:
             self.open_file(path)
 
-    def open_file(self, path: str | Path) -> bool:
-        """Load, simulate and draw ``path``. Returns whether it succeeded.
+    def open_file(self, path: str | Path) -> None:
+        """Start loading ``path`` on a background thread (T2.9).
 
-        On failure the previously loaded program is left **untouched and still on screen**, with its
-        own filename still in the title bar. Clearing the viewport would be worse than useless — the
-        user would have lost their program to a mistyped filename — and drawing nothing under the new
-        name would be a lie about what they are looking at.
+        Returns immediately; the outcome arrives on `_on_loaded`, `_on_failed` or `_on_cancelled`. At
+        100k lines parse plus simulate takes ~4.6 s, and doing that inline made the window look hung.
+
+        Whatever is already loaded stays **untouched and on screen** until a *successful* load replaces
+        it — through a failure, a cancellation, or the wait itself. Clearing the viewport up front
+        would lose the user's program to a mistyped filename, and drawing nothing under the new name
+        would misrepresent what they are looking at.
         """
         path = Path(path)
-        self.statusBar().showMessage(f"Loading {path.name}…")
+        # A second Open while one is running: the newer request is what the user wants, so the older
+        # load is cancelled rather than queued or refused. Cancelling is not instant — the worker
+        # notices on its next progress tick — so the old thread is detached and left to exit on its
+        # own, and its signals are disconnected first so a late `loaded` cannot draw the wrong file.
+        self._cancel_running_load()
 
-        # Exactly one push and one pop. Qt's override cursor is a stack, so restoring in both an
-        # `except` branch and a `finally` pops twice for one push — and the failure dialog must open
-        # *after* the pop, or it appears under an hourglass. Hence the deferred `failure`.
-        failure: Exception | None = None
-        program = None
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._loader = ProgramLoader(
+            path, self.profile, block_delete=self.block_delete, parent=self
+        )
+        self._loader.progressed.connect(self._on_progress)
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.failed.connect(lambda message: self._on_failed(path, message))
+        self._loader.cancelled.connect(lambda: self._on_cancelled(path))
+        self._loading_path = path
+
+        self._set_busy(True, f"Loading {path.name}…")
+        self._loader.start()
+
+    def open_file_and_wait(self, path: str | Path, timeout_ms: int = 30_000) -> bool:
+        """Synchronous wrapper: start a load and pump the event loop until it settles.
+
+        For tests and for `foursight-gui part.nc`, where there is no user to wait for. Kept separate
+        from `open_file` so the interactive path has no blocking branch to get wrong.
+        """
+        self.open_file(path)
+        deadline = QDeadlineTimer(timeout_ms)
+        while self._loader is not None and not deadline.hasExpired():
+            QApplication.processEvents(QEventLoop.AllEvents, 20)
+        return self.program is not None and self.program.path == Path(path)
+
+    def cancel_load(self) -> None:
+        """Cancel an in-flight load, leaving the previous program on screen."""
+        if self._loader is not None:
+            self.statusBar().showMessage("Cancelling…")
+            self._loader.cancel()
+
+    def _cancel_running_load(self) -> None:
+        """Detach any running loader so its result can no longer reach the window."""
+        if self._loader is None:
+            return
+        loader, self._loader = self._loader, None
         try:
-            program = open_program(path, self.profile, block_delete=self.block_delete)
-        except (OSError, FileLoadError, ValueError) as error:
-            failure = error
-        finally:
-            QApplication.restoreOverrideCursor()
+            loader.progressed.disconnect()
+            loader.loaded.disconnect()
+            loader.failed.disconnect()
+            loader.cancelled.disconnect()
+        except RuntimeError:  # pragma: no cover - already disconnected
+            pass
+        loader.cancel()
 
-        if failure is not None:
-            self._report_failure(path, failure)
-            return False
+    # ------------------------------------------------------------------ load outcomes
 
+    def _on_progress(self, done: int, total: int, stage: str) -> None:
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(done)
+            self.statusBar().showMessage(f"{stage} {self._loading_name()} — {done:,} of {total:,}")
+        else:
+            # Parsing has no measurable extent, so the bar runs indeterminate rather than sitting at
+            # zero and reading as a stall.
+            self.progress.setRange(0, 0)
+            self.statusBar().showMessage(f"{stage} {self._loading_name()}…")
+
+    def _on_loaded(self, program: OpenedProgram) -> None:
+        self._loader = None
+        self._set_busy(False)
         self._show(program)
-        self._last_directory = str(path.parent)
-        return True
+        if program.path is not None:
+            self._last_directory = str(program.path.parent)
+
+    def _on_failed(self, path: Path, message: str) -> None:
+        self._loader = None
+        self._set_busy(False)
+        self._report_failure(path, message)
+
+    def _on_cancelled(self, path: Path) -> None:
+        """A cancelled load draws nothing — `simulate` raises rather than returning a partial store."""
+        self._loader = None
+        self._set_busy(False)
+        kept = self.program.path.name if self.program and self.program.path else "nothing"
+        self.statusBar().showMessage(f"Cancelled {path.name} — still showing {kept}")
+
+    def _loading_name(self) -> str:
+        return self._loading_path.name if self._loading_path else ""
+
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        """Show or hide the progress bar and Cancel button together.
+
+        Uses `addPermanentWidget`/`removeWidget` rather than `setVisible`, because **`setVisible(False)`
+        does not work on a status-bar permanent widget**: `QStatusBar` re-shows everything it manages on
+        every reformat, and showing a message causes one. The first version used `setVisible` and the
+        widgets stayed on screen for the rest of the session — a finished application looking
+        permanently busy, with a Cancel button that did nothing. `removeWidget` is Qt's documented way
+        to hide one ("does not delete the widget but hides it").
+
+        `_busy_shown` guards against adding the same widget twice, which would leave a duplicate slot
+        in the layout.
+        """
+        bar = self.statusBar()
+        if busy and not self._busy_shown:
+            bar.addPermanentWidget(self.progress)
+            bar.addPermanentWidget(self.cancel_button)
+            self.progress.show()
+            self.cancel_button.show()
+            self._busy_shown = True
+        elif not busy and self._busy_shown:
+            bar.removeWidget(self.progress)
+            bar.removeWidget(self.cancel_button)
+            self._busy_shown = False
+        if busy:
+            self.progress.setRange(0, 0)
+            bar.showMessage(message)
 
     def reload(self) -> None:
         """Re-read the current file from disk, for an edit made in another editor."""
@@ -159,10 +270,23 @@ class MainWindow(QMainWindow):
             # implies the picture cannot be trusted.
             self.statusBar().showMessage(f"{self.statusBar().currentMessage()}  ·  {warnings[0]}")
 
-    def _report_failure(self, path: Path, error: Exception) -> None:
-        QMessageBox.warning(self, "Cannot open file", f"{path.name}\n\n{error}")
+    def _report_failure(self, path: Path, message: str) -> None:
+        QMessageBox.warning(self, "Cannot open file", f"{path.name}\n\n{message}")
         kept = self.program.path.name if self.program and self.program.path else "nothing"
         self.statusBar().showMessage(f"Could not open {path.name} — still showing {kept}")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override, the name is not ours to choose
+        """Stop a running load before the window goes away.
+
+        A QThread outliving its parent widget is how a clean exit turns into a crash on shutdown: the
+        worker would emit into a deleted receiver. `wait` is bounded because the worker only notices
+        cancellation on its next progress tick.
+        """
+        if self._loader is not None:
+            loader, self._loader = self._loader, None
+            loader.cancel()
+            loader.wait(5000)
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ view
 

@@ -994,33 +994,45 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Files: `src/foursight/verify/checks/geometry.py`, `src/foursight/verify/rules.py`,
       `src/foursight/cli.py`, `tests/test_checks_interpolated.py`, `PLAN.md`
 
-- [ ] **T2.9 — Simulation off the GUI thread**
-      QThread with progress reporting; cancellable.
+- [x] **T2.9 — Simulation off the GUI thread** — `gui/background.py` — *done*
+      QThread with progress reporting and cancellation. Recorded in PLAN.md § Performance Requirements.
+      **DoD met, measured:** `open_file` returns in **0 ms** where it previously blocked ~4.6 s, and on
+      a real 100k-line load the event loop regained control **513 times** during the 4.7 s it took.
+      Progress reports two stages — `Parsing` (indeterminate, since it has no measurable extent) and
+      `Simulating` (block counts) — behind a status-bar bar and a Cancel button.
+      **38 tests (12 Qt-free in `test_cancellation.py`, 26 in `test_main_window.py`); 872 across the
+      suite.** The Qt-free half is the half that matters: `simulate` takes `progress` and
+      `cancelled() -> bool`, which `threading.Event.is_set` satisfies exactly, so no Qt type crosses
+      into `sim/`.
+      **A cancelled run raises rather than returning a partial `Simulation`** — the decision the design
+      rests on. A half-stepped program is a truncated toolpath, and handing one back invites drawing it
+      as though the program ended there. Cancellation is also checked *between parse and simulate*,
+      because parsing is ~a quarter of the wall clock with no progress seam, so cancelling during it
+      must not still wait out the simulation.
+      **A second Open supersedes the first**: the older loader is disconnected before being cancelled,
+      so a late `loaded` cannot draw a file the user has moved on from. `closeEvent` stops a running
+      load, since a QThread outliving its parent widget turns a clean exit into a crash.
+      **`SimulationCancelled` is deliberately not named `...Error`** (ruff N818, with a noqa and the
+      reason): cancellation is a normal outcome the user asked for, like `StopIteration`, and calling it
+      an error pushes callers toward reporting a problem to someone who just pressed Cancel.
+      **Found a real Qt bug in my own first version, via a vacuous assertion.** `_set_busy` used
+      `setVisible(False)`, which **does not work on a status-bar permanent widget** — `QStatusBar`
+      re-shows everything it manages on every reformat, and showing a message causes one. The progress
+      bar and Cancel button would have stayed on screen for the rest of the session: a finished
+      application looking permanently busy, with a Cancel button that did nothing. Now uses
+      `addPermanentWidget`/`removeWidget`, Qt's documented way to hide one.
+      The bug hid because my tests asserted `isVisible()`, which is False for **any** widget whose
+      window was never shown — so they passed while checking nothing. Mutation testing exposed it
+      (removing the hide changed no test result), and `isVisibleTo(window)` is the correct check, which
+      the T2.7 banner tests already used. Six vacuous assertions replaced; a grep confirms none remain.
+      **Mutation-verified, all 6 caught** after that fix: mid-run cancellation ignored, a cancel in the
+      final partial interval ignored, a cancel during parsing waiting out the simulation, a cancelled
+      load wiping the previous program, a superseded loader left connected, and the progress widgets
+      never hidden.
       Blocked by: T2.5
-
-- **CI follow-up (after the first matrix run in eleven commits, 2026-08-07)** — *done*
-      The queue finally drained and produced one real failure plus one hidden hole.
-      **The parse floor is a coin flip on shared runners.** All four legs measured 47–50k lines/sec
-      against the 50k floor: ubuntu-py3.11 passed, windows-py3.11 failed by **0.4%** (49,784),
-      ubuntu-py3.12 48,521, windows-py3.12 47,101. This machine does 95k. CI now sets
-      `FOURSIGHT_PERF_MIN_RATE=30000` — the remedy T1.12's docstring already specified — which keeps
-      PLAN's 50k as the requirement for real hardware while still catching a halving. Lowering PLAN
-      instead would let a 2-vCPU runner dictate a product requirement.
-      **The console-script test had never run on Windows.** An earlier fix handled `foursight` vs
-      `foursight.exe` but not the *directory*: it looked in `Path(sys.executable).parent`, which holds
-      scripts in a Linux venv but on Windows sits one level *above* `Scripts\`. So it skipped on the
-      one platform where a console-script shim is most likely to be what breaks. Now searches
-      `sysconfig.get_path("scripts")` first, and — more importantly — **asserts instead of skipping**
-      when a declared entry point has no executable, so the hiding place is gone. Verified by
-      simulating the Windows layout: the test fails with the searched paths named. Also covers
-      `foursight-gui`, which T2.7 added.
-      **`-rs` added to the matrix pytest**, which is why that skip stayed invisible for eleven
-      commits — only the headless job printed skip reasons.
-      **Confirmed by the same run:** all 20 golden comparisons passed on `windows-latest` under a
-      different libm, validating the 1 µm / 0.001° quantization grid against the exact risk it was
-      chosen for. The `headless` job passed too, so the Qt-free split holds — 32 batching tests ran
-      with no Qt installed while the viewport tests skipped cleanly.
-      Files: `.github/workflows/ci.yml`, `tests/test_cli.py`, `PLAN.md`
+      Files: `src/foursight/gui/background.py`, `src/foursight/gui/main_window.py`,
+      `src/foursight/gui/session.py`, `src/foursight/sim/simulator.py`,
+      `tests/test_cancellation.py`, `tests/test_main_window.py`, `PLAN.md`
 
 - [x] **T2.10 — `tests/test_golden.py`** — *done*
       A fingerprint per fixture in `tests/golden/segments.json`. Recorded in PLAN.md § Testing
@@ -1089,16 +1101,81 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Blocked by: T2.10
       Files: `tests/test_perf.py`, `PLAN.md`
 
-- [ ] **T2.12 — Manual GUI test script**
-      Written steps a human follows to verify the viewport (keep the GUI thin so everything else
-      stays unit-testable).
+- [x] **T2.12 — Manual GUI test script** — `docs/manual_tests/m2.md` — *done*
+      Six sections, ten minutes. Scoped to what a human eye is the **only** instrument for: Qt's
+      `offscreen` platform has no GL context, so `paintGL` never runs in CI and pixels are unverifiable
+      automatically. Every step that could be automated has been, which is why 872 tests exist; the
+      document says so and says such steps should leave it.
+      Covers the things that look fine at a glance and are not: **arcs reading as curves rather than
+      facets** (with the note that faceted geometry plus passing goldens means the goldens were
+      re-recorded when they should not have been), **the banner clearing completely** on the next load,
+      **no banner for cutter comp** (warning "incomplete" on a construct most real programs use is how
+      a warning becomes worthless), **window responsiveness during a 100k-line load**, and **a cancel
+      leaving the previous toolpath rather than a partial one**.
+      Every factual claim in it was verified rather than written from memory — banner text naming lines
+      9–12, cutter comp not flagged incomplete, the red/green/amber palette, and the 85,715-block count.
+      Ends with what is *deliberately* absent in M2, so a tester does not file M3–M5 gaps as bugs.
       Blocked by: T2.7
       Files: `docs/manual_tests/m2.md`
 
-- [ ] **T2.13 — Milestone gate**
-      **DoD:** a 100k-line file parses and renders within 5 s and sustains ≥ 30 fps while orbiting,
-      on the D5 baseline hardware. Numbers recorded.
+- [x] **T2.13 — Milestone gate** — *M2 COMPLETE*
+      **DoD met, on the D5 baseline hardware (Intel Iris Xe, Mesa 25.1.5), numbers recorded:**
+
+      | Criterion | Measured | Margin |
+      |---|---|---|
+      | 100k-line file parses and renders ≤ 5 s | **4.46 s** to first frame drawn | 11% |
+      | Sustains ≥ 30 fps while orbiting | **316 fps**, worst frame 4.99 ms | 10.5x |
+
+      Measured end to end through `MainWindow` — open the file, wait for the background load, force a
+      `paintGL` with `glFinish`, then orbit 120 frames and discard 20 as warmup. 100,000 lines →
+      85,715 blocks → 81,900 segments in 2 batches; geometry 6.3 MB + 2.0 MB of GL buffers.
+      **This settles the concern raised in T2.11 and carried through T2.9.** Parse + simulate is 4.56 s
+      measured in isolation, so the gate looked likely to fail once rendering was added. It does not:
+      rendering costs ~20 ms, and the gate passes as written. The `_durations` fast path sized in
+      PLAN.md (35% of simulate, spent on `np.stack` over length-1 arrays) is **not needed for M2** and
+      stays available as headroom — worth having if slower hardware ever has to meet this, since 11% is
+      not much and the figure is dominated by simulation rather than rendering.
+      Also recorded at the 500k-segment target: **241 fps**, worst frame 10.7 ms, geometry + GL
+      38.5 + 12.0 MB against the 55 MB budget.
+      **872 tests pass**, ruff clean, and the matrix went green on Linux and Windows for py3.11/3.12
+      once the shared-runner parse floor was corrected.
       Blocked by: T2.11, T2.12
+      Files: `PLAN.md`, `TASKS.md`
+
+- **CI follow-up (after the first matrix run in eleven commits, 2026-08-07)** — *done*
+      The queue finally drained and produced one real failure plus one hidden hole.
+      **The parse floor is a coin flip on shared runners.** All four legs measured 47–50k lines/sec
+      against the 50k floor: ubuntu-py3.11 passed, windows-py3.11 failed by **0.4%** (49,784),
+      ubuntu-py3.12 48,521, windows-py3.12 47,101. This machine does 95k. CI now sets
+      `FOURSIGHT_PERF_MIN_RATE=30000` — the remedy T1.12's docstring already specified — which keeps
+      PLAN's 50k as the requirement for real hardware while still catching a halving. Lowering PLAN
+      instead would let a 2-vCPU runner dictate a product requirement.
+      **The console-script test had never run on Windows.** An earlier fix handled `foursight` vs
+      `foursight.exe` but not the *directory*: it looked in `Path(sys.executable).parent`, which holds
+      scripts in a Linux venv but on Windows sits one level *above* `Scripts\`. So it skipped on the
+      one platform where a console-script shim is most likely to be what breaks. Now searches
+      `sysconfig.get_path("scripts")` first, and — more importantly — **asserts instead of skipping**
+      when a declared entry point has no executable, so the hiding place is gone. Verified by
+      simulating the Windows layout: the test fails with the searched paths named. Also covers
+      `foursight-gui`, which T2.7 added.
+      **`-rs` added to the matrix pytest**, which is why that skip stayed invisible for eleven
+      commits — only the headless job printed skip reasons.
+      **Confirmed by the same run:** all 20 golden comparisons passed on `windows-latest` under a
+      different libm, validating the 1 µm / 0.001° quantization grid against the exact risk it was
+      chosen for. The `headless` job passed too, so the Qt-free split holds — 32 batching tests ran
+      with no Qt installed while the viewport tests skipped cleanly.
+      Files: `.github/workflows/ci.yml`, `tests/test_cli.py`, `PLAN.md`
+      **A third perf threshold turned out to be a coin flip — found by the very run that fixed the first
+      two.** With the parse floor corrected, 5 of 6 jobs went green and ubuntu-py3.11 failed
+      `test_parse_time_is_linear_in_file_size` at **2.07x** against a `< 2.0` bound, where this machine
+      measures 1.22–1.35x. That bound also contradicted the test's own docstring, which says it looks for
+      an order-of-magnitude change: 2.0 is not one, and quadratic behaviour at 10x input would show as
+      roughly 10x per-item growth. Both linearity tests (parse and simulate) now share one documented,
+      overridable `MAX_NONLINEARITY_RATIO = 4.0` — still catching the pathology while leaving room for
+      what legitimately worsens with size: allocator pressure, GC, cache misses.
+      **Process note:** this entry was accidentally deleted while rewriting the T2.9 task, because it sat
+      between T2.9 and T2.10 and the edit replaced that whole range. Restored from `c489c79` and moved to
+      the end of M2, where a range-replace on a task cannot reach it.
 
 ---
 

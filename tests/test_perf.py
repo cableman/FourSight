@@ -69,6 +69,16 @@ MIN_TESSELLATION_SEGMENTS_PER_SEC = float(
 # a catastrophic regression and never for a slow runner. T2.13 owns the real gate on D5 hardware.
 MAX_GATE_SECONDS = float(os.environ.get("FOURSIGHT_PERF_MAX_GATE_SECONDS", "60.0"))
 GATE_LINES = 100_000
+# How much per-item cost may grow between a small and a 10x larger input before the growth counts as
+# non-linear. These tests exist to catch *quadratic* behaviour, which at 10x input would show as ~10x
+# per-item growth — so the bound has to leave room for everything that legitimately gets worse with
+# size (allocator pressure, GC, cache misses) without swallowing the pathology.
+#
+# It was 2.0, and ubuntu-py3.11 measured **2.07** on a shared runner where this machine gives 1.27-1.35.
+# That threshold also contradicted these tests' own docstrings, which say they are looking for an
+# order-of-magnitude change: 2.0 is not one. Third time a threshold calibrated here turned out to be a
+# coin flip on CI hardware, so this one is deliberately generous and overridable.
+MAX_NONLINEARITY_RATIO = float(os.environ.get("FOURSIGHT_PERF_MAX_NONLINEARITY", "4.0"))
 
 # A realistic mix rather than one repeated line: motion with and without a feed, arcs, rapids,
 # rotary moves, an M-code block and a comment. A file of identical lines would flatter the modal
@@ -157,8 +167,9 @@ def test_parse_time_is_linear_in_file_size() -> None:
     """Guards against accidental quadratic behaviour, which a rate test alone would not catch.
 
     A parser that rescans or copies accumulated state per line still looks fast on a small file. The
-    per-line cost at 50k lines must stay close to the cost at 5k; a wide allowance is deliberate,
-    since this is looking for an order-of-magnitude change, not jitter.
+    per-line cost at 50k lines must stay within `MAX_NONLINEARITY_RATIO` of the cost at 5k — a wide
+    allowance on purpose, since this is looking for quadratic behaviour, not jitter. Quadratic at 10x
+    input would show as roughly 10x per-line growth; a shared CI runner legitimately reaches 2x.
     """
     small, large = 5_000, LARGE
     per_line_small = fastest(lambda: parse(generate(small))) / small
@@ -168,9 +179,9 @@ def test_parse_time_is_linear_in_file_size() -> None:
         f"  per-line cost {large:,} vs {small:,}: {ratio:.2f}x "
         f"({per_line_small * 1e6:.2f} -> {per_line_large * 1e6:.2f} us/line)"
     )
-    assert ratio < 2.0, (
-        f"per-line parse cost grew {ratio:.2f}x from {small:,} to {large:,} lines, "
-        "which suggests the parse is not linear in file size"
+    assert ratio < MAX_NONLINEARITY_RATIO, (
+        f"per-line parse cost grew {ratio:.2f}x from {small:,} to {large:,} lines "
+        f"(bound {MAX_NONLINEARITY_RATIO:.1f}x), which suggests the parse is not linear in file size"
     )
 
 
@@ -449,9 +460,10 @@ def test_simulate_time_is_linear_in_block_count(profile) -> None:
         f"  per-block cost {large:,} vs {small:,}: {ratio:.2f}x "
         f"({per_block_small * 1e6:.1f} -> {per_block_large * 1e6:.1f} us/block)"
     )
-    assert ratio < 2.0, (
-        f"per-block simulate cost grew {ratio:.2f}x from {small:,} to {large:,} lines, "
-        "which suggests the simulation is not linear in block count"
+    assert ratio < MAX_NONLINEARITY_RATIO, (
+        f"per-block simulate cost grew {ratio:.2f}x from {small:,} to {large:,} lines "
+        f"(bound {MAX_NONLINEARITY_RATIO:.1f}x), which suggests the simulation is not linear in "
+        "block count"
     )
 
 

@@ -34,6 +34,23 @@ from foursight.sim.segments import Kind, SegmentBuilder, SegmentStore
 from foursight.sim.timing import block_durations, rates_for
 
 ProgressCallback = Callable[[int, int], None]
+CancelCheck = Callable[[], bool]
+
+
+class SimulationCancelled(Exception):  # noqa: N818 - not an error; see below
+    """Raised when ``cancelled()`` returns True partway through ``simulate``.
+
+    Deliberately *not* named ``...Error``, against ruff's N818. Cancellation is a normal outcome the
+    user asked for, not a failure, and `except SimulationCancelled:` is what the catch site should
+    read like — the same reasoning that gives the stdlib `StopIteration` and `GeneratorExit` no such
+    suffix. Calling it an error would push callers toward reporting a problem to the user who just
+    pressed Cancel.
+
+    Raising rather than returning the partial ``Simulation`` is deliberate. A half-stepped program is
+    a **truncated toolpath**, and handing one back invites a caller to draw it as though the program
+    ended there — the confidently-wrong picture the plan exists to prevent. There is no honest way to
+    render "the first 40% of this program"; the caller should keep showing whatever it had before.
+    """
 
 
 @dataclass(slots=True, frozen=True)
@@ -90,12 +107,20 @@ def simulate(
     profile: MachineProfile,
     *,
     progress: ProgressCallback | None = None,
+    cancelled: CancelCheck | None = None,
     progress_interval: int = 2000,
 ) -> Simulation:
     """Step a command list into a ``SegmentStore``.
 
-    ``progress`` is called as ``(done, total)`` every ``progress_interval`` commands. It exists so
-    T2.9 can drive this from a QThread without the simulator knowing anything about Qt.
+    ``progress`` is called as ``(done, total)`` every ``progress_interval`` commands, and ``cancelled``
+    is polled on the same tick. Both exist so T2.9 can drive this from a QThread without the simulator
+    knowing anything about Qt — a `threading.Event.is_set` satisfies ``cancelled`` exactly.
+
+    Polling on the interval rather than per command is what keeps this free: at the default 2000 the
+    check costs about 43 calls for a 100k-line program, against ~40 µs of work per block.
+
+    A cancelled run raises `SimulationCancelled` and returns nothing. See that exception for why a
+    partial `Simulation` would be the wrong thing to hand back.
     """
     state = MachineState(profile)
     # The machine is assumed to start at its reference position. This is the universal convention —
@@ -117,8 +142,15 @@ def simulate(
 
     for index, command in enumerate(commands):
         run.step(state.apply(command), command, position_lost=state.position_lost)
-        if progress is not None and (index + 1) % progress_interval == 0:
-            progress(index + 1, total)
+        if (index + 1) % progress_interval == 0:
+            if cancelled is not None and cancelled():
+                raise SimulationCancelled(f"cancelled after {index + 1:,} of {total:,} blocks")
+            if progress is not None:
+                progress(index + 1, total)
+    # Checked once more at the end so a cancellation arriving during the final partial interval is
+    # still honoured, rather than being reported as a completed simulation.
+    if cancelled is not None and cancelled():
+        raise SimulationCancelled(f"cancelled after {total:,} of {total:,} blocks")
     if progress is not None:
         progress(total, total)
 
