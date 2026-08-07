@@ -26,6 +26,9 @@ from foursight.sim.simulator import Simulation
 
 # Every batch draws at width 1.0. Not a stylistic choice: see the module docstring.
 LINE_WIDTH = 1.0
+# The selection highlight. Bright and cool, so it cannot be mistaken for a rapid (red), a feed (green)
+# or an unverified span (amber) — the highlight is a *view* state, not a property of the toolpath.
+HIGHLIGHT_COLOR = (0.35, 0.95, 1.0, 1.0)
 # Fallback camera distance for an empty or degenerate program, in mm.
 DEFAULT_DISTANCE_MM = 200.0
 # The view is fitted to this multiple of the geometry's extent, so the path is not flush to the edges.
@@ -44,7 +47,9 @@ class ToolpathViewport(GLViewWidget):
         super().__init__(parent)
         self._items: list[gl.GLLinePlotItem] = []
         self._grid: gl.GLGridItem | None = None
+        self._highlight: gl.GLLinePlotItem | None = None
         self.batches: list[Batch] = []
+        self.highlighted_segments = 0
         self.setCameraPosition(distance=DEFAULT_DISTANCE_MM, elevation=30, azimuth=-60)
         self._add_grid()
 
@@ -74,6 +79,10 @@ class ToolpathViewport(GLViewWidget):
         self.batches = build_batches(
             store, untrusted=untrusted, use_part_coordinates=use_part_coordinates
         )
+        # A highlight indexes into the *previous* store, so it is meaningless the moment the geometry
+        # changes — and a mask of the wrong length would either raise or, worse, silently highlight
+        # arbitrary segments of the new program.
+        self.clear_highlight()
         self._rebuild_items()
         self.fit_to(store, use_part_coordinates=use_part_coordinates)
 
@@ -113,6 +122,55 @@ class ToolpathViewport(GLViewWidget):
             )
             self.addItem(item)
             self._items.append(item)
+
+    # ------------------------------------------------------------------ selection highlight
+
+    def set_highlight(self, store: SegmentStore, mask: np.ndarray | None) -> None:
+        """Draw ``mask``'s segments on top of everything, or clear the highlight when it is empty.
+
+        Kept as **one long-lived item updated with `setData`**, unlike the toolpath batches which are
+        rebuilt wholesale. The reasoning that made rebuilding right there does not apply here: there is
+        exactly one highlight item and its existence never depends on the data, so no stale item can
+        survive a change. It also follows the text cursor, so it updates far more often than a load does.
+
+        Drawn with the **depth test off**, deliberately. A selected segment buried behind other geometry
+        would otherwise highlight invisibly, and the user would read that as "this line draws nothing" —
+        the opposite of what a selection is for.
+        """
+        vertices = self._highlight_vertices(store, mask)
+        self.highlighted_segments = 0 if vertices is None else vertices.shape[0] // 2
+
+        if vertices is None:
+            if self._highlight is not None:
+                self._highlight.setVisible(False)
+            return
+
+        if self._highlight is None:
+            self._highlight = gl.GLLinePlotItem(
+                pos=vertices, color=HIGHLIGHT_COLOR, width=LINE_WIDTH, mode="lines", antialias=False
+            )
+            # `translucent` sorts without writing depth; combined with the disabled test the highlight
+            # always lands on top of the geometry it belongs to.
+            self._highlight.setGLOptions("translucent")
+            self._highlight.setDepthValue(1)
+            self.addItem(self._highlight)
+        else:
+            self._highlight.setData(pos=vertices)
+        self._highlight.setVisible(True)
+
+    def clear_highlight(self) -> None:
+        self.set_highlight(SegmentStore.empty(), None)
+
+    @staticmethod
+    def _highlight_vertices(store: SegmentStore, mask: np.ndarray | None) -> np.ndarray | None:
+        """``(2M, 3)`` float32 vertices for the selected segments, or None when there are none."""
+        if mask is None or len(store) == 0 or not mask.any():
+            return None
+        if mask.shape != (len(store),):
+            raise ValueError(
+                f"highlight mask has shape {mask.shape}, expected ({len(store)},) — one per segment"
+            )
+        return store.lin[mask].astype(np.float32, copy=False).reshape(-1, 3)
 
     # ------------------------------------------------------------------ camera
 

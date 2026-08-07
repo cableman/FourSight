@@ -399,3 +399,70 @@ def test_closing_the_window_stops_a_running_load(window, monkeypatch) -> None:
     release.set()
     window.close()
     assert loader.isFinished() or loader.wait(10_000)
+
+
+# --------------------------------------------------------------------------- editor -> viewport (T3.2)
+
+
+def test_moving_the_cursor_highlights_that_line(window) -> None:
+    """The sync T3.2 exists for: the cursor drives the highlight, not just a click."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    line_no = int(store.line[0])
+
+    window.editor.goto_line(line_no)
+    assert window.selection is not None
+    assert window.selection.line_no == line_no
+    assert window.viewport.highlighted_segments == window.selection.count > 0
+
+
+def test_moving_to_a_line_with_no_motion_clears_the_highlight(window) -> None:
+    """A stale highlight would attribute geometry to a line that produced none."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    window.editor.goto_line(int(store.line[0]))
+    assert window.viewport.highlighted_segments > 0
+
+    drawn = set(store.line.tolist())
+    bare = next(n for n in range(1, window.editor.source_line_count + 1) if n not in drawn)
+    window.editor.goto_line(bare)
+    assert window.viewport.highlighted_segments == 0
+
+
+def test_the_status_bar_describes_the_selected_line(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(int(window.program.simulation.store.line[0]))
+    assert window.statusBar().currentMessage() == window.selection.describe()
+
+
+def test_a_suppressed_line_is_reported_as_not_drawn_in_the_status_bar(window) -> None:
+    """Clicking a canned-cycle line must not read as "this line does nothing"."""
+    window.open_file_and_wait(FIXTURES / "canned_cycle_span.nc")
+    span = window.program.simulation.suppressed[0]
+    window.editor.goto_line(span.first_line)
+    message = window.statusBar().currentMessage()
+    assert "not drawn" in message
+    assert window.viewport.highlighted_segments == 0
+
+
+def test_the_cursor_in_the_trailing_block_clears_rather_than_failing(window) -> None:
+    """A newline-terminated file has a final block with no source line behind it."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.editor.line_count == window.editor.source_line_count + 1
+    window.editor.goto_line(window.editor.line_count)
+    assert window.selection is None
+    assert window.viewport.highlighted_segments == 0
+
+
+def test_moving_the_cursor_with_nothing_loaded_does_nothing(window) -> None:
+    window.editor.setPlainText("G1 X10\n")
+    window.editor.goto_line(1)  # must not raise
+    assert window.selection is None
+
+
+def test_loading_a_new_program_drops_the_previous_selection(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(int(window.program.simulation.store.line[0]))
+    assert window.selection is not None
+    window.open_file_and_wait(FIXTURES / "arc_helical.nc")
+    assert window.viewport.highlighted_segments == 0

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from foursight.gui.background import ProgramLoader
 from foursight.gui.editor import CodeEditor
+from foursight.gui.selection import LineSelection, select_line
 from foursight.gui.session import OpenedProgram
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.profile import MachineProfile
@@ -55,6 +56,7 @@ class MainWindow(QMainWindow):
         self._last_directory = str(Path.home())
         self._loader: ProgramLoader | None = None
         self._loading_path: Path | None = None
+        self.selection: LineSelection | None = None
 
         self.setWindowTitle("FourSight")
         self.resize(1280, 800)
@@ -96,6 +98,10 @@ class MainWindow(QMainWindow):
         # Added to the status bar only while a load is running; see `_set_busy` for why they cannot
         # simply be hidden in place.
         self._busy_shown = False
+
+        # The cursor drives the highlight, not just a click: following it costs 0.8 ms at 500k segments
+        # (T3.2), and arrow-keying down a program while watching the toolpath light up is the point.
+        self.editor.cursorPositionChanged.connect(self._on_cursor_moved)
 
         self._build_menus()
         self.statusBar().showMessage("Open a G-code file to begin  (Ctrl+O)")
@@ -265,6 +271,7 @@ class MainWindow(QMainWindow):
         # The editor shows exactly the text that was parsed — `loaded.text`, after decoding and BOM
         # removal — not a re-read of the file. Anything else and the line numbers in the gutter could
         # disagree with the ones in `SourceRef`, which is what T3.2 and T3.4 sync on.
+        self.selection = None
         self.editor.setPlainText(program.loaded.text)
         self.viewport.set_simulation(program.simulation)
         self.reload_action.setEnabled(program.path is not None)
@@ -304,6 +311,29 @@ class MainWindow(QMainWindow):
             loader.cancel()
             loader.wait(5000)
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------ editor -> viewport (T3.2)
+
+    def _on_cursor_moved(self) -> None:
+        """Highlight the segments belonging to the line under the cursor.
+
+        Silent when nothing is loaded. The status message deliberately distinguishes "no motion" from
+        "not drawn": a user clicking a canned-cycle line and seeing nothing highlight would otherwise
+        conclude the line does nothing, when in fact the simulator refused to draw it.
+        """
+        if self.program is None:
+            return
+        line_no = self.editor.current_line
+        if line_no > self.editor.source_line_count:
+            # The trailing block of a newline-terminated file is a real cursor position with no source
+            # line behind it. Clearing beats highlighting line 0 or raising.
+            self.selection = None
+            self.viewport.clear_highlight()
+            return
+
+        self.selection = select_line(self.program.simulation, line_no)
+        self.viewport.set_highlight(self.program.simulation.store, self.selection.mask)
+        self.statusBar().showMessage(self.selection.describe())
 
     # ------------------------------------------------------------------ view
 

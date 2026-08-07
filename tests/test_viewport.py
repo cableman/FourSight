@@ -216,3 +216,85 @@ def test_the_batch_count_never_exceeds_the_plan_budget(viewport, profile) -> Non
     for name in ("baseline_4axis.nc", "arc_helical.nc", "cutter_comp_span.nc"):
         viewport.set_simulation(simulation(fixture_text(name), profile))
         assert len(viewport.items) - GRID_ITEMS <= 10
+
+
+# --------------------------------------------------------------------------- selection highlight (T3.2)
+
+
+def test_a_highlight_adds_exactly_one_item(viewport, profile) -> None:
+    """One long-lived item updated via `setData`, not a per-selection rebuild.
+
+    Unlike the toolpath batches, the highlight's existence never depends on the data, so there is no
+    stale-item risk — and it follows the text cursor, so it updates far more often than a load does.
+    """
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    before = len(viewport.items)
+    mask = sim.store.line == sim.store.line[0]
+    viewport.set_highlight(sim.store, mask)
+    assert len(viewport.items) == before + 1
+    # A second, different selection must reuse the same item.
+    viewport.set_highlight(sim.store, sim.store.line == sim.store.line[-1])
+    assert len(viewport.items) == before + 1
+
+
+def test_the_highlight_uploads_two_vertices_per_selected_segment(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    mask = sim.store.line == sim.store.line[0]
+    viewport.set_highlight(sim.store, mask)
+    assert viewport.highlighted_segments == int(mask.sum())
+    assert viewport._highlight.pos.shape[0] == 2 * int(mask.sum())
+
+
+def test_an_empty_mask_hides_the_highlight_rather_than_uploading_nothing(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
+    viewport.set_highlight(sim.store, np.zeros(len(sim.store), dtype=bool))
+    assert viewport.highlighted_segments == 0
+    assert viewport._highlight.visible() is False
+
+
+def test_the_highlight_colour_differs_from_every_batch_colour(viewport, profile) -> None:
+    """The highlight is view state, not a property of the toolpath, so it must not read as a motion type."""
+    from foursight.gui.viewport3d import HIGHLIGHT_COLOR
+
+    sim = simulation(fixture_text("cutter_comp_span.nc"), profile)
+    viewport.set_simulation(sim)
+    assert HIGHLIGHT_COLOR not in {batch.color for batch in viewport.batches}
+
+
+def test_loading_a_new_program_clears_the_highlight(viewport, profile) -> None:
+    """A mask indexes the *previous* store, so keeping it would highlight arbitrary new segments."""
+    first = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(first)
+    viewport.set_highlight(first.store, first.store.line == first.store.line[0])
+    assert viewport.highlighted_segments > 0
+
+    viewport.set_simulation(simulation("G21 G94 G90\nG1 X5 F600\n", profile))
+    assert viewport.highlighted_segments == 0
+
+
+def test_a_wrong_length_highlight_mask_is_refused(viewport, profile) -> None:
+    """Numpy would broadcast a short mask and highlight the wrong segments."""
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    with pytest.raises(ValueError, match="one per segment"):
+        viewport.set_highlight(sim.store, np.ones(3, dtype=bool))
+
+
+def test_highlighting_does_not_mutate_the_store(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    before = sim.store.lin.copy()
+    viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
+    assert np.array_equal(sim.store.lin, before)
+
+
+def test_the_highlight_stays_inside_the_plan_buffer_budget(viewport, profile) -> None:
+    """PLAN allows <= 10 buffers. Four batches plus one highlight is five."""
+    sim = simulation(fixture_text("cutter_comp_span.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
+    assert len(viewport.items) - GRID_ITEMS <= 10

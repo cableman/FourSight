@@ -82,6 +82,7 @@ FourSight/
 │   │   ├── app.py           # entry point
 │   │   ├── main_window.py
 │   │   ├── highlighting.py # G-code -> coloured spans, using the parser's own regexes (NO Qt)
+│   │   ├── selection.py    # line -> segments, and why there are none (NO Qt)
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
@@ -842,6 +843,40 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   window keeps whatever it had — the same rule as a failed open. Cancellation is also checked between
   parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
   own, so a user who cancels during it should not then wait out the simulation.
+
+### Editor ↔ Viewport Sync
+
+`SegmentStore.line` is what makes this cheap: every segment records its source line, so line → segments
+is one comparison over a numpy column — **0.8 ms at 500k segments including the vertex gather**. Cheap
+enough to follow the **text cursor** rather than wait for a click, which is the interaction that matters:
+arrow-keying down a program and watching the toolpath light up.
+
+The mask is trivial. The part with judgement in it is **what an empty result means**, because three
+situations produce one and they are not interchangeable:
+
+- **no motion** — a comment, an M-code, a modal-only block. Nothing to draw, nothing wrong.
+- **suppressed** — the line *does* command motion and the simulator refused to draw it. Reporting this
+  as "no motion" would tell the user their drill cycle is inert, which is a lie about their program.
+  `select_line` returns the span so the readout can name the reason.
+- **out of range** — past the end, which only arises from a stale diagnostic or a bug.
+
+So `LineSelection` carries *why*, and `gui/selection.py` is Qt-free and tested on all three.
+
+The highlight is **one long-lived `GLLinePlotItem` updated with `setData`**, unlike the toolpath batches
+which are rebuilt wholesale. The stale-item argument that justifies rebuilding there does not apply:
+there is exactly one highlight item and its existence never depends on the data. Five buffers total —
+four batches plus the highlight — still inside PLAN's budget of ten.
+
+Two deliberate choices:
+
+- **Depth test off.** A selected segment buried behind other geometry would highlight invisibly, and the
+  user would read that as "this line draws nothing" — the opposite of what a selection is for.
+- **A cool bright colour, distinct from every motion colour.** The highlight is *view state*, not a
+  property of the toolpath, so it must not be confusable with a rapid, a feed or an unverified span.
+
+Loading a program **clears the highlight**, because a mask indexes the previous store: keeping it would
+either raise on a shape mismatch or, worse, silently highlight arbitrary segments of the new program.
+A wrong-length mask is refused rather than broadcast, for the same reason.
 
 ### Editor
 

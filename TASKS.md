@@ -1263,7 +1263,40 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       `src/foursight/gui/main_window.py`, `pyproject.toml`, `tests/test_highlighting.py`,
       `tests/test_editor.py`, `PLAN.md`
 
-- [ ] **T3.2 — Click a line → highlight segments** (uses `SegmentStore.line`)
+- [x] **T3.2 — Click a line → highlight segments** — `gui/selection.py` — *done*
+      Uses `SegmentStore.line`, as the task specified. Recorded in PLAN.md § Editor ↔ Viewport Sync.
+      **32 tests (17 Qt-free in `test_selection.py`, +8 viewport, +7 window); 960 across the suite.**
+      **Follows the cursor, not just a click.** Measured first: line → segments is **0.8 ms at 500k
+      segments** including the vertex gather, so no debounce is needed and arrow-keying down a program
+      lights up the toolpath as you go. A frame with the highlight active costs 1.37 ms.
+      **The mask is trivial; what an empty result *means* is not.** Three situations produce nothing and
+      they are not interchangeable — no motion, suppressed, or out of range. Reporting a suppressed
+      canned-cycle line as "no motion" would tell the user their drill cycle is inert, which is a lie
+      about their program, so `LineSelection` carries the span and the readout names the reason. This is
+      PLAN's governing principle applied to the status bar rather than the viewport.
+      **One long-lived highlight item updated with `setData`**, unlike the toolpath batches which are
+      rebuilt wholesale — the stale-item argument that justifies rebuilding there does not apply, since
+      there is exactly one highlight and its existence never depends on the data. Five buffers total,
+      inside PLAN's budget of ten.
+      **Depth test off, deliberately:** a selected segment buried behind other geometry would highlight
+      invisibly and read as "this line draws nothing", the opposite of what a selection is for. Colour is
+      cool and bright so it cannot be confused with a rapid, a feed or an unverified span — the highlight
+      is view state, not a property of the toolpath, and a test asserts it differs from every batch colour.
+      **Loading a program clears the highlight**, because a mask indexes the *previous* store; keeping it
+      would either raise or silently highlight arbitrary segments of the new program. A wrong-length mask
+      is refused rather than broadcast.
+      Handles the trailing-block case T3.1 uncovered: the final block of a newline-terminated file is a
+      real cursor position with no source line behind it, so it clears rather than selecting line 0.
+      **A partition test** asserts the per-line counts sum to the whole store — no segment is unreachable
+      from the editor and none is claimed by two lines, which is what makes the sync trustworthy.
+      **Mutation-verified, all 7 caught:** suppressed reported as "no motion", suppressed spans never
+      consulted, the mask inverted, the highlight surviving a new load, a wrong-length mask accepted, the
+      trailing block unhandled, and unverified geometry not flagged.
+      Blocked by: T2.6, T3.1
+      Files: `src/foursight/gui/selection.py`, `src/foursight/gui/viewport3d.py`,
+      `src/foursight/gui/main_window.py`, `tests/test_selection.py`, `tests/test_viewport.py`,
+      `tests/test_main_window.py`, `PLAN.md`
+
 - [ ] **T3.3 — Click a segment → jump to line** — `gui/picking.py`, per D4. Budget real time here.
 - [ ] **T3.4 — Diagnostics panel** — click → jump to line; `unsupported` spans visually distinct
       from warnings and errors.
