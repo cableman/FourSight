@@ -646,7 +646,7 @@ taxonomy gets teeth.
       Blocked by: T1.3
       Files: `tests/test_perf.py`, `tests/conftest.py`, `PLAN.md`
 
-- [~] **T1.13 — Milestone gate** — *four of five DoD items verified; CI confirmation outstanding*
+- [x] **T1.13 — Milestone gate** — *M1 COMPLETE; all five DoD items verified*
       **DoD 1 — all fixtures parse: PASS.** 10 fixtures, 0 failures, 0 parse errors in any of them.
       **DoD 2 — each broken fixture produces its expected added diagnostic: PASS.** All **22**
       mutations hit their declared `rule_id`, diffed against a baseline whose own diagnostic set is
@@ -698,6 +698,17 @@ taxonomy gets teeth.
       attractive than the local numbers suggested.
       **To close:** re-run the four Ubuntu jobs and confirm all 6 green.
       Blocked by: CI confirmation only
+      **DoD 5 — CI green: PASS (2026-08-07, run 31165831549).** All six jobs green: `lint`,
+      `headless (no Qt installed)`, and all four matrix legs — ubuntu and windows × py3.11 and py3.12.
+      So the verifier, the CLI and the perf test are now exercised on Windows and on 3.11, which is what
+      this item was waiting for. It took three fixes to get there, and **this entry predicted the first
+      one exactly** — "if a leg reports below 50k lines/sec, set `FOURSIGHT_PERF_MIN_RATE` in the
+      workflow rather than deleting the assertion" — which is what happened (47–50k on shared runners
+      against a 50k floor) and what was done. The other two: the parse-linearity bound at 2.07x against
+      `< 2.0`, and a console-script test that had been silently skipping on Windows because it looked for
+      scripts in `Path(sys.executable).parent`. All three are recorded under M2's CI follow-up note.
+      **Confirmed incidentally: the golden geometry hashes survive a different libm**, which was the one
+      untested assumption behind T2.10's 1 µm / 0.001° quantization grid.
       Files: `TASKS.md`
 
 ### M1 summary
