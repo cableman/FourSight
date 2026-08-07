@@ -1365,7 +1365,28 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       program. Ends with what is deliberately absent, naming M4's machine-vs-part coordinates as the
       biggest remaining gap and the one most likely to look wrong to a machinist.
 
-**M3 COMPLETE** — all 7 tasks. 1049 tests pass, ruff clean.
+**M3 COMPLETE** — all 7 tasks. 1051 tests pass, ruff clean.
+
+- **CI follow-up — a Windows-only failure T3.1 introduced and T3.2 inherited** — *fixed*
+      `test_loading_a_program_shows_the_parsed_text` asserted the editor buffer was **byte-identical** to
+      `loaded.text`. It failed on both Windows legs and nowhere else: git checks the fixtures out with CRLF
+      there, and `QPlainTextEdit.setPlainText` normalizes line endings to `\n`.
+      **The functional contract was never broken** — verified, not assumed. Qt strips the `\r`, so
+      `line_text(n)` still equals `splitlines()[n-1]` and `source_line_count` is still right, which means
+      numbering, highlighting, selection and picking were all correct on CRLF input the whole time. Only
+      the assertion was wrong, demanding more than the contract promises.
+      Fixed three ways rather than one, because the byte-identity check was standing in for something real
+      that was untested:
+      • The assertion now compares **line by line**, which is what actually has to hold.
+      • A new test loads genuine CRLF bytes and asserts identical numbering and line text.
+      • A new test records that the editor **normalizes line endings**, which is a real M5 consideration:
+      saving the buffer verbatim would rewrite a CRLF program as LF, and `LoadedFile.newline` is carried
+      precisely so the fix engine can restore it. Known now rather than discovered later.
+      Added **`.gitattributes`** pinning `*.nc` and the golden JSON to `eol=lf`, so fixtures are
+      byte-stable on every platform and this class of difference cannot arise again. CRLF *handling*
+      remains covered by tests that pass explicit bytes to `load_text`, so nothing was lost.
+      **Verified by simulating the condition**: with all ten fixtures converted to CRLF, the full suite
+      passes — 1051 tests.
 
 ---
 

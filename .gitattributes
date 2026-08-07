@@ -1,0 +1,11 @@
+# G-code fixtures are test data and must mean the same thing on every platform.
+#
+# Without this, git on Windows checks them out with CRLF, and a test asserting the editor buffer is
+# byte-identical to the loaded text fails there and only there — which is exactly what happened on
+# windows-py3.11 for T3.1/T3.2. The loader's CRLF handling is still covered, by tests that pass explicit
+# bytes to `load_text`; pinning the fixtures does not reduce that coverage, it removes a platform
+# difference from data that should be identical everywhere.
+*.nc text eol=lf
+
+# The golden fingerprints are compared byte-for-byte across the matrix.
+tests/golden/*.json text eol=lf

@@ -230,5 +230,44 @@ def test_loading_a_program_shows_the_parsed_text(qt_app) -> None:
         QApplication.processEvents(QEventLoop.AllEvents, 20)
 
     assert window.program is not None
-    assert window.editor.toPlainText() == window.program.loaded.text
+    # Compared **line by line**, not byte for byte. `setPlainText` normalizes line endings to \n, so on a
+    # CRLF checkout the buffer is not byte-identical to `loaded.text` — that failed on windows-py3.11 and
+    # nowhere else. What actually has to hold is that the gutter's numbering agrees with the parser's,
+    # which it does: Qt strips the \r and every line matches.
     assert window.editor.source_line_count == len(window.program.loaded.text.splitlines())
+    for number, expected in enumerate(window.program.loaded.text.splitlines(), start=1):
+        assert window.editor.line_text(number) == expected, f"line {number}"
+
+
+def test_crlf_text_is_numbered_the_same_as_lf_text(editor) -> None:
+    """The property the byte-identity assertion was standing in for, and it was untested.
+
+    A CRLF file must number and read identically to the same file with LF endings, because every jump,
+    diagnostic and pick keys on those line numbers. Qt normalizes the endings in the buffer; what matters
+    is that `line_text` and `source_line_count` still agree with `str.splitlines()`.
+    """
+    from foursight.fileio.loader import load_text
+
+    body = b"%\r\nN10 G1 X10 F600\r\nN20 M30\r\n"
+    loaded = load_text(body)
+    assert loaded.newline == "\r\n", "the fixture for this test is not actually CRLF"
+
+    editor.setPlainText(loaded.text)
+    assert editor.source_line_count == len(loaded.text.splitlines())
+    for number, expected in enumerate(loaded.text.splitlines(), start=1):
+        assert editor.line_text(number) == expected
+
+
+def test_the_editor_normalizes_line_endings_which_matters_for_saving(editor) -> None:
+    """Recorded because it is a real M5 consideration, not a defect here.
+
+    `setPlainText` converts CRLF to LF in the buffer, so saving the buffer verbatim would silently rewrite
+    a CRLF program as LF. `LoadedFile.newline` is carried precisely so the fix engine can restore the
+    original ending on save. Asserting it here means the behaviour is known rather than discovered.
+    """
+    from foursight.fileio.loader import load_text
+
+    loaded = load_text(b"N10 G1 X10\r\nN20 M30\r\n")
+    editor.setPlainText(loaded.text)
+    assert "\r" not in editor.toPlainText()
+    assert loaded.newline == "\r\n", "the original ending is still recoverable from LoadedFile"
