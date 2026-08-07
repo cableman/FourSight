@@ -67,7 +67,18 @@ jobs:
 
       - run: python -m pip install -e ".[dev,gui]"
       - name: pytest
-        run: python -m pytest -q
+        # -rs prints skip *reasons*. Without it a platform-specific silent skip is invisible: the
+        # console-script test looked in the wrong directory on Windows and skipped there for eleven
+        # commits, on the one platform where a console-script shim is most likely to be what breaks.
+        run: python -m pytest -q -rs
+        env:
+          # PLAN.md requires >= 50k lines/sec, and that requirement stands for real hardware — this
+          # machine reaches 95k. GitHub's shared 2-vCPU runners measure 47-50k, so all four legs sit
+          # on top of the threshold and three of them failed while one passed by 0.4%. That is a
+          # coin flip, not a regression test. Overriding here keeps PLAN's number as the product
+          # requirement while still catching a genuine halving; lowering PLAN instead would let CI
+          # hardware dictate the requirement. T1.12's docstring specifies exactly this remedy.
+          FOURSIGHT_PERF_MIN_RATE: "30000"
 
   # The enforcement mechanism for "every module outside gui/ imports without Qt".
   # Installs [dev] ONLY: if a headless module grows a Qt import, this job fails while the
@@ -98,10 +109,11 @@ jobs:
 
       - name: pytest (gui tests skip, headless tests must pass)
         run: python -m pytest -q -rs
+        env:
+          FOURSIGHT_PERF_MIN_RATE: "30000"  # same shared-runner allowance as the matrix job
 
       - name: CLI must work without Qt
         # foursight check is an M1 deliverable and must never need the [gui] extra.
-        # Until T1.11 the entry point raises NotImplementedError, which still proves it imports.
         run: |
           python - <<'PY'
           import importlib, sys

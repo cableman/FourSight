@@ -998,6 +998,30 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       QThread with progress reporting; cancellable.
       Blocked by: T2.5
 
+- **CI follow-up (after the first matrix run in eleven commits, 2026-08-07)** — *done*
+      The queue finally drained and produced one real failure plus one hidden hole.
+      **The parse floor is a coin flip on shared runners.** All four legs measured 47–50k lines/sec
+      against the 50k floor: ubuntu-py3.11 passed, windows-py3.11 failed by **0.4%** (49,784),
+      ubuntu-py3.12 48,521, windows-py3.12 47,101. This machine does 95k. CI now sets
+      `FOURSIGHT_PERF_MIN_RATE=30000` — the remedy T1.12's docstring already specified — which keeps
+      PLAN's 50k as the requirement for real hardware while still catching a halving. Lowering PLAN
+      instead would let a 2-vCPU runner dictate a product requirement.
+      **The console-script test had never run on Windows.** An earlier fix handled `foursight` vs
+      `foursight.exe` but not the *directory*: it looked in `Path(sys.executable).parent`, which holds
+      scripts in a Linux venv but on Windows sits one level *above* `Scripts\`. So it skipped on the
+      one platform where a console-script shim is most likely to be what breaks. Now searches
+      `sysconfig.get_path("scripts")` first, and — more importantly — **asserts instead of skipping**
+      when a declared entry point has no executable, so the hiding place is gone. Verified by
+      simulating the Windows layout: the test fails with the searched paths named. Also covers
+      `foursight-gui`, which T2.7 added.
+      **`-rs` added to the matrix pytest**, which is why that skip stayed invisible for eleven
+      commits — only the headless job printed skip reasons.
+      **Confirmed by the same run:** all 20 golden comparisons passed on `windows-latest` under a
+      different libm, validating the 1 µm / 0.001° quantization grid against the exact risk it was
+      chosen for. The `headless` job passed too, so the Qt-free split holds — 32 batching tests ran
+      with no Qt installed while the viewport tests skipped cleanly.
+      Files: `.github/workflows/ci.yml`, `tests/test_cli.py`, `PLAN.md`
+
 - [x] **T2.10 — `tests/test_golden.py`** — *done*
       A fingerprint per fixture in `tests/golden/segments.json`. Recorded in PLAN.md § Testing
       Strategy.

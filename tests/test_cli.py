@@ -10,6 +10,8 @@ in-process check would prove nothing about a `.[dev]`-only install.
 
 import subprocess
 import sys
+import sysconfig
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
@@ -263,24 +265,61 @@ def test_the_cli_path_imports_no_qt() -> None:
     assert reported == "LEAKED=", reported
 
 
-def test_the_console_script_is_installed_and_runs() -> None:
-    """The entry point declared in pyproject.toml, exercised as a user would.
+def script_directories() -> list[Path]:
+    """Where an installed console script could be, on any platform.
 
-    Both filename forms are checked: Windows installs `foursight.exe` into `Scripts/`, and looking
-    only for the extensionless name made this skip on Windows — the one platform where a
-    console-script shim is most likely to be the thing that breaks.
+    `sysconfig.get_path("scripts")` is the correct answer and comes first. `sys.executable`'s own
+    directory is kept as a fallback because it is right for a Linux venv and costs nothing — but it is
+    *wrong on Windows*, where `python.exe` sits one level above `Scripts\\`, and relying on it alone is
+    what made this test skip on Windows for eleven commits.
     """
-    directory = Path(sys.executable).parent
-    executable = next(
-        (
-            candidate
-            for candidate in (directory / "foursight", directory / "foursight.exe")
-            if candidate.exists()
-        ),
-        None,
+    candidates = [Path(sysconfig.get_path("scripts")), Path(sys.executable).parent]
+    return list(dict.fromkeys(candidates))
+
+
+def find_console_script(name: str) -> Path | None:
+    """The installed executable for `name`, or None. Both filename forms, every plausible directory."""
+    for directory in script_directories():
+        for filename in (name, f"{name}.exe"):
+            candidate = directory / filename
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def declared_console_scripts() -> set[str]:
+    """The console scripts this installed distribution says it provides."""
+    return {
+        entry.name
+        for entry in entry_points(group="console_scripts")
+        if entry.value.startswith("foursight")
+    }
+
+
+@pytest.mark.parametrize("name", ["foursight", "foursight-gui"])
+def test_every_declared_console_script_is_actually_installed(name: str) -> None:
+    """A declared entry point with no executable on disk is a broken install, not a skip.
+
+    This used to `pytest.skip` when it could not find the file, which is how it went unnoticed that it
+    was looking in the wrong directory on Windows — the one platform where a console-script shim is
+    most likely to be what breaks. Asserting instead removes the hiding place: the only legitimate
+    reason to skip is the package not being installed as a distribution at all.
+    """
+    declared = declared_console_scripts()
+    if name not in declared:
+        pytest.skip(f"{name} is not a declared console script (declared: {sorted(declared)})")
+    executable = find_console_script(name)
+    assert executable is not None, (
+        f"{name} is declared in pyproject.toml but no executable exists; searched "
+        f"{[str(directory) for directory in script_directories()]}"
     )
-    if executable is None:  # pragma: no cover - only when not installed as a script
-        pytest.skip(f"console script not found in {directory}")
+
+
+def test_the_console_script_is_installed_and_runs() -> None:
+    """The `foursight` entry point exercised as a user would, not through `main()`."""
+    executable = find_console_script("foursight")
+    if executable is None:  # pragma: no cover - not installed as a distribution
+        pytest.skip("foursight console script is not installed")
     result = subprocess.run(  # noqa: S603
         [str(executable), "check", str(BASELINE)], capture_output=True, text=True, check=False
     )
