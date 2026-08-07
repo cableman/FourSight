@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-The repository is **plan-only**. `PLAN.md` is the single source of truth: it defines the target architecture, tech stack, G-code subset, verifier rules, and milestones. No `src/`, `tests/`, `pyproject.toml`, or `profiles/` exist yet — they are created as milestones M0–M5 are implemented.
+**M0–M5 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1157 tests** and CI
+is green on Ubuntu and Windows for py3.11 and py3.12. The two open items are **T0.8/T0.9** — launching the
+PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
+
+`PLAN.md` remains the single source of truth for the design: architecture, tech stack, G-code subset,
+verifier rules, milestones, and the reasoning behind every decision including the ones that were reversed.
 
 `TASKS.md` is the execution layer: ordered tasks with blockers and done-criteria, derived from `PLAN.md`'s milestones. **PLAN.md owns the design; TASKS.md owns the order of work.** If the two disagree, PLAN.md wins and the task is wrong. Its `Open decisions` section lists the questions that block later milestones — the M0 spikes exist to answer them.
 
@@ -14,7 +19,7 @@ Read `PLAN.md` before starting any task, then pick up work from `TASKS.md` in ID
 
 **All Python runs inside the project venv at `.venv/`.** Never invoke bare `python`, `pip`, `pytest`, or `ruff` — they may resolve to system Python. Call the venv binaries directly (shown below), or activate first with `source .venv/bin/activate`. On Windows the binaries live in `.venv\Scripts\`.
 
-The venv runs **CPython 3.12.10**. `PLAN.md` requires 3.11+ (`tomllib` is stdlib only from 3.11), and bare `python3` on this machine is **3.10** — so never bootstrap with plain `python3`. The system's `/usr/bin/python3.11` is `3.11.0rc1`, a release candidate, and is also not suitable.
+The venv runs **CPython 3.12.10**. `PLAN.md` requires 3.11+ (`tomllib` is stdlib only from 3.11), and bare `python3` on this machine is **3.10** — so never bootstrap with plain `python3`. The system's `/usr/bin/python3.11` is `3.11.0rc1`, a release candidate, and is **actively broken for this purpose**: `python3.11 -m venv` fails in `ensurepip`, so the venv is created without pip and nothing can be installed into it. Verified, not assumed. Do not reach for it.
 
 If `.venv/` does not exist, create it before doing anything else, using an explicit 3.11+ interpreter. A uv-managed CPython 3.12.10 is already cached locally at `~/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/bin/python3.12`:
 
@@ -73,6 +78,14 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
 - **All geometry is numpy float64; internal units are always mm.** Convert G20 (inch) input at parse time. But report diagnostics in the program's declared units — "X exceeds 400 mm" against an inch program isn't actionable.
 - **G-codes are strings (`'90.1'`), never floats.** A block carries multiple G- and M-words, so they live in `Command.gcodes` / `Command.mcodes` lists, not in the `words` dict.
 - **`slots=True` on every hot-path dataclass** — the 50k lines/sec parse target doesn't survive otherwise.
+- **`sim/timing.py` has two implementations of the timing rules**, and this is the one duplication in the
+  codebase that is deliberate. `_single_segment` is a scalar path for blocks producing one segment (91% of
+  them in a realistic program); `_vector_durations` is the general one. **A rule added to one must be added
+  to the other.** What makes the duplication safe is
+  `test_timing.py::test_the_fast_path_agrees_with_the_vector_path`, which drives both over every rate
+  configuration and randomized geometry and demands bit-identical output — do not weaken or skip it. A fast
+  path that silently disagreed would produce a wrong time estimate *only for ordinary programs*, which is
+  the worst possible distribution for a bug.
 
 ### Never render a confidently wrong toolpath
 
@@ -108,12 +121,46 @@ These shape the design, not just later optimization passes:
 
 - Parse ≥ 50k lines/sec (~20 µs/line).
 - Render 500k+ segments interactively: pre-batch into ≤ 10 GL buffers grouped by `kind`. Never one draw call per move.
-- ≤ 250 MB resident for a 500k-segment program.
+- **Memory: geometry + GL buffers ≤ 55 MB per 500k segments** (measured 50.5 MB: 38.5 MB float64 store plus
+  a 12.0 MB float32 GL copy). The original "≤ 250 MB resident" was **not achievable and never was** — the
+  fixed Python + Qt + Mesa baseline alone is 233 MB with 1k segments on screen, so a total-RSS cap measures
+  the interpreter and the GL driver rather than our data model. Total resident is recorded, never asserted.
 - Simulation runs off the GUI thread (QThread) with progress reporting.
 
 Segment count is driven by tessellation, not line count — one `G1 X100 A360` block can become 1000+ segments.
 
-Note two verified rendering limits: `GLLinePlotItem` has no dash/stipple parameter (so "rapids dashed" needs dashes baked into geometry, or colour-only), and pyqtgraph's GL items use the legacy fixed-function path without persistent VBO control. The M0 spike decides whether pyqtgraph holds or we drop to a raw `QOpenGLWidget`.
+Two rendering facts, both settled by the T0.7 spike and re-verifiable with `spikes/render_500k.py
+--introspect-only`:
+
+- **`GLLinePlotItem` has no dash or stipple parameter** — confirmed. "Rapids dashed" would need dashes baked
+  into geometry, so the distinction is **colour-only**, and nothing may depend on `glLineWidth`: pyqtgraph
+  skips that call entirely on core forward-compatible profiles, where `width=` is silently inert.
+- **pyqtgraph 0.14 does *not* use the legacy fixed-function path** — this file previously claimed it did,
+  which was written against an older version and was wrong. It draws through a shader program with
+  persistent VBOs and re-uploads only on a dirty flag. **D1 is resolved: pyqtgraph holds**, measured at
+  376.9 fps for 500k segments against a 30 fps requirement, so no raw `QOpenGLWidget` is needed.
+
+These answers are version-specific. Re-run the spike's introspection on every pyqtgraph upgrade.
+
+## Windows differs, and it will catch you
+
+The CI matrix has caught **four Windows-only defects**, three of them introduced by a change that looked
+platform-neutral. Assume anything touching the filesystem or line endings behaves differently there:
+
+- **`os.stat` and `open` describe a missing file differently.** `open` surfaces the CRT's
+  "No such file or directory"; `os.stat` surfaces the Win32 "The system cannot find the file specified".
+  A size check that stats unconditionally changes an error message on Windows alone.
+- **Scripts do not live beside `python.exe`.** They are in `Scripts\`, one level below it, so
+  `Path(sys.executable).parent` finds them on a Linux venv and not on Windows. Use
+  `sysconfig.get_path("scripts")`.
+- **Git checks files out with CRLF**, and `QPlainTextEdit.setPlainText` normalizes to LF — so a buffer is
+  not byte-identical to the file it came from. `.gitattributes` pins the fixtures; `LoadedFile.newline`
+  is what restores a file's endings on save.
+- **Skips hide platform bugs.** A test that quietly skips on one platform is worse than one that fails, so
+  the matrix job runs `pytest -rs` and prefers an assertion over a `pytest.skip`.
+
+Shared runners are also roughly half the speed of this machine, which is why the perf floors are
+overridable and set from `PLAN.md`'s requirement rather than from local measurement.
 
 ## Conventions
 

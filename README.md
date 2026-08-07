@@ -28,11 +28,19 @@ wrong output. Measured: a four-turn wrap lands on its cylinder to within 3.55e-1
 ## Install
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv                    # any Python 3.11 or newer
 .venv/bin/pip install -e ".[gui]"        # viewer; omit [gui] for the CLI only
 ```
 
-Python 3.11+ (`tomllib` is stdlib from 3.11).
+**Python 3.11 or newer** — `tomllib` is stdlib from 3.11. Check what you got before going further, because
+a distribution's `python3` is often older than you assume:
+
+```bash
+.venv/bin/python --version
+```
+
+If that reports 3.10, delete `.venv` and create it with an explicit interpreter
+(`/usr/bin/python3.12 -m venv .venv`, or whatever your system calls it).
 
 ## Use
 
@@ -66,8 +74,8 @@ not a linear move — and that difference is the whole reason the middle tier ex
 
 ![Reviewing a fix before applying it](docs/images/diff-preview.png)
 
-Every fix is previewed as a unified diff and applied only on confirmation, to the **editor buffer** — the
-file on disk is never written until you save. Applying one fix re-runs the entire pipeline (parse →
+There are eight fixes. Every one is previewed as a unified diff and applied only on confirmation, and
+applied to the **editor buffer** — the file on disk is never written until you save. Applying one fix re-runs the entire pipeline (parse →
 simulate → verify), because a fix shifts every line number after it and a second fix aimed at "line 42"
 would otherwise land somewhere else.
 
@@ -100,13 +108,18 @@ See `src/foursight/profiles/default_4axis.toml`, which documents every field inl
 
 Measured on an Intel Iris Xe / Mesa 25.1.5 baseline:
 
-| | |
-|---|---|
-| Parse | 96k lines/sec |
-| 100k-line file to first frame | 4.5 s |
-| Orbit, 500k segments | 241 fps (worst frame 10.7 ms) |
-| Geometry + GL buffers, 500k segments | 50.5 MB |
-| Click → segment, 500k segments | 27 ms |
+| | | |
+|---|---|---|
+| Parse | 94k lines/sec | floor of 50k asserted in CI |
+| Simulate | 32k blocks/sec | cost is per *block*, not per segment |
+| 100k-line file to first frame drawn | **4.80 s** | against a 5 s target — 4% margin |
+| Orbit, 500k segments | 241 fps | worst frame 10.7 ms, against 30 fps |
+| Geometry + GL buffers, 500k segments | 50.5 MB | 38.5 MB store + 12.0 MB GL |
+| Click → segment, 500k segments | 27 ms | projection cached per camera change |
+
+That 4% margin is thin and it is honest: the number was 4.46 s before the editor pane existed, and the
+editor's `setPlainText` costs 1.23 s on a 100k-line file. The next feature touching the load path will break
+it. `PLAN.md` § Timing fast path records what was already reclaimed and what levers remain.
 
 Loading runs off the GUI thread and is cancellable; a cancelled load leaves the previous toolpath on
 screen rather than a partial one, because half a program is not a program.
@@ -121,7 +134,7 @@ Block delete (`/`) executes by default, matching the common control-panel defaul
 
 ```bash
 .venv/bin/pip install -e ".[dev,gui]"
-.venv/bin/pytest -q                                        # 1150+ tests
+.venv/bin/pytest -q                                        # 1157 tests, ~30 s
 .venv/bin/ruff check --fix . && .venv/bin/ruff format .
 .venv/bin/python scripts/build.py                          # PyInstaller one-dir bundle
 ```
