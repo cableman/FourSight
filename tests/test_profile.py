@@ -297,6 +297,27 @@ def test_invalid_toml_is_refused() -> None:
         load_profile_text("[machine\nname = 'x'")
 
 
+def test_invalid_toml_from_a_file_is_refused_too(tmp_path) -> None:
+    """The path variant needs this more than the text variant, and for a while only the text one had it.
+
+    `load_profile_text` wrapped `TOMLDecodeError` into `ProfileError`; `load_profile` did not. Since
+    the path variant is what `--profile` reaches, a hand-edited profile with a typo surfaced as a raw
+    tomllib traceback out of `foursight check` — which documents exit code 2 for an unusable profile.
+    """
+    bad = tmp_path / "broken.toml"
+    bad.write_text("this is not = valid toml [[[\n", encoding="utf-8")
+    with pytest.raises(ProfileError, match="invalid TOML"):
+        load_profile(bad)
+
+
+def test_the_toml_error_names_the_file(tmp_path) -> None:
+    """With several profiles on disk, "invalid TOML" alone does not say which one to fix."""
+    bad = tmp_path / "which-one.toml"
+    bad.write_text("nope [[[\n", encoding="utf-8")
+    with pytest.raises(ProfileError, match="which-one.toml"):
+        load_profile(bad)
+
+
 def test_non_numeric_limit_is_refused() -> None:
     with pytest.raises(ProfileError, match="number"):
         load_profile_text(MINIMAL + "\n[limits]\nmax_feed = 'fast'\n")

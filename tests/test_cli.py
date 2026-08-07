@@ -111,6 +111,19 @@ def test_an_explicit_profile_changes_the_verdict(capsys, tmp_path: Path) -> None
     assert "process.feed-too-high" in out
 
 
+def test_malformed_profile_toml_exits_two_rather_than_tracebacking(capsys, tmp_path: Path) -> None:
+    """Exit code 2 is documented for an unusable profile; a traceback is not honouring that.
+
+    This was a real gap: `load_profile` did not wrap `tomllib.TOMLDecodeError`, so a typo in a
+    hand-edited profile crashed the CLI instead of producing a message and code 2.
+    """
+    bad = tmp_path / "broken.toml"
+    bad.write_text("this is not = valid toml [[[\n", encoding="utf-8")
+    code, _, err = run(["check", str(BASELINE), "--profile", str(bad)], capsys)
+    assert code == 2
+    assert "invalid TOML" in err and "broken.toml" in err
+
+
 def test_a_profile_typo_is_surfaced(capsys, tmp_path: Path) -> None:
     """`max_fed = 3000` silently disables the feed check unless the CLI says so."""
     profile = tmp_path / "typo.toml"

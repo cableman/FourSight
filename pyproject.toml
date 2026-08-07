@@ -23,6 +23,9 @@ dev = ["pytest>=8.0", "hypothesis>=6.100", "ruff>=0.6", "pyinstaller>=6.0"]
 # Target lands in T1.11; the entry point is declared now so the console script
 # is wired from the first install. Not importable until then.
 foursight = "foursight.cli:main"
+# Requires the [gui] extra. app.py imports Qt inside main() so that a missing extra
+# produces one actionable sentence rather than a ModuleNotFoundError traceback.
+foursight-gui = "foursight.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

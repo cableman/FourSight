@@ -81,6 +81,7 @@ FourSight/
 │   ├── gui/
 │   │   ├── app.py           # entry point
 │   │   ├── main_window.py
+│   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
 │   │   ├── viewport3d.py    # GL view and camera; thin, because batching.py holds the logic
 │   │   ├── picking.py       # segment ↔ screen hit-testing (see Picking)
@@ -828,6 +829,39 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   segment**, against the 50 MB budget. So no per-block bookkeeping has crept in between parser and
   store. Peak RSS is recorded, never asserted — `resource` is Unix-only and Windows is in the matrix.
 - Simulation runs off the GUI thread (QThread) with progress reporting for large files.
+
+### GUI Shell
+
+`gui/session.py` is the Qt-free half of the shell, holding the pipeline (path → text → commands →
+geometry) and — the part with actual judgement — **what the window has to disclose**. Same split as
+`batching.py`, and for the same reason: 33 of T2.7's 49 tests need no Qt.
+
+The governing principle reaches the user here or nowhere. The simulator already refuses to draw what
+it cannot interpret, but a refusal nobody sees is barely better than a confident lie, so the summary
+separates two things that are easy to conflate:
+
+- **suppressed** — geometry is *missing*. `ProgramSummary.incomplete` is true and a **banner** appears
+  above the viewport saying the toolpath is incomplete.
+- **unverified** — geometry is drawn but untrustworthy (a cutter-comp centreline). `incomplete` stays
+  false and the warning goes to the status bar instead. Raising the banner here would fire it on a
+  large share of real programs, which is exactly how a warning stops being read.
+
+Also disclosed: parse errors, a latin-1 decode fallback, segments with no usable feed rate (so a short
+time estimate is never presented as complete), and simulator notes such as unmodelled G43 tool length.
+Cycle time is formatted as `1h 05m` rather than seconds, because it gets compared to a job sheet.
+
+**A failed open leaves the loaded program untouched and on screen**, with its own name still in the
+title bar. Clearing the viewport would lose the user's program to a mistyped filename, and drawing
+nothing under the new name would misrepresent what they are looking at.
+
+`foursight-gui` is the entry point, and `app.py` **imports Qt inside `main`, not at module scope**: a
+console script imports the module to find `main`, so a top-level Qt import turns a missing `[gui]`
+extra into a `ModuleNotFoundError` traceback before any of our code runs. Importing late makes it one
+sentence naming the fix, with exit code 3. An unusable `--profile` exits 2 rather than opening with a
+silently substituted default, which would make every limit and rapid rate wrong.
+
+Simulation still runs on the GUI thread, so a 100k-line file freezes the window for ~4.6 s. T2.9 moves
+it off; the wait cursor is the interim signal that the application is working rather than hung.
 
 ### Batching Layer
 

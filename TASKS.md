@@ -918,9 +918,48 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
       Files: `src/foursight/gui/batching.py`, `src/foursight/gui/viewport3d.py`,
       `tests/test_batching.py`, `tests/test_viewport.py`, `tests/test_perf.py`, `PLAN.md`
 
-- [ ] **T2.7 — Qt shell** — `gui/app.py`, `gui/main_window.py`
-      Open file, view toolpath, orbit/pan/zoom.
+- [x] **T2.7 — Qt shell** — `gui/app.py`, `gui/main_window.py`, `gui/session.py` — *done*
+      Split again: `session.py` holds the pipeline and the disclosure logic and **imports no Qt**;
+      `main_window.py` is the widget. Recorded in PLAN.md § GUI Shell.
+      **DoD met:** open a file (dialog, `Ctrl+O`, or `foursight-gui part.nc`), see the toolpath, orbit
+      /pan/zoom via `GLViewWidget`, plus Reload (F5) and Fit (Ctrl+0). New `foursight-gui` entry point.
+      **49 tests; 848 across the suite, fully green. 33 of the 49 need no Qt.**
+      **The governing principle reaches the user here or nowhere**, so the summary separates two things
+      that are easy to conflate. *Suppressed* geometry is **missing**, so a banner appears saying the
+      toolpath is incomplete. *Unverified* geometry is drawn but untrustworthy, so `incomplete` stays
+      false and the warning goes to the status bar — raising the banner there would fire it on a large
+      share of real programs, which is exactly how a warning stops being read. Both directions are
+      tested.
+      Also disclosed: parse errors, latin-1 fallback, segments with no usable feed rate (a short time
+      estimate is never presented as complete), and simulator notes such as unmodelled G43. Cycle time
+      reads `1h 05m`, not seconds, because it gets compared against a job sheet.
+      **A failed open leaves the loaded program untouched and on screen**, name still in the title bar.
+      Clearing the viewport would lose the user's program to a mistyped filename.
+      **Qt is imported inside `main`, not at module scope** — a console script imports the module to
+      find `main`, so a top-level Qt import would turn a missing `[gui]` extra into a
+      `ModuleNotFoundError` traceback before any of our code runs. Now one sentence and exit code 3,
+      and a subprocess test asserts importing `foursight.gui.app` pulls in no Qt.
+      **Found and fixed a pre-existing M1 bug, outside T2.7's scope but on its path:**
+      `load_profile_text` wrapped `tomllib.TOMLDecodeError` into `ProfileError` and `load_profile` did
+      **not** — and the path variant is the one `--profile` reaches. So a typo in a hand-edited profile
+      crashed `foursight check` with a raw tomllib traceback, despite the CLI documenting exit code 2
+      for an unusable profile. Fixed in `machine/profile.py` so both entry points benefit, with the
+      error now naming the file; regression tests added at the profile layer and the CLI, not only
+      where the GUI happened to find it.
+      **Mutation-verified, all 7 caught:** nothing ever incomplete (banner never shows), unverified
+      treated as incomplete (banner cries wolf), suppressed spans producing no warning text, banner
+      text never set, open failures swallowed, the viewport never given geometry, and simulator notes
+      dropped.
+      **Two of my own slips:** a duration test reached through `__globals__` for a private function
+      instead of importing it, and it expected `9.25 -> "9.3s"` when banker's rounding gives `"9.2s"` —
+      a rounding tie tests nothing here, so the case is now 9.26. Also balanced the wait cursor: it was
+      restored in both an `except` branch and a `finally`, popping Qt's cursor stack twice for one push.
+      Simulation still runs on the GUI thread, so 100k lines freezes the window ~4.6 s — T2.9's job.
       Blocked by: T2.6
+      Files: `src/foursight/gui/session.py`, `src/foursight/gui/main_window.py`,
+      `src/foursight/gui/app.py`, `src/foursight/machine/profile.py`, `pyproject.toml`,
+      `tests/test_session.py`, `tests/test_main_window.py`, `tests/test_gui_app.py`,
+      `tests/test_profile.py`, `tests/test_cli.py`, `PLAN.md`
 
 - [x] **T2.8 — Interpolated-point limit checking** — *done*
       `Program` gained an optional `segments: SegmentStore`. When present, `axis-travel-exceeded` and

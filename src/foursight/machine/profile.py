@@ -159,10 +159,20 @@ class MachineProfile:
 
 
 def load_profile(path: str | Path) -> MachineProfile:
-    """Read and parse a profile. ``OSError`` propagates for a missing file."""
+    """Read and parse a profile. ``OSError`` propagates for a missing file.
+
+    Malformed TOML becomes a `ProfileError`, exactly as in `load_profile_text`. This wrapping was
+    missing here at first, and only the text variant had it — so a hand-edited profile with a typo
+    reached `foursight check --profile` as a raw `tomllib.TOMLDecodeError` traceback, in spite of the
+    CLI documenting exit code 2 for an unusable profile. The path variant is the one users actually
+    reach, which is precisely why it needed it more.
+    """
     resolved = Path(path)
     with resolved.open("rb") as handle:
-        data = tomllib.load(handle)
+        try:
+            data = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise ProfileError(f"{resolved}: invalid TOML: {exc}") from exc
     return _build(data, path=resolved)
 
 
