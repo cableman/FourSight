@@ -24,6 +24,7 @@ silently pretends such a move is instantaneous should at least be able to say ho
 missing.
 """
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -131,15 +132,77 @@ def block_durations(
     *,
     rapid: bool,
 ) -> Timing:
-    """Durations for a block's segments. ``lin`` is ``(n, 2, 3)`` mm, ``rot`` is ``(n, 2)`` degrees."""
-    count = lin.shape[0]
-    if count == 0:
-        return Timing(durations=np.empty(0, dtype=np.float64))
+    """Durations for a block's segments. ``lin`` is ``(n, 2, 3)`` mm, ``rot`` is ``(n, 2)`` degrees.
 
-    # The norm here spans X, Y and Z only. Including `rot` would mix millimetres with degrees.
-    linear_delta = lin[:, 1, :] - lin[:, 0, :]
+    The segment-pair form. `polyline_durations` is the same computation over a polyline, and the two share
+    `_durations_from_deltas` so there is one implementation of the timing rules rather than two that could
+    drift.
+    """
+    if lin.shape[0] == 0:
+        return Timing(durations=np.empty(0, dtype=np.float64))
+    return _durations_from_deltas(
+        lin[:, 1, :] - lin[:, 0, :], rot[:, 1] - rot[:, 0], rates, profile, rapid=rapid
+    )
+
+
+def polyline_durations(
+    points: np.ndarray,
+    rotations: np.ndarray,
+    rates: Rates,
+    profile: MachineProfile,
+    *,
+    rapid: bool,
+) -> Timing:
+    """The same, over an ``(n+1, 3)`` polyline and ``(n+1,)`` rotations — **without materializing pairs**.
+
+    This exists for the simulator's hot path. Building the ``(n, 2, 3)`` and ``(n, 2)`` pair arrays cost two
+    `np.stack` calls **per block**, 71,428 of them for a 50k-line file, purely so that the differences could
+    be taken along an axis the caller already had. The deltas are exactly ``points[1:] - points[:-1]``, which
+    is one subtraction on a slice and no allocation of the intermediate.
+    """
+    if points.shape[0] < 2:
+        return Timing(durations=np.empty(0, dtype=np.float64))
+    return _durations_from_deltas(
+        points[1:] - points[:-1], rotations[1:] - rotations[:-1], rates, profile, rapid=rapid
+    )
+
+
+def _durations_from_deltas(
+    linear_delta: np.ndarray,
+    rotary_delta: np.ndarray,
+    rates: Rates,
+    profile: MachineProfile,
+    *,
+    rapid: bool,
+) -> Timing:
+    """The timing rules themselves, on per-segment deltas. The single implementation.
+
+    ``linear_delta`` is ``(n, 3)`` mm and ``rotary_delta`` is ``(n,)`` degrees, signed. The **sign is
+    discarded here and only here**: a reversed rotary move is still time spent.
+    """
+    if linear_delta.shape[0] == 1:
+        return _single_segment(linear_delta, rotary_delta, rates, profile, rapid=rapid)
+    return _vector_durations(linear_delta, rotary_delta, rates, profile, rapid=rapid)
+
+
+def _vector_durations(
+    linear_delta: np.ndarray,
+    rotary_delta: np.ndarray,
+    rates: Rates,
+    profile: MachineProfile,
+    *,
+    rapid: bool,
+) -> Timing:
+    """The general path, for any number of segments.
+
+    Named and reachable directly so the equivalence test can drive it on the *same* single-segment input the
+    fast path gets. The first attempt at that test padded a stationary second segment instead, which is
+    unsound: under inverse time the padding changes the weight denominator, so the two paths were being
+    compared on different questions and disagreed for the wrong reason.
+    """
+    # The norm here spans X, Y and Z only. Including the rotary delta would mix millimetres with degrees.
     linear_distance = np.linalg.norm(linear_delta, axis=1)
-    rotary_distance = np.abs(rot[:, 1] - rot[:, 0])
+    rotary_distance = np.abs(rotary_delta)
 
     if rates.inverse_time:
         return _inverse_time(rates, linear_distance, rotary_distance)
@@ -160,6 +223,71 @@ def block_durations(
     durations = np.maximum(linear_seconds, rotary_seconds)
     unknown = int(np.count_nonzero((durations == 0.0) & _moves(linear_distance, rotary_distance)))
     return Timing(durations=durations, unknown=unknown)
+
+
+def _single_segment(
+    linear_delta: np.ndarray,
+    rotary_delta: np.ndarray,
+    rates: Rates,
+    profile: MachineProfile,
+    *,
+    rapid: bool,
+) -> Timing:
+    """The same rules in scalar arithmetic, for a block that produced exactly one segment.
+
+    **Why this exists.** 91% of motion blocks in a realistic program are a single ``G1`` producing one
+    segment, and the vector path spends a dozen numpy calls on length-1 arrays to time it — `norm`, `abs`,
+    two `_rate_seconds`, `maximum`, `count_nonzero`, and the boolean mask feeding it. Each is a microsecond
+    or two of call overhead against nanoseconds of arithmetic, and at 35,714 blocks that was 0.7 s of a
+    3.2 s simulate.
+
+    **Why a second implementation is acceptable here, when it usually is not.** The two paths are held
+    identical by `test_timing.py::test_the_fast_path_agrees_with_the_vector_path`, which drives both over a
+    grid of rate configurations and randomized geometry and asserts **bit-identical** output. A fast path
+    that silently disagreed with the general one would produce a time estimate that is wrong only for
+    ordinary programs, which is the worst possible distribution of a bug — so the equivalence is proved
+    rather than assumed. Any new rule added above must be added here too, and the test will say so.
+
+    Inverse time collapses cleanly: with one segment, ``weights / weights.sum() * total`` is ``total``
+    whatever the weights are, and the zero-weight branch spreads the same total over one segment.
+    """
+    dx, dy, dz = float(linear_delta[0, 0]), float(linear_delta[0, 1]), float(linear_delta[0, 2])
+    linear_distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    rotary_distance = abs(float(rotary_delta[0]))
+
+    if rates.inverse_time:
+        return Timing(durations=np.array([rates.block_seconds or 0.0], dtype=np.float64))
+
+    if rapid:
+        linear_seconds = 0.0
+        for index, letter in enumerate(_LINEAR_AXES):
+            rate = _axis_rate(profile, letter)
+            if rate is None:
+                continue
+            linear_seconds = max(
+                linear_seconds, abs(float(linear_delta[0, index])) / rate * SECONDS_PER_MINUTE
+            )
+    else:
+        linear_seconds = _scalar_seconds(linear_distance, rates.linear_mm_per_min)
+
+    # Which rotary rate applies depends on whether anything linear is moving in this block.
+    rotary_rate = (
+        rates.rotary_max_deg_per_min if linear_distance > 0.0 else rates.rotary_feed_deg_per_min
+    )
+    rotary_seconds = _scalar_seconds(rotary_distance, rotary_rate)
+
+    # Coordinated motion: the move takes as long as its slowest component. NOT a norm.
+    duration = max(linear_seconds, rotary_seconds)
+    moves = linear_distance > 0.0 or rotary_distance > 0.0
+    unknown = 1 if duration == 0.0 and moves else 0
+    return Timing(durations=np.array([duration], dtype=np.float64), unknown=unknown)
+
+
+def _scalar_seconds(distance: float, rate_per_minute: float | None) -> float:
+    """`_rate_seconds` for one value. Same guard: an absent or non-positive rate is unknown, not instant."""
+    if rate_per_minute is None or rate_per_minute <= 0.0:
+        return 0.0
+    return distance / rate_per_minute * SECONDS_PER_MINUTE
 
 
 def _moves(linear_distance: np.ndarray, rotary_distance: np.ndarray) -> np.ndarray:

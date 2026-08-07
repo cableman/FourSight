@@ -1542,6 +1542,31 @@ The data model is already 4-axis-shaped, so this milestone is the transform itse
 
 **M5 COMPLETE** — all 10 tasks plus the owed G43 rule. **1152 tests pass**, ruff clean.
 
+- **Timing fast path** — *done*, closing the load-time gate carried since T3.1.
+      `_durations` was 36% of simulate. Three changes, each measured: memoize `rates_for` on the modal
+      snapshot's **identity** (one distinct `ModalState` across 42,858 commands, so an identical `Rates` was
+      rebuilt per block); stop materializing `(n, 2, 3)` pair arrays with two `np.stack` calls per block; and
+      a **scalar path for single-segment blocks**, which are 91% of them.
+      **simulate 3.80 s → 2.78 s; 100k lines to first frame 5.8 s → 4.80 s, so the 5 s gate passes again.**
+      My earlier estimate of 1.66 s recoverable was optimistic — ~1.0 s came back, because removing the
+      overhead *around* the timing math still leaves the math.
+      A one-entry cache keyed on identity rather than a dict keyed on `id()`: a dict of ids can return a
+      stale hit after the original is collected and its address reused, timing a block with another block's
+      feed rate. Holding the reference makes that impossible.
+      **Two implementations of the timing rules is normally a drift hazard**, and the drift would be nasty
+      here — a wrong time estimate *only for ordinary programs*. So equivalence is proved: 320 randomized
+      comparisons across every rate configuration requiring bit-identical output, plus tests that the fast
+      path is taken for one segment and not for two.
+      **All output bit-identical**: 16,287 durations across the corpus and two generated programs, and the
+      goldens hash duration totals as well.
+      **My first equivalence test was wrong** — it padded a stationary second segment to force the vector
+      path, which changes inverse time's weight denominator, so the two paths were compared on different
+      questions and disagreed for the wrong reason. `_vector_durations` is now named and called directly on
+      identical input.
+      **Margin is 4%, not comfort.** The editor's `setPlainText` (1.23 s) is now the largest single cost and
+      it is Qt's; `linspace` in `interpolate._straight` and `state._to_machine` are next in our own code.
+      Files: `src/foursight/sim/timing.py`, `src/foursight/sim/simulator.py`, `tests/test_timing.py`, `PLAN.md`
+
 **Project status: M0–M5 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---

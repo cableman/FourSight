@@ -270,3 +270,101 @@ def test_inverse_time_is_flagged_on_the_rates(profile) -> None:
         rates_for(parse("G21 G94\nG1 X1 F2\n").commands[-1], profile, rapid=False).inverse_time
         is False
     )
+
+
+# --------------------------------------------------------------------------- the single-segment fast path
+
+
+def test_the_fast_path_agrees_with_the_vector_path(profile) -> None:
+    """**This test is why a second implementation is acceptable.**
+
+    91% of motion blocks produce one segment, so `_durations_from_deltas` takes a scalar shortcut for
+    ``n == 1``. Two implementations of the same rules is normally a drift hazard, and here the drift would be
+    especially nasty: a fast path that disagreed would give a wrong time estimate *only for ordinary
+    programs*, which is the worst possible distribution for a bug.
+
+    So the equivalence is proved rather than assumed: both are driven over every rate configuration and a
+    spread of randomized geometry on **identical input**, and must agree bit-for-bit.
+
+    The first version of this test padded a stationary second segment to force the vector path, which is
+    unsound — under inverse time the padding changes the weight denominator, so the two were compared on
+    different questions and disagreed for the wrong reason. `_vector_durations` is named and called directly
+    instead.
+    """
+    import numpy as np
+
+    from foursight.sim.timing import _single_segment, _vector_durations
+
+    rng = np.random.default_rng(20260807)
+    programs = [
+        "G21 G94\nG1 X1 F600\n",  # ordinary feed
+        "G21 G94\nG1 X1\n",  # no feed rate: unknown
+        "G21 G94\nG1 X1 F0\n",  # zero feed: unknown
+        "G21 G93\nG1 X1 F2\n",  # inverse time
+        "G21 G95\nS6000 M3\nG1 X1 F0.1\n",  # units per rev
+        "G21 G95\nG1 X1 F0.1\n",  # units per rev, spindle stopped
+        "G21\nG0 X1\n",  # rapid
+        "G21 G94\nG1 X1 F9000\n",  # feed above the machine maximum
+    ]
+    checked = 0
+    for program in programs:
+        command = parse(program).commands[-1]
+        rapid = command.motion == "0"
+        rates = rates_for(command, profile, rapid=rapid)
+        for _ in range(40):
+            linear = rng.normal(size=(1, 3)) * rng.choice([0.0, 0.001, 1.0, 250.0])
+            rotary = np.array([rng.normal() * rng.choice([0.0, 0.5, 90.0, 3600.0])])
+
+            fast = _single_segment(linear, rotary, rates, profile, rapid=rapid)
+            slow = _vector_durations(linear, rotary, rates, profile, rapid=rapid)
+
+            assert fast.durations[0] == slow.durations[0], (
+                f"fast path diverged for {program!r}: {fast.durations[0]!r} != {slow.durations[0]!r}"
+            )
+            assert fast.unknown == slow.unknown, f"unknown count diverged for {program!r}"
+            checked += 1
+    assert checked == len(programs) * 40
+
+
+def test_the_fast_path_is_actually_taken(profile) -> None:
+    """A fast path nothing reaches is dead weight, and the equivalence test above would still pass."""
+    import numpy as np
+
+    from foursight.sim import timing
+
+    calls = []
+    original = timing._single_segment
+    try:
+        timing._single_segment = lambda *a, **k: calls.append(1) or original(*a, **k)
+        timing.block_durations(
+            np.zeros((1, 2, 3)),
+            np.zeros((1, 2)),
+            Rates(linear_mm_per_min=600.0),
+            profile,
+            rapid=False,
+        )
+    finally:
+        timing._single_segment = original
+    assert calls, "a one-segment block did not reach the fast path"
+
+
+def test_a_multi_segment_block_uses_the_vector_path(profile) -> None:
+    """The boundary: two segments must not take the scalar shortcut."""
+    import numpy as np
+
+    from foursight.sim import timing
+
+    calls = []
+    original = timing._single_segment
+    try:
+        timing._single_segment = lambda *a, **k: calls.append(1) or original(*a, **k)
+        timing.block_durations(
+            np.zeros((2, 2, 3)),
+            np.zeros((2, 2)),
+            Rates(linear_mm_per_min=600.0),
+            profile,
+            rapid=False,
+        )
+    finally:
+        timing._single_segment = original
+    assert not calls

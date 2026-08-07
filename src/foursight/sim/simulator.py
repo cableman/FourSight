@@ -31,7 +31,7 @@ from foursight.machine.state import MachineState, Move, Position, Step
 from foursight.parser.model import CANNED_CYCLE_CODES, Command
 from foursight.sim.interpolate import interpolate
 from foursight.sim.segments import Kind, SegmentBuilder, SegmentStore
-from foursight.sim.timing import block_durations, rates_for
+from foursight.sim.timing import Rates, polyline_durations, rates_for
 
 ProgressCallback = Callable[[int, int], None]
 CancelCheck = Callable[[], bool]
@@ -174,6 +174,8 @@ class _Run:
     notes: set[str] = field(default_factory=set)
     unknown_durations: int = 0
     _open: Span | None = None
+    #: One-entry rate cache: (modal snapshot, rapid, rates). See `_rates`.
+    _rates_cache: tuple[object, bool, Rates] | None = None
 
     def step(self, step: Step, command: Command, *, position_lost: bool = False) -> None:
         line = command.ref.line_no
@@ -293,13 +295,36 @@ class _Run:
     def _durations(
         self, points: np.ndarray, rotations: np.ndarray, command: Command, *, rapid: bool
     ) -> np.ndarray:
-        """Time the block's segments, in the exact column layout `timing` expects."""
-        lin = np.stack([points[:-1], points[1:]], axis=1)
-        rot = np.stack([rotations[:-1], rotations[1:]], axis=1)
-        rates = rates_for(command, self.profile, rapid=rapid)
-        timing = block_durations(lin, rot, rates, self.profile, rapid=rapid)
+        """Time the block's segments.
+
+        Uses `polyline_durations` rather than `block_durations` so the ``(n, 2, 3)`` and ``(n, 2)`` pair
+        arrays are never built: two `np.stack` calls per block, 71,428 of them for a 50k-line file, purely
+        to take a difference along an axis the caller already had.
+        """
+        rates = self._rates(command, rapid=rapid)
+        timing = polyline_durations(points, rotations, rates, self.profile, rapid=rapid)
         self.unknown_durations += timing.unknown
         return timing.durations
+
+    def _rates(self, command: Command, *, rapid: bool) -> Rates:
+        """`rates_for`, memoized on the modal snapshot's **identity**.
+
+        `ModalState` is frozen and shared copy-on-write, so consecutive blocks overwhelmingly reference the
+        *same object* — T1.12 measures **one** distinct instance across 42,858 commands of a realistic
+        program. Recomputing an identical `Rates` per block was ~0.39 s of a 3.5 s simulate.
+
+        A one-entry cache keyed on identity, rather than a dict keyed on `id()`. Holding the reference is
+        what makes it sound: a dict of `id()` keys can hand back a stale hit after the original is garbage
+        collected and its address reused, which would time a block with another block's feed rate. Keeping
+        the object alive in the cache makes that impossible.
+        """
+        modal = command.modal_snapshot
+        cached = self._rates_cache
+        if cached is not None and cached[0] is modal and cached[1] == rapid:
+            return cached[2]
+        rates = rates_for(command, self.profile, rapid=rapid)
+        self._rates_cache = (modal, rapid, rates)
+        return rates
 
 
 def _xyz(position) -> np.ndarray | None:

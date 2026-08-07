@@ -1093,9 +1093,9 @@ file costs nothing beyond loading the text.
 total is **5.97 s, past the 5 s M2 gate that T2.13 certified at 4.46 s**. Recorded rather than absorbed:
 the editor is a real feature and the gate is a real number, and one of them has to move.
 
-The remedy is already sized: the `_durations` fast path is ~35% of simulate, about **1.66 s** at this size
-— more than enough to get back under 5 s. That is the headroom T2.13 explicitly noted was left in
-simulation rather than rendering. Until it lands, a 100k-line file takes ~6 s to open.
+**Done — see § Timing fast path.** simulate went 3.80 s → 2.78 s and the gate passes again at **4.80 s**,
+though with only 4% margin rather than M2's 11%. The estimate above was optimistic: ~1.0 s was recovered,
+not 1.66 s, because removing the overhead *around* the timing math still leaves the math itself.
 
 Note also that `setPlainText` runs on the **GUI thread**, since Qt widgets cannot be touched from a
 worker, so that 1.23 s is a freeze at the end of an otherwise-threaded load (T2.9). Chunked insertion or a
@@ -1226,6 +1226,42 @@ raw `QOpenGLWidget` fallback is **not needed**; M2 builds on pyqtgraph.
 With vsync on, every configuration from 1k to 500k reports ~60 fps, because that measures the
 display refresh rate rather than the GPU. Always measure uncapped (`vblank_mode=0` on Mesa/GLX)
 before drawing conclusions about headroom; the spike now prints a warning when it detects this.
+
+#### Timing fast path — DONE, measured
+
+`_durations` was 36% of simulate. Three changes, in increasing order of risk, each measured:
+
+1. **Memoize `rates_for` on the modal snapshot's identity.** `ModalState` is frozen and shared
+   copy-on-write, and T1.12 measures **one** distinct instance across 42,858 commands of a realistic
+   program — so an identical `Rates` was rebuilt per block, ~0.39 s of a 3.5 s simulate. A one-entry cache
+   keyed on identity, *not* a dict keyed on `id()`: a dict of ids can hand back a stale hit after the
+   original is collected and its address reused, which would time a block with another block's feed rate.
+   Holding the reference in the cache makes that impossible.
+2. **Stop materializing segment pairs.** The simulator built `(n, 2, 3)` and `(n, 2)` arrays with two
+   `np.stack` calls per block — 71,428 for a 50k-line file — purely so differences could be taken along an
+   axis the caller already had. `polyline_durations` takes them as `points[1:] - points[:-1]`.
+3. **A scalar path for single-segment blocks.** 91% of motion blocks are one `G1` producing one segment, and
+   the vector path spent a dozen numpy calls on length-1 arrays to time it.
+
+| | Before | After |
+|---|---|---|
+| simulate, 50k-line program | 3.80 s | **2.78 s** |
+| blocks/sec | 25,021 | **31,912** |
+| 100k lines to first frame drawn | ~5.8 s | **4.80 s** |
+
+**Two implementations of the timing rules is normally a drift hazard**, and the drift would be especially
+nasty here: a fast path that disagreed would give a wrong time estimate *only for ordinary programs*, the
+worst possible distribution for a bug. So equivalence is **proved**, not assumed —
+`test_the_fast_path_agrees_with_the_vector_path` drives both over every rate configuration and randomized
+geometry (320 comparisons) requiring bit-identical output, and two further tests assert the fast path is
+taken for one segment and not for two.
+
+All output is **bit-identical** to before the change, across the fixture corpus and two generated programs —
+16,287 segment durations, plus the golden fingerprints which hash duration totals.
+
+**The gate passes with 4% margin, not comfort.** The editor's `setPlainText` is now the largest single
+remaining cost at 1.23 s and it is Qt's, not ours; chunked insertion would be the next lever. `linspace` in
+`interpolate._straight` (~0.34 s) and `state._to_machine` (~0.55 s) are next in our own code.
 
 #### M2 gate result — MEASURED, gate met (T2.13)
 
