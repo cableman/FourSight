@@ -41,6 +41,7 @@ from foursight.gui.selection import LineSelection, select_line
 from foursight.gui.session import OpenedProgram
 from foursight.gui.timeline_bar import TimelineBar
 from foursight.gui.viewport3d import ToolpathViewport
+from foursight.machine.kinematics import KinematicsError, apply_display_transform
 from foursight.machine.profile import MachineProfile
 
 GCODE_FILTER = "G-code (*.nc *.ngc *.gcode *.tap *.cnc);;All files (*)"
@@ -146,6 +147,16 @@ class MainWindow(QMainWindow):
 
         view_menu = self.menuBar().addMenu("&View")
         self._add(view_menu, "&Fit to program", QKeySequence("Ctrl+0"), self.fit_view)
+        view_menu.addSeparator()
+        self.part_coordinates_action = QAction("&Part coordinates", self)
+        self.part_coordinates_action.setCheckable(True)
+        self.part_coordinates_action.setShortcut(QKeySequence("Ctrl+P"))
+        self.part_coordinates_action.setToolTip(
+            "Show the path as it lies on the part (table mount) or the tool tip (head mount), "
+            "instead of machine coordinates"
+        )
+        self.part_coordinates_action.toggled.connect(self._on_part_coordinates_toggled)
+        view_menu.addAction(self.part_coordinates_action)
 
     def _add(self, menu, text: str, shortcut, slot) -> QAction:
         action = QAction(text, self)
@@ -312,6 +323,9 @@ class MainWindow(QMainWindow):
         # removal — not a re-read of the file. Anything else and the line numbers in the gutter could
         # disagree with the ones in `SourceRef`, which is what T3.2 and T3.4 sync on.
         self.selection = None
+        # The transform belongs to the previous store, so the toggle resets rather than silently
+        # displaying the new program untransformed while the menu still shows it checked.
+        self.part_coordinates_action.setChecked(False)
         # "Checking…" rather than an empty list: an empty diagnostics panel reads as "no problems found",
         # which is a claim we have not made yet at this point.
         self.diagnostics.set_pending()
@@ -388,6 +402,37 @@ class MainWindow(QMainWindow):
     def _on_diagnostic_activated(self, line_no: int) -> None:
         """Clicking a finding jumps the editor there, which highlights the line via the T3.2 path."""
         self.editor.goto_line(line_no)
+
+    # ------------------------------------------------------------------ display transform (T4.5)
+
+    def _on_part_coordinates_toggled(self, enabled: bool) -> None:
+        """Switch the viewport between machine and part coordinates.
+
+        The transform is computed **on demand**, not at load: it costs a second (N, 2, 3) float64 array —
+        24 MB at 500k segments — and most sessions never ask for it.
+
+        A profile that cannot describe the transform (head mount with no `pivot_to_tip`) is reported and
+        the toggle reverts, rather than drawing machine coordinates while the menu claims otherwise. A
+        checkbox that lies about what is on screen is worse than one that refuses.
+        """
+        if self.program is None:
+            return
+        store = self.program.simulation.store
+        if enabled and store.lin_part is None:
+            try:
+                apply_display_transform(store, self.profile.kinematics)
+            except (KinematicsError, ValueError) as error:
+                QMessageBox.warning(self, "Cannot show part coordinates", str(error))
+                self.part_coordinates_action.setChecked(False)
+                return
+
+        self.viewport.set_simulation(self.program.simulation, use_part_coordinates=enabled)
+        # The selection survives the switch — it is a set of segment indices, not coordinates — but has to
+        # be redrawn in the new frame.
+        if self.selection is not None:
+            self.viewport.set_highlight(store, self.selection.mask)
+        mode = "part" if enabled else "machine"
+        self.statusBar().showMessage(f"Showing {mode} coordinates")
 
     # ------------------------------------------------------------------ timeline (T3.5)
 

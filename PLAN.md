@@ -847,6 +847,64 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
   parse and simulate, because parsing is ~a quarter of the wall clock and has no progress seam of its
   own, so a user who cancels during it should not then wait out the simulation.
 
+### M4 — Rotary Kinematics
+
+`machine/kinematics.py` implements both mounts. **`lin` is never mutated**; the transform writes `lin_part`,
+and `set_part_coordinates` enforces both the shape and the separate-array requirement — machine coordinates
+are what travel-limit verification reads.
+
+**Why a second array and not a camera transform.** The rotation depends on A at every interpolation step,
+so along a simultaneous XYZ+A move it is *nonlinear*. No view matrix can express it; it has to be baked
+into vertex positions.
+
+**Per-step transformation came for free, and that was the earlier design paying off.** PLAN calls
+endpoint-only transformation "the single most likely source of silently wrong output" — a wrapped helix
+drawn from its endpoints alone collapses to a straight chord. This module cannot make that mistake, because
+`SegmentStore.rot` already carries a rotary value for **every segment endpoint**: T2.3 built
+`rotary_step_count` and tessellated XYZ+A moves per step specifically so M4 would inherit it. The transform
+is a vectorized pass over 2N points, each rotated by *its own* A.
+
+Two sign/geometry traps, both of which look plausible on screen and are tested against closed-form
+expectations rather than recorded output:
+
+- **Table mount rotates by −A.** The part turns by +A, so a feature fixed in the part appears to the tool as
+  though the tool turned by −A. Flip it and you get a mirror-image wrap.
+- **The head-mount tip translates as the head swings.** It is *not* the machine XYZ: a machine standing
+  still while A sweeps 90° moves its tip by the full pivot length. Treating the tip as the programmed XYZ
+  draws a stationary point where the tool sweeps an arc.
+
+A head-mount profile with no `pivot_to_tip` is **refused**, not defaulted — the tip position is genuinely
+unknown, and the absence-means-unknown rule applies.
+
+#### The display toggle (T4.5), and one trap it introduces
+
+`View → Part coordinates` (Ctrl+P). The transform is computed **on demand**, since it costs a second
+`(N, 2, 3)` float64 array — 24 MB at 500k segments — and most sessions never ask.
+
+The viewport **owns the display mode**, and batching, the highlight, picking and the camera all read it.
+Each consulting `store.lin` independently is how three of them end up in machine coordinates while one is in
+part coordinates.
+
+**Toggling redraws everything without moving the camera**, which defeats a matrix-only picking cache: it
+would serve a machine-coordinate projection while part coordinates are on screen, so a click would select
+whatever segment sat at those pixels *before* the wrap. `part_coordinates` is therefore part of the cache
+key. A profile that cannot describe the transform reverts the toggle and says why — a checkbox that lies
+about what is on screen is worse than one that refuses.
+
+#### M4 gate result — MEASURED, gate met (T4.6)
+
+A four-turn wrapping program (`G1 X.. A..` at radius 25, A sweeping 0→1440°), 451 segments:
+
+| | Machine coordinates | Part coordinates |
+|---|---|---|
+| Y range | 25.0 … 25.0 (a straight line) | — |
+| Radius from centreline | — | **25.000000, max deviation 3.55e-15 mm** |
+| X advance | 0 → 80 mm | 0 → 80 mm |
+
+The wrapped path lies on the cylinder to floating-point precision, and the same program in machine
+coordinates is the straight line it should be. That contrast is the whole point of the milestone. Orbiting in
+part coordinates: 1054 fps.
+
 ### M3 — Editor, Diagnostics and Timeline
 
 Four views of one program, and the design rule throughout is that **the logic that can be wrong is

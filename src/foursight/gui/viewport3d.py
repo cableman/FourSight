@@ -59,6 +59,10 @@ class ToolpathViewport(GLViewWidget):
         self.highlighted_segments = 0
         self._store: SegmentStore | None = None
         self._projection: ScreenProjection | None = None
+        #: Which coordinates are on screen. Owned here so batching, the highlight, picking and the camera
+        #: cannot disagree — each reading `store.lin` independently is how three of them end up in machine
+        #: coordinates while one is in part coordinates.
+        self.part_coordinates = False
         self.setCameraPosition(distance=DEFAULT_DISTANCE_MM, elevation=30, azimuth=-60)
         self._add_grid()
 
@@ -85,6 +89,7 @@ class ToolpathViewport(GLViewWidget):
         use_part_coordinates: bool = False,
     ) -> None:
         """Lower-level entry point: draw a bare store, with no span information."""
+        self.part_coordinates = use_part_coordinates
         self.batches = build_batches(
             store, untrusted=untrusted, use_part_coordinates=use_part_coordinates
         )
@@ -148,7 +153,7 @@ class ToolpathViewport(GLViewWidget):
         would otherwise highlight invisibly, and the user would read that as "this line draws nothing" —
         the opposite of what a selection is for.
         """
-        vertices = self._highlight_vertices(store, mask)
+        vertices = self._highlight_vertices(store, mask, self.part_coordinates)
         self.highlighted_segments = 0 if vertices is None else vertices.shape[0] // 2
 
         if vertices is None:
@@ -173,15 +178,28 @@ class ToolpathViewport(GLViewWidget):
         self.set_highlight(SegmentStore.empty(), None)
 
     @staticmethod
-    def _highlight_vertices(store: SegmentStore, mask: np.ndarray | None) -> np.ndarray | None:
-        """``(2M, 3)`` float32 vertices for the selected segments, or None when there are none."""
+    def _highlight_vertices(
+        store: SegmentStore, mask: np.ndarray | None, part_coordinates: bool
+    ) -> np.ndarray | None:
+        """``(2M, 3)`` float32 vertices for the selected segments, or None when there are none.
+
+        Reads whichever array is on screen. Highlighting `lin` while part coordinates are displayed would
+        draw the selection somewhere the toolpath is not — visibly wrong, but only if you happen to look.
+        """
         if mask is None or len(store) == 0 or not mask.any():
             return None
         if mask.shape != (len(store),):
             raise ValueError(
                 f"highlight mask has shape {mask.shape}, expected ({len(store)},) — one per segment"
             )
-        return store.lin[mask].astype(np.float32, copy=False).reshape(-1, 3)
+        source = store.lin
+        if part_coordinates:
+            if store.lin_part is None:
+                raise ValueError(
+                    "part coordinates are displayed but no display transform is attached"
+                )
+            source = store.lin_part
+        return source[mask].astype(np.float32, copy=False).reshape(-1, 3)
 
     # ------------------------------------------------------------------ picking (T3.3)
 
@@ -217,10 +235,12 @@ class ToolpathViewport(GLViewWidget):
         mvp = self.pick_matrix()
         width, height = self.width(), self.height()
         if self._projection is not None and self._projection.matches(
-            mvp, width, height, len(self._store)
+            mvp, width, height, len(self._store), self.part_coordinates
         ):
             return self._projection
-        self._projection = project_store(self._store, mvp, width, height)
+        self._projection = project_store(
+            self._store, mvp, width, height, part_coordinates=self.part_coordinates
+        )
         return self._projection
 
     def pick_matrix(self) -> np.ndarray:

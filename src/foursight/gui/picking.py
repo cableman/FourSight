@@ -44,26 +44,45 @@ class ScreenProjection:
     width: int
     height: int
     segments: int
+    part_coordinates: bool  # which coordinates were projected
 
-    def matches(self, mvp: np.ndarray, width: int, height: int, segments: int) -> bool:
-        """Whether this projection is still valid for the given camera, viewport and store size.
+    def matches(
+        self, mvp: np.ndarray, width: int, height: int, segments: int, part_coordinates: bool
+    ) -> bool:
+        """Whether this projection is valid for the given camera, viewport, store and display mode.
 
         The store size is part of the key because a *different program with the same camera* must miss:
         the arrays are indexed by segment and would otherwise be silently the wrong length.
+
+        `part_coordinates` is in the key for a subtler reason. Toggling between machine and part
+        coordinates (T4.5) redraws completely different geometry **without moving the camera**, so a
+        matrix-only key would happily serve a machine-coordinate projection while part coordinates are on
+        screen — clicking would then select whatever segment sat at those pixels *before* the wrap was
+        applied. Exactly the staleness this cache exists to prevent, arriving by a route the matrix cannot
+        see.
         """
         return (
             self.width == width
             and self.height == height
             and self.segments == segments
+            and self.part_coordinates == part_coordinates
             and np.array_equal(self.mvp, mvp)
         )
 
 
 def project_store(
-    store: SegmentStore, mvp: np.ndarray, width: int, height: int
+    store: SegmentStore,
+    mvp: np.ndarray,
+    width: int,
+    height: int,
+    *,
+    part_coordinates: bool = False,
 ) -> ScreenProjection:
-    """Project every segment endpoint to pixels. The expensive half — 47.7 ms at 500k segments."""
-    points = store.lin.reshape(-1, 3)
+    """Project every segment endpoint to pixels. The expensive half — 47.7 ms at 500k segments.
+
+    ``part_coordinates`` must match what the renderer drew, or every pick is against invisible geometry.
+    """
+    points = _display_array(store, part_coordinates).reshape(-1, 3)
     homogeneous = np.empty((points.shape[0], 4), dtype=np.float64)
     homogeneous[:, :3] = points
     homogeneous[:, 3] = 1.0
@@ -90,7 +109,19 @@ def project_store(
         width=width,
         height=height,
         segments=len(store),
+        part_coordinates=part_coordinates,
     )
+
+
+def _display_array(store: SegmentStore, part_coordinates: bool) -> np.ndarray:
+    """The array actually on screen. Refuses to fall back to `lin`, which would pick the wrong geometry."""
+    if not part_coordinates:
+        return store.lin
+    if store.lin_part is None:
+        raise ValueError(
+            "part coordinates were requested for picking but no display transform has been applied"
+        )
+    return store.lin_part
 
 
 def pick(

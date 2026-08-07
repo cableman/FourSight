@@ -16,6 +16,7 @@ import os
 import threading
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -52,6 +53,13 @@ def window(qt_app, profile, monkeypatch):
         return MainWindow(profile)
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"cannot construct the window on this platform: {error}")
+
+
+def replace_kinematics(profile, kinematics):
+    """A copy of `profile` with different kinematics, for exercising the refusal path."""
+    import dataclasses
+
+    return dataclasses.replace(profile, kinematics=kinematics)
 
 
 # --------------------------------------------------------------------------- opening
@@ -605,3 +613,93 @@ def test_loading_a_new_program_clears_the_previous_diagnostics(window) -> None:
     assert window.diagnostics.diagnostics
     window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
     assert window.diagnostics.diagnostics == ()
+
+
+# --------------------------------------------------------------------------- part coordinates (T4.5)
+
+
+def test_the_toggle_starts_off_and_shows_machine_coordinates(window) -> None:
+    """`lin` is the default view because it is what the verifier reasons about."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.part_coordinates_action.isChecked() is False
+    assert window.viewport.part_coordinates is False
+
+
+def test_enabling_the_toggle_transforms_and_redraws(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    assert store.lin_part is None, "the transform should not be computed until asked for"
+
+    window.part_coordinates_action.setChecked(True)
+    assert store.lin_part is not None
+    assert window.viewport.part_coordinates is True
+
+
+def test_the_transform_never_touches_machine_coordinates(window) -> None:
+    """The invariant the whole verifier rests on, checked through the GUI path."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    before = store.lin.copy()
+    window.part_coordinates_action.setChecked(True)
+    assert np.array_equal(store.lin, before)
+
+
+def test_toggling_invalidates_the_picking_projection(window) -> None:
+    """Toggling redraws everything *without moving the camera*, so a matrix-only cache would go stale.
+
+    A stale projection here would pick whatever segment sat at those pixels before the wrap was applied —
+    a confidently wrong line with nothing on screen to suggest it.
+    """
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    machine = window.viewport.projection()
+    assert machine is not None and machine.part_coordinates is False
+
+    window.part_coordinates_action.setChecked(True)
+    part = window.viewport.projection()
+    assert part is not machine
+    assert part.part_coordinates is True
+
+
+def test_the_selection_survives_the_switch_and_is_redrawn(window) -> None:
+    """A selection is segment indices, not coordinates — but it has to be redrawn in the new frame."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    window.editor.goto_line(int(store.line[0]))
+    count = window.viewport.highlighted_segments
+    assert count > 0
+
+    window.part_coordinates_action.setChecked(True)
+    assert window.selection is not None
+    assert window.viewport.highlighted_segments == count
+
+
+def test_a_profile_that_cannot_describe_the_transform_reverts_the_toggle(
+    window, monkeypatch
+) -> None:
+    """A checkbox that lies about what is on screen is worse than one that refuses.
+
+    Head mount with no `pivot_to_tip` has an unknown tool tip; drawing machine coordinates while the menu
+    claims part coordinates would misrepresent the geometry silently.
+    """
+    from foursight.machine.profile import Kinematics
+
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    monkeypatch.setattr(
+        window, "profile", replace_kinematics(window.profile, Kinematics(rotary_mount="head"))
+    )
+    window.part_coordinates_action.setChecked(True)
+    assert window.part_coordinates_action.isChecked() is False
+    assert window.viewport.part_coordinates is False
+
+
+def test_loading_a_new_program_resets_the_toggle(window) -> None:
+    """`lin_part` belongs to the previous store; leaving it checked would misdescribe the new one."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.part_coordinates_action.setChecked(True)
+    window.open_file_and_wait(FIXTURES / "arc_helical.nc")
+    assert window.part_coordinates_action.isChecked() is False
+    assert window.viewport.part_coordinates is False
+
+
+def test_toggling_with_nothing_loaded_does_nothing(window) -> None:
+    window.part_coordinates_action.setChecked(True)  # must not raise

@@ -156,7 +156,7 @@ def test_segments_behind_the_camera_are_never_picked() -> None:
 def test_the_projection_matches_the_matrix_it_was_built_from() -> None:
     mvp = orthographic()
     projection = projected(store_of([[0.0, 0, 0], [10.0, 0, 0]]), mvp)
-    assert projection.matches(mvp, WIDTH, HEIGHT, 1)
+    assert projection.matches(mvp, WIDTH, HEIGHT, 1, False)
 
 
 def test_a_moved_camera_invalidates_the_projection() -> None:
@@ -167,21 +167,21 @@ def test_a_moved_camera_invalidates_the_projection() -> None:
     """
     store = store_of([[0.0, 0, 0], [10.0, 0, 0]])
     projection = projected(store, orthographic())
-    assert not projection.matches(orthographic(offset=(0.3, 0.0)), WIDTH, HEIGHT, 1)
-    assert not projection.matches(orthographic(scale=16.0), WIDTH, HEIGHT, 1)
+    assert not projection.matches(orthographic(offset=(0.3, 0.0)), WIDTH, HEIGHT, 1, False)
+    assert not projection.matches(orthographic(scale=16.0), WIDTH, HEIGHT, 1, False)
 
 
 def test_a_resized_viewport_invalidates_the_projection() -> None:
     """Pixel coordinates depend on the viewport, so the same matrix at a new size is a different answer."""
     projection = projected(store_of([[0.0, 0, 0], [10.0, 0, 0]]))
-    assert not projection.matches(orthographic(), WIDTH + 1, HEIGHT, 1)
-    assert not projection.matches(orthographic(), WIDTH, HEIGHT // 2, 1)
+    assert not projection.matches(orthographic(), WIDTH + 1, HEIGHT, 1, False)
+    assert not projection.matches(orthographic(), WIDTH, HEIGHT // 2, 1, False)
 
 
 def test_a_different_program_invalidates_the_projection() -> None:
     """Same camera, new geometry. The arrays are indexed by segment and would be the wrong length."""
     projection = projected(store_of([[0.0, 0, 0], [10.0, 0, 0]]))
-    assert not projection.matches(orthographic(), WIDTH, HEIGHT, 999)
+    assert not projection.matches(orthographic(), WIDTH, HEIGHT, 999, False)
 
 
 def test_the_projection_holds_its_own_copy_of_the_matrix() -> None:
@@ -189,7 +189,7 @@ def test_the_projection_holds_its_own_copy_of_the_matrix() -> None:
     mvp = orthographic()
     projection = projected(store_of([[0.0, 0, 0], [10.0, 0, 0]]), mvp)
     mvp[0, 3] = 99.0
-    assert not projection.matches(mvp, WIDTH, HEIGHT, 1)
+    assert not projection.matches(mvp, WIDTH, HEIGHT, 1, False)
 
 
 # --------------------------------------------------------------------------- shape and scale
@@ -226,3 +226,38 @@ def test_projecting_does_not_mutate_the_store(profile) -> None:
     before = sim.store.lin.copy()
     projected(sim.store)
     assert np.array_equal(sim.store.lin, before)
+
+
+# --------------------------------------------------------------------------- display mode (T4.5)
+
+
+def test_switching_to_part_coordinates_invalidates_the_projection() -> None:
+    """The subtle staleness case: toggling coordinates redraws everything **without moving the camera**.
+
+    A matrix-only cache key would happily serve a machine-coordinate projection while part coordinates are
+    on screen, so a click would select whatever segment sat at those pixels *before* the wrap. That is the
+    exact failure this cache is designed to make impossible, arriving by a route the matrix cannot see.
+    """
+    projection = projected(store_of([[0.0, 0, 0], [10.0, 0, 0]]))
+    assert projection.matches(orthographic(), WIDTH, HEIGHT, 1, False)
+    assert not projection.matches(orthographic(), WIDTH, HEIGHT, 1, True)
+
+
+def test_projecting_part_coordinates_uses_lin_part() -> None:
+    """Picking must project what the renderer drew, or every hit is against invisible geometry."""
+    store = store_of([[0.0, 0, 0], [10.0, 0, 0]])
+    store.set_part_coordinates(store.lin + 100.0)
+
+    machine = project_store(store, orthographic(), WIDTH, HEIGHT)
+    part = project_store(store, orthographic(), WIDTH, HEIGHT, part_coordinates=True)
+    assert not np.allclose(machine.a, part.a), (
+        "part coordinates projected identically to machine ones"
+    )
+    assert part.part_coordinates is True
+
+
+def test_projecting_part_coordinates_without_a_transform_is_refused() -> None:
+    """Falling back to `lin` would pick correctly-looking segments in the wrong frame."""
+    store = store_of([[0.0, 0, 0], [10.0, 0, 0]])
+    with pytest.raises(ValueError, match="no display transform"):
+        project_store(store, orthographic(), WIDTH, HEIGHT, part_coordinates=True)

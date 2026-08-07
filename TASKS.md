@@ -1394,22 +1394,71 @@ Re-granulate after D1 is resolved — a `QOpenGLWidget` fallback materially chan
 
 The data model is already 4-axis-shaped, so this milestone is the transform itself.
 
-- [ ] **T4.1 — `machine/kinematics.py`: table mount**
-      `p_part = R_axis(-A) @ (p_tool - centerline) + centerline`. Populate `lin_part`;
-      **never mutate `lin`** — doing so silently destroys the ability to verify.
-- [ ] **T4.2 — `machine/kinematics.py`: head mount**
-      `p_tip = p_pivot + R_axis(A) @ (0, 0, -pivot_to_tip)`. The tip **translates** as the head
-      swings; it is not simply the machine XYZ.
-- [ ] **T4.3 — Rotary-aware step sizing**
-      From `tolerance.rotary_chord`, evaluated at the max distance of the path from the centerline
-      (no stock model, so path radius is the proxy for part radius). Simultaneous XYZ+A moves are
-      transformed **per step** — endpoint-only transformation draws helical/wrapped paths as
-      straight chords, the single most likely source of silently wrong output.
-- [ ] **T4.4 — `tests/test_kinematics.py`**
-      Compare transformed paths against closed-form expectations (helix on a cylinder), not
-      against previously-generated output.
-- [ ] **T4.5 — Display toggle** — machine coords vs part coords in the viewport.
-- [ ] **T4.6 — Milestone gate:** a 4-axis wrapping program renders as the correct cylindrical path.
+- [x] **T4.1 — `machine/kinematics.py`: table mount** — *done*
+      `p_part = R_axis(-A) @ (p_tool - centerline) + centerline`. Writes `lin_part`; **`lin` untouched**,
+      enforced by `set_part_coordinates` and asserted through the GUI path too.
+      **The −A sign is the whole content of table mount** and a flip produces a mirror-image wrap that
+      looks entirely plausible. Tested against a hand-computed quarter turn, with the mirror shown
+      explicitly alongside it.
+
+- [x] **T4.2 — `machine/kinematics.py`: head mount** — *done*
+      `p_tip = p_pivot + R_axis(A) @ (0, 0, -pivot_to_tip)`. **The tip translates as the head swings** — a
+      machine standing still while A sweeps 90° moves its tip by the full pivot length, so treating the tip
+      as the programmed XYZ would draw a stationary point where the tool sweeps an arc. Tested as a
+      closed-form sphere: the tip stays exactly `pivot_to_tip` from the pivot at every angle.
+      A profile with no `pivot_to_tip` is **refused, not defaulted** — the tip position is genuinely
+      unknown and assuming one would draw the path in the wrong place.
+
+- [x] **T4.3 — Rotary-aware step sizing** — *already delivered in T2.3, verified here*
+      `interpolate.rotary_step_count` derives steps from `tolerance.rotary_chord` at the greater of the two
+      endpoints' distances from the centreline — path radius as the proxy for part radius, there being no
+      stock model. Its docstring records why it was built early: *"so that per-step interpolation is real
+      from M2 onward."*
+      That decision is what makes M4 unable to commit the endpoint-only error: `SegmentStore.rot` carries a
+      rotary value for **every segment endpoint**, so the transform is per-step by construction rather than
+      by care. `test_a_wrapped_helix_is_not_a_straight_chord` **measures** the difference — per-step stays on
+      the cylinder to 1e-9, while the endpoint-only chord cuts to less than half the radius.
+
+- [x] **T4.4 — `tests/test_kinematics.py`** — *done*
+      **25 tests, all against closed-form expectations** rather than recorded output, as PLAN requires. A
+      golden would happily lock in a mirrored wrap: it knows only that the output changed, never that it was
+      ever right. Checks include right-handedness per axis against hand-computed quarter turns, rigidity
+      (distance from the axis preserved), a full turn as the identity, a centreline point never moving, a
+      wrap tracing a circle of the correct radius, and the tip on a sphere about the pivot.
+
+- [x] **T4.5 — Display toggle** — *done*
+      `View → Part coordinates` (Ctrl+P), transform computed **on demand** since it costs 24 MB at 500k.
+      **The viewport owns the display mode** and batching, the highlight, picking and the camera all read it
+      — each consulting `store.lin` independently is how three end up in one frame and one in another.
+      **Found a trap worth the design effort:** toggling redraws everything **without moving the camera**,
+      which defeats a matrix-only picking cache — it would serve a machine-coordinate projection while part
+      coordinates were on screen, so a click would select whatever segment sat at those pixels *before* the
+      wrap. `part_coordinates` is now part of the cache key.
+      A profile that cannot describe the transform **reverts the toggle and says why**; a checkbox that lies
+      about what is on screen is worse than one that refuses.
+
+- [x] **T4.6 — Milestone gate** — *M4 COMPLETE*
+      **DoD met:** a four-turn wrapping program (radius 25, A sweeping 0→1440°, 451 segments) renders in
+      part coordinates at **radius 25.000000 with a maximum deviation of 3.55e-15 mm** — floating-point
+      noise. The same program in machine coordinates is the straight line at constant Y that it should be.
+      That contrast is the milestone. Orbiting in part coordinates: **1054 fps**.
+      Verified against closed-form geometry, not recorded output.
+      **1090 tests pass**, ruff clean.
+
+**M4 COMPLETE** — all 6 tasks.
+
+- **Mutation-verified across M4 — 8 mutants, and one genuinely survived at first.** Caught: table sign
+      flipped, centreline offset ignored, head tip not translating, an unknown tip length fabricated, a
+      left-handed rotation, one rotation for the whole path (the endpoint-only failure), and the display mode
+      dropped from the picking cache key.
+      **The survivor:** drawing the highlight from `store.lin` while part coordinates were displayed changed
+      no test result, because the test checked only the *count* of highlighted segments. A highlight floating
+      away from its toolpath is visible on screen but nothing asserted it. Now asserted on the uploaded
+      **vertices**, in both directions, with a guard that the test program actually distinguishes the frames.
+      **A process note:** my mutation harness restored two of three files, so one mutation leaked into the
+      next run and made a survivor look caught. Worse, recovering with `git checkout` reverted uncommitted
+      T4.5 work, which had to be re-applied. Back up every file a run touches, and never use `git checkout`
+      as an undo while work is uncommitted.
 
 ---
 

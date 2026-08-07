@@ -356,3 +356,56 @@ def test_picking_a_visible_segment_returns_a_valid_index(viewport, profile) -> N
 def test_the_pick_matrix_is_a_four_by_four(viewport, profile) -> None:
     viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
     assert viewport.pick_matrix().shape == (4, 4)
+
+
+def test_the_highlight_is_drawn_in_the_coordinates_on_screen(viewport, profile) -> None:
+    """Asserted on the uploaded **vertices**, not the segment count.
+
+    A count-only check passes even when the highlight is drawn in machine coordinates while part
+    coordinates are displayed — a highlight floating away from the toolpath it belongs to. Mutation
+    testing found exactly that hole: forcing `store.lin` here changed no test result.
+    """
+    from foursight.machine.kinematics import apply_display_transform
+
+    sim = simulation("G21 G90 G94\nG0 Y25 Z0\nG1 X40 A180 F600\n", profile)
+    store = sim.store
+    apply_display_transform(store, profile.kinematics)
+    mask = store.line == 3
+    assert mask.any(), "the wrapping move produced no segments"
+
+    viewport.set_simulation(sim, use_part_coordinates=True)
+    viewport.set_highlight(store, mask)
+    uploaded = np.asarray(viewport._highlight.pos, dtype=np.float64)
+
+    expected_part = store.lin_part[mask].reshape(-1, 3)
+    expected_machine = store.lin[mask].reshape(-1, 3)
+    assert not np.allclose(expected_part, expected_machine), (
+        "this program does not distinguish the two frames, so the test proves nothing"
+    )
+    assert np.allclose(uploaded, expected_part, atol=1e-3)
+
+
+def test_the_highlight_follows_a_switch_back_to_machine_coordinates(viewport, profile) -> None:
+    """Both directions: switching off must redraw in machine coordinates, not leave the wrapped path."""
+    from foursight.machine.kinematics import apply_display_transform
+
+    sim = simulation("G21 G90 G94\nG0 Y25 Z0\nG1 X40 A180 F600\n", profile)
+    store = sim.store
+    apply_display_transform(store, profile.kinematics)
+    mask = store.line == 3
+
+    viewport.set_simulation(sim, use_part_coordinates=True)
+    viewport.set_highlight(store, mask)
+    viewport.set_simulation(sim, use_part_coordinates=False)
+    viewport.set_highlight(store, mask)
+    uploaded = np.asarray(viewport._highlight.pos, dtype=np.float64)
+    assert np.allclose(uploaded, store.lin[mask].reshape(-1, 3), atol=1e-3)
+
+
+def test_highlighting_part_coordinates_without_a_transform_is_refused(viewport, profile) -> None:
+    """Falling back to `lin` would draw the selection in a frame the toolpath is not in."""
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.part_coordinates = True  # as if a toggle had been applied without transforming
+    with pytest.raises(ValueError, match="no display transform"):
+        viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
