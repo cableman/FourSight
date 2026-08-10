@@ -40,12 +40,14 @@ from foursight.gui.background import BufferLoader, ProgramLoader
 from foursight.gui.diagnostics_panel import DiagnosticsPanel
 from foursight.gui.diff_dialog import DiffDialog, RefusalDialog
 from foursight.gui.editor import CodeEditor
+from foursight.gui.profile_dialog import ProfileDialog
 from foursight.gui.selection import LineSelection, select_line
 from foursight.gui.session import OpenedProgram
 from foursight.gui.timeline_bar import TimelineBar
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.kinematics import KinematicsError, apply_display_transform
-from foursight.machine.profile import MachineProfile
+from foursight.machine.profile import MachineProfile, default_profile_path
+from foursight.machine.profile_doc import ProfileDocument
 
 GCODE_FILTER = "G-code (*.nc *.ngc *.gcode *.tap *.cnc);;All files (*)"
 _BANNER_STYLE = "background: #7a2a12; color: #ffe9c9; padding: 5px 9px; font-weight: 600;"
@@ -54,10 +56,21 @@ _BANNER_STYLE = "background: #7a2a12; color: #ffe9c9; padding: 5px 9px; font-wei
 class MainWindow(QMainWindow):
     """Open a G-code file and look at its toolpath."""
 
-    def __init__(self, profile: MachineProfile, *, block_delete: bool = False) -> None:
+    def __init__(
+        self,
+        profile: MachineProfile,
+        *,
+        block_delete: bool = False,
+        profile_document: ProfileDocument | None = None,
+    ) -> None:
         super().__init__()
         self.profile = profile
         self.block_delete = block_delete
+        # The profile as editable text. Passed in by `app.py`, which has already folded any --dialect
+        # override into it; re-read from the file when absent, which is what a test constructing a
+        # window from a bare profile gets.
+        self._document = profile_document
+        self._profile_dialog: ProfileDialog | None = None
         self.program: OpenedProgram | None = None
         self._last_directory = str(Path.home())
         self._loader: ProgramLoader | None = None
@@ -146,6 +159,8 @@ class MainWindow(QMainWindow):
         self._add(file_menu, "&Open…", QKeySequence.Open, self.prompt_for_file)
         self.reload_action = self._add(file_menu, "&Reload", QKeySequence.Refresh, self.reload)
         self.reload_action.setEnabled(False)
+        file_menu.addSeparator()
+        self._add(file_menu, "&Machine profile…", QKeySequence("Ctrl+M"), self.show_profile_dialog)
         file_menu.addSeparator()
         self._add(file_menu, "&Quit", QKeySequence.Quit, self.close)
 
@@ -523,6 +538,64 @@ class MainWindow(QMainWindow):
         self._loading_path = self.program.path if self.program else None
         self._set_busy(True, message)
         self._loader.start()
+
+    # ------------------------------------------------------------------ machine profile (T8.2)
+
+    def show_profile_dialog(self) -> "ProfileDialog":
+        """Open the profile editor, reusing the one instance so unapplied edits survive a peek.
+
+        Non-modal on purpose: the whole point is to change a limit and watch the diagnostics list
+        respond, which a modal dialog would hide behind itself.
+        """
+        if self._profile_dialog is None:
+            self._profile_dialog = ProfileDialog(
+                self._profile_document(), self.profile.path, parent=self
+            )
+            self._profile_dialog.applied.connect(self._on_profile_applied)
+        self._profile_dialog.show()
+        self._profile_dialog.raise_()
+        return self._profile_dialog
+
+    def _profile_document(self) -> ProfileDocument:
+        """The loaded profile as editable text.
+
+        Prefers the document `app.py` resolved, which already carries any `--dialect` override. Falls
+        back to re-reading the file, so the editor shows the comments and the *as-written* values — an
+        inch profile's `max_feed = 100.0`, not the 2540.0 the loaded profile holds. A profile with no
+        readable path falls back to the shipped file, which is where a pathless profile came from.
+        """
+        if self._document is not None:
+            return self._document
+        source = self.profile.path or default_profile_path()
+        try:
+            self._document = ProfileDocument.from_text(source.read_text(encoding="utf-8"))
+        except OSError:
+            self._document = ProfileDocument.from_text(
+                default_profile_path().read_text(encoding="utf-8")
+            )
+        return self._document
+
+    def _on_profile_applied(self, document: ProfileDocument) -> None:
+        """Swap the profile and re-run everything, exactly as applying a fix does.
+
+        A profile change is not a display setting: `[dialect]` decides how the text is *parsed*,
+        `[kinematics]` decides the geometry, and every verifier limit reads from it. Re-running the
+        whole pipeline is the only way to keep the picture, the diagnostics and the profile describing
+        one machine — and it is the same threaded path T2.9 already made cheap.
+
+        `lin_part` from the old profile's kinematics dies with the old store, and `_show` clears the
+        part-coordinates toggle, so a changed rotary mount cannot leave a stale transform on screen.
+        """
+        source = (
+            self._profile_dialog.path if self._profile_dialog is not None else self.profile.path
+        )
+        self.profile = document.profile(path=source)
+        self._document = document
+        name = self.profile.name
+        if self.program is None:
+            self.statusBar().showMessage(f"Machine profile: {name}")
+            return
+        self._reload_from_buffer(self.editor.toPlainText(), f"Re-checking against {name}…")
 
     # ------------------------------------------------------------------ display transform (T4.5)
 

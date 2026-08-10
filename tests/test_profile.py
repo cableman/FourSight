@@ -228,7 +228,9 @@ def test_absent_limits_are_none_not_invented() -> None:
     profile = load_profile_text(MINIMAL)
     assert profile.limits.max_feed is None
     assert profile.limits.max_spindle_rpm is None
+    assert profile.limits.max_plunge_feed is None
     assert profile.safety.min_clearance_z is None
+    assert profile.stock is None
     assert profile.axes == {}
 
 
@@ -370,3 +372,176 @@ def test_profile_defaults_are_not_shared_between_instances() -> None:
     second = MachineProfile()
     first.axes["X"] = load_profile(DEFAULT_PROFILE).axes["X"]
     assert second.axes == {}
+
+
+# --------------------------------------------------------------------------- [stock] (M7)
+
+STOCK = """
+[machine]
+units = "%s"
+[stock]
+min = [0.0, 0.0, -20.0]
+max = [100.0, 80.0, 0.0]
+"""
+
+
+def test_box_stock_bounds_are_loaded() -> None:
+    stock = load_profile_text(STOCK % "mm").stock
+    assert stock is not None
+    assert stock.min == (0.0, 0.0, -20.0)
+    assert stock.max == (100.0, 80.0, 0.0)
+
+
+def test_stock_bounds_are_lengths_and_scale_on_an_inch_profile() -> None:
+    stock = load_profile_text(STOCK % "inch").stock
+    assert stock is not None
+    assert stock.max == (100.0 * INCH_TO_MM, 80.0 * INCH_TO_MM, 0.0)
+    assert stock.min == (0.0, 0.0, -20.0 * INCH_TO_MM)
+
+
+@pytest.mark.parametrize("present", ["min", "max"])
+def test_a_half_specified_stock_box_is_refused(present: str) -> None:
+    """Neither bound is completed from the other.
+
+    ±infinity would declare the whole machine envelope to be stock and zero would declare a box
+    nothing can intersect. Either way the user believes they configured a check that is in fact
+    reporting on a different solid.
+    """
+    text = f'[machine]\nunits = "mm"\n[stock]\n{present} = [0.0, 0.0, 0.0]\n'
+    with pytest.raises(ProfileError, match="needs min, max"):
+        load_profile_text(text)
+
+
+def test_an_empty_stock_section_is_refused_rather_than_silently_doing_nothing() -> None:
+    """Written deliberately, and configuring nothing — the same trap as a half-specified box."""
+    with pytest.raises(ProfileError, match=r"\[stock\]"):
+        load_profile_text('[machine]\nunits = "mm"\n[stock]\n')
+
+
+def test_no_stock_section_at_all_is_simply_absent() -> None:
+    assert load_profile_text(MINIMAL).stock is None
+
+
+def test_stock_min_above_max_is_refused() -> None:
+    text = '[machine]\nunits = "mm"\n[stock]\nmin = [0.0, 90.0, -20.0]\nmax = [100.0, 80.0, 0.0]\n'
+    with pytest.raises(ProfileError, match="min y 90.0 exceeds max 80.0"):
+        load_profile_text(text)
+
+
+@pytest.mark.parametrize("value", ["[0.0, 0.0]", "[0.0, 0.0, 0.0, 0.0]", "5.0", '"x"'])
+def test_a_stock_bound_that_is_not_three_numbers_is_refused(value: str) -> None:
+    text = f'[machine]\nunits = "mm"\n[stock]\nmin = {value}\nmax = [1.0, 1.0, 1.0]\n'
+    with pytest.raises(ProfileError, match="list of 3 numbers"):
+        load_profile_text(text)
+
+
+def test_an_unknown_stock_key_is_reported() -> None:
+    text = '[machine]\nunits = "mm"\n[stock]\nmin = [0,0,0]\nmax = [1,1,1]\nmaterial = "6082"\n'
+    assert "stock.material" in load_profile_text(text).unknown_keys
+
+
+def test_a_degenerate_stock_box_is_allowed() -> None:
+    """A zero-thickness plate is a real thing to clamp down, and equal bounds are not a mistake."""
+    text = '[machine]\nunits = "mm"\n[stock]\nmin = [0.0, 0.0, 0.0]\nmax = [100.0, 80.0, 0.0]\n'
+    stock = load_profile_text(text).stock
+    assert stock is not None and stock.min[2] == stock.max[2] == 0.0
+
+
+def test_max_plunge_feed_is_a_rate_and_scales_on_an_inch_profile() -> None:
+    text = '[machine]\nunits = "inch"\n[limits]\nmax_plunge_feed = 12.0\n'
+    assert load_profile_text(text).limits.max_plunge_feed == 12.0 * INCH_TO_MM
+
+
+# --------------------------------------------------------------------- cylindrical stock (M9)
+
+CYLINDER = """
+[machine]
+units = "%s"
+[stock]
+shape = "cylinder"
+diameter = 50.0
+length = 200.0
+axis_min = 0.0
+"""
+
+
+def test_a_cylinder_is_loaded() -> None:
+    from foursight.machine.profile import StockCylinder
+
+    stock = load_profile_text(CYLINDER % "mm").stock
+    assert isinstance(stock, StockCylinder)
+    assert (stock.diameter, stock.length, stock.axis_min) == (50.0, 200.0, 0.0)
+    assert stock.radius == 25.0
+    assert stock.axis_max == 200.0
+
+
+def test_every_cylinder_key_is_a_length_and_scales_on_an_inch_profile() -> None:
+    """Diameter, length and the axial position are all lengths — none is an angle or a count."""
+    stock = load_profile_text(CYLINDER % "inch").stock
+    assert stock.diameter == 50.0 * INCH_TO_MM
+    assert stock.length == 200.0 * INCH_TO_MM
+    assert stock.radius == 25.0 * INCH_TO_MM
+
+
+def test_a_cylinder_is_inferred_from_its_keys_without_a_shape() -> None:
+    """A `[stock]` written before cylinders existed still means a box; one with a diameter does not."""
+    from foursight.machine.profile import StockBox, StockCylinder
+
+    text = '[machine]\nunits = "mm"\n[stock]\ndiameter = 50.0\nlength = 200.0\naxis_min = 0.0\n'
+    assert isinstance(load_profile_text(text).stock, StockCylinder)
+    assert isinstance(load_profile_text(STOCK % "mm").stock, StockBox)
+
+
+@pytest.mark.parametrize("absent", ["diameter", "length", "axis_min"])
+def test_a_half_specified_cylinder_is_refused(absent: str) -> None:
+    text = "\n".join(
+        line for line in (CYLINDER % "mm").splitlines() if not line.startswith(f"{absent} ")
+    )
+    with pytest.raises(ProfileError, match=f"{absent}.*absent|needs diameter"):
+        load_profile_text(text)
+
+
+def test_a_box_key_under_a_cylinder_is_refused_rather_than_ignored() -> None:
+    """A key from the other shape looks configured and does nothing, which is the worst outcome."""
+    text = (CYLINDER % "mm") + "min = [0.0, 0.0, 0.0]\n"
+    with pytest.raises(ProfileError, match="which cylinder stock does not use"):
+        load_profile_text(text)
+
+
+def test_a_cylinder_key_under_a_box_is_refused() -> None:
+    text = (STOCK % "mm") + 'shape = "box"\ndiameter = 50.0\n'
+    with pytest.raises(ProfileError, match="which box stock does not use"):
+        load_profile_text(text)
+
+
+def test_a_declared_shape_is_checked_against_the_keys_not_trusted() -> None:
+    """The two disagreeing is how a cylinder gets read as a box."""
+    text = (STOCK % "mm") + 'shape = "cylinder"\n'
+    with pytest.raises(ProfileError):
+        load_profile_text(text)
+
+
+def test_an_unknown_shape_is_refused() -> None:
+    text = '[machine]\nunits = "mm"\n[stock]\nshape = "sphere"\n'
+    with pytest.raises(ProfileError, match="shape must be one of"):
+        load_profile_text(text)
+
+
+@pytest.mark.parametrize("key", ["diameter", "length"])
+@pytest.mark.parametrize("value", ["0.0", "-10.0"])
+def test_a_cylinder_with_no_volume_is_refused(key: str, value: str) -> None:
+    """It describes no solid, and a check against nothing passes every program while looking set."""
+    text = (
+        (CYLINDER % "mm")
+        .replace(f"{key} = 50.0", f"{key} = {value}")
+        .replace(f"{key} = 200.0", f"{key} = {value}")
+    )
+    with pytest.raises(ProfileError, match="must be greater than zero"):
+        load_profile_text(text)
+
+
+def test_a_negative_axis_min_is_fine() -> None:
+    """Unlike the diameter, the axial position is a coordinate and may sit either side of zero."""
+    text = (CYLINDER % "mm").replace("axis_min = 0.0", "axis_min = -100.0")
+    stock = load_profile_text(text).stock
+    assert stock.axis_min == -100.0 and stock.axis_max == 100.0

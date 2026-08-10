@@ -240,6 +240,7 @@ MINIMAL = '[machine]\nunits = "mm"\n'
         ("process.spindle-too-high", "S999999 M3\nG1 X1 F100\n"),
         ("process.rapid-below-clearance", "G0 Z-500.0\n"),
         ("process.toolchange-without-retract", "T1 M6\n"),
+        ("process.plunge-feed-too-high", "G0 Z10\nG1 Z-5 F99999\n"),
     ],
 )
 def test_an_unconfigured_limit_disables_its_check(rule_id: str, body: str) -> None:
@@ -279,6 +280,119 @@ def test_clearance_message_uses_inches_for_an_inch_program() -> None:
     body = "G20 G90 G54\nS8000 M3\nG0 Z0.01\nG1 X1 F10\nM30\n"
     found = only(diagnose(body, inch), "process.rapid-below-clearance")
     assert " in" in found[0].message
+
+
+# --------------------------------------------------------------------------- plunge feed (M7)
+
+PLUNGE_LIMIT = """
+[machine]
+units = "mm"
+[limits]
+max_plunge_feed = 300.0
+"""
+
+# Above the plunge limit but well under any contouring limit, which is the whole point: this is a
+# feed rate that is perfectly reasonable in XY and dangerous straight down.
+FAST = 1200.0
+
+
+@pytest.fixture(scope="module")
+def plunge_profile():
+    return load_profile_text(PLUNGE_LIMIT)
+
+
+def _plunges(body: str, profile):
+    text = "G21 G90 G17 G94 G54\nS8000 M3\nG0 X0 Y0 Z10\n" + body + "M30\n"
+    return of(diagnose(text, profile), "process.plunge-feed-too-high")
+
+
+def test_a_straight_down_plunge_above_the_limit_is_reported(plunge_profile) -> None:
+    found = _plunges(f"G1 Z-5 F{FAST:g}\n", plunge_profile)
+    assert len(found) == 1
+    assert found[0].severity is Severity.WARNING
+    assert "1200 mm/min" in found[0].message
+    assert "300 mm/min" in found[0].message
+
+
+def test_a_plunge_at_or_below_the_limit_is_not_reported(plunge_profile) -> None:
+    assert _plunges("G1 Z-5 F300\n", plunge_profile) == []
+
+
+def test_a_ramp_is_not_a_plunge(plunge_profile) -> None:
+    """The rule's central judgement: ramping in at the contouring feed is correct practice.
+
+    Reporting it would fire on most well-written programs, which is how a user learns to ignore a
+    diagnostic — so a block that moves X or Y as well as Z is left alone however fast it is.
+    """
+    assert _plunges(f"G1 X20 Y20 Z-5 F{FAST:g}\n", plunge_profile) == []
+
+
+def test_a_helical_entry_is_not_a_plunge(plunge_profile) -> None:
+    """G2/G3 with Z motion is the *recommended* way into material."""
+    assert _plunges(f"G1 X10 F{FAST:g}\nG2 X10 Y0 I-5 J0 Z-5\n", plunge_profile) == []
+
+
+def test_a_coordinated_rotary_move_is_not_a_plunge(plunge_profile) -> None:
+    assert _plunges(f"G1 Z-5 A90 F{FAST:g}\n", plunge_profile) == []
+
+
+def test_retracting_is_not_a_plunge(plunge_profile) -> None:
+    """Z must be strictly decreasing; feeding *up* at any rate hits nothing."""
+    assert _plunges(f"G1 Z-5 F100\nG1 Z10 F{FAST:g}\n", plunge_profile) == []
+
+
+def test_a_plunge_inherits_the_active_feed(plunge_profile) -> None:
+    """The rate usually comes from an earlier block, so reading this block's F word would miss it."""
+    found = _plunges(f"G1 X10 F{FAST:g}\nG1 Z-5\n", plunge_profile)
+    assert len(found) == 1
+    assert found[0].line == 5, "reported at the plunge, not at the block that set F"
+
+
+def test_unchanged_xy_words_still_count_as_a_plunge(plunge_profile) -> None:
+    """Motion is judged from positions, not words: a post may restate X and Y unchanged."""
+    assert len(_plunges(f"G1 X0 Y0 Z-5 F{FAST:g}\n", plunge_profile)) == 1
+
+
+def test_an_incremental_plunge_is_recognized(plunge_profile) -> None:
+    assert len(_plunges(f"G91\nG1 Z-5 F{FAST:g}\nG90\n", plunge_profile)) == 1
+
+
+def test_one_diagnostic_per_distinct_feed_rate(plunge_profile) -> None:
+    """A drilling job repeats one plunge rate; 200 identical warnings would bury everything else."""
+    body = "".join(f"G0 X{n * 10} Y0 Z10\nG1 Z-5 F{FAST:g}\nG0 Z10\n" for n in range(4))
+    found = _plunges(body, plunge_profile)
+    assert len(found) == 1
+    assert "3 more like it" in found[0].message
+
+
+def test_two_different_offending_rates_are_two_diagnostics(plunge_profile) -> None:
+    body = f"G1 Z-5 F{FAST:g}\nG0 Z10\nG1 Z-5 F900\n"
+    assert len(_plunges(body, plunge_profile)) == 2
+
+
+@pytest.mark.parametrize("feed_mode", ["93", "95"])
+def test_the_check_is_silent_where_f_is_not_a_rate_in_mm_per_minute(feed_mode: str) -> None:
+    """Under G93 F is 1/minutes and under G95 it is mm/rev; neither compares to a mm/min ceiling.
+
+    Converting either would mean inventing a block length or a spindle speed, so the rule declines.
+    """
+    profile = load_profile_text(PLUNGE_LIMIT)
+    text = f"G21 G90 G17 G{feed_mode} G54\nS8000 M3\nG0 Z10\nG1 Z-5 F{FAST:g}\nM30\n"
+    assert not of(diagnose(text, profile), "process.plunge-feed-too-high")
+
+
+def test_a_plunge_from_an_unestablished_z_is_not_judged(plunge_profile) -> None:
+    """No position, no claim — this module's rule, applied to "is it going down?"."""
+    text = f"G21 G90 G17 G94 G54\nS8000 M3\nG1 Z-5 F{FAST:g}\nM30\n"
+    assert not of(diagnose(text, plunge_profile), "process.plunge-feed-too-high")
+
+
+def test_the_plunge_message_uses_the_programs_declared_units() -> None:
+    inch = load_profile_text(PLUNGE_LIMIT)
+    text = "G20 G90 G17 G94 G54\nS8000 M3\nG0 Z1\nG1 Z-0.2 F50\nM30\n"
+    found = only(diagnose(text, inch), "process.plunge-feed-too-high")
+    assert "in/min" in found[0].message
+    assert "mm/min" not in found[0].message
 
 
 # --------------------------------------------------------------------------- the baseline

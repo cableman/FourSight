@@ -60,12 +60,23 @@ _DEFAULT_ROTARY_CHORD = 0.01
 _DEFAULT_ROTARY_WRAP_WARN = 360.0
 
 _SECTIONS = frozenset(
-    {"machine", "limits", "tolerance", "axes", "offsets", "kinematics", "safety", "dialect"}
+    {
+        "machine",
+        "limits",
+        "tolerance",
+        "axes",
+        "offsets",
+        "kinematics",
+        "safety",
+        "stock",
+        "dialect",
+    }
 )
 _KEYS: dict[str, frozenset[str]] = {
     "machine": frozenset({"name", "units"}),
     "dialect": frozenset({"name", "arc_centre", "dwell_units"}),
-    "limits": frozenset({"max_feed", "max_spindle_rpm", "rotary_wrap_warn"}),
+    "limits": frozenset({"max_feed", "max_spindle_rpm", "max_plunge_feed", "rotary_wrap_warn"}),
+    "stock": frozenset({"shape", "min", "max", "diameter", "length", "axis_min"}),
     "tolerance": frozenset({"arc_radius_mismatch", "arc_chord", "rotary_chord"}),
     "kinematics": frozenset({"rotary_mount", "rotary_axis", "centerline_offset", "pivot_to_tip"}),
     "safety": frozenset(
@@ -125,6 +136,10 @@ class Tolerances:
 class Limits:
     max_feed: float | None = None  # mm/min; None disables the feed check
     max_spindle_rpm: float | None = None  # None disables the spindle check
+    # mm/min above which a straight-down G1 is suspicious. None by default and absent from the
+    # shipped profile: a sane plunge rate is a property of the tool and the material, not of the
+    # machine, so there is no generic number to invent here.
+    max_plunge_feed: float | None = None
     rotary_wrap_warn: float = _DEFAULT_ROTARY_WRAP_WARN  # degrees in one block before warning
 
 
@@ -141,6 +156,54 @@ class Safety:
     min_clearance_z: float | None = None  # None disables the rapid-clearance warning
     require_spindle_before_cut: bool = True
     retract_before_toolchange: bool = True
+
+
+# Neither stock shape is a material-removal model. Both say where the solid *started*, never what is
+# left of it, which is why the rule reading them can only warn (PLAN.md § Stock and plunge checks).
+# Both are in **machine** coordinates, matching `[axes]` and `[offsets]` and the frame verification
+# runs in. With `g54 = [0, 0, 0, 0]` the two frames coincide, which is the common case, but nothing
+# here may depend on that.
+
+
+@dataclass(slots=True, frozen=True)
+class StockBox:
+    """A rectangular blank, as an axis-aligned box. The 3-axis case."""
+
+    min: tuple[float, float, float]
+    max: tuple[float, float, float]
+
+
+@dataclass(slots=True, frozen=True)
+class StockCylinder:
+    """A round blank on the rotary axis. The 4-axis case, and the reason it is worth a second shape.
+
+    **Its axis is not stated here** — it is `[kinematics].rotary_axis` through
+    `[kinematics].centerline_offset`, and that is deliberate rather than a shortcut. A cylinder centred
+    on the rotary axis maps onto *itself* under any A rotation, so the interference check stays exact at
+    every angle; an off-axis cylinder would not, and offering the option would invite a profile whose
+    check is silently wrong the moment the part turns. Concentric is the only case that can be right,
+    so it is the only case that can be expressed.
+
+    ``axis_min`` is the machine coordinate, along the rotary axis, of the end of the blank nearer that
+    axis's minimum — for `rotary_axis = "x"`, the smaller machine X of the two ends.
+    """
+
+    diameter: float
+    length: float
+    axis_min: float
+
+    @property
+    def radius(self) -> float:
+        return self.diameter / 2.0
+
+    @property
+    def axis_max(self) -> float:
+        return self.axis_min + self.length
+
+
+#: Either stock shape. Kept as a union rather than one dataclass with a discriminator so that a rule
+#: reading `stock.min` cannot compile against a cylinder.
+StockEnvelope = StockBox | StockCylinder
 
 
 @dataclass(slots=True, frozen=True)
@@ -185,6 +248,9 @@ class MachineProfile:
     offsets: dict[str, WorkOffset] = field(default_factory=dict)  # keyed '54'..'59'
     kinematics: Kinematics = field(default_factory=Kinematics)
     safety: Safety = field(default_factory=Safety)
+    # None means "no stock declared", which disables the interference check rather than assuming a
+    # box. A guessed envelope would report confidently on a solid that is not on the table.
+    stock: StockEnvelope | None = None
     dialect: DialectSettings = field(default_factory=DialectSettings)
     # Reported rather than raised, so a newer profile still loads — but the CLI must surface these:
     # `max_fed = 3000` is a typo that would otherwise silently disable the feed check.
@@ -260,6 +326,7 @@ def _build(data: dict, *, path: Path | None) -> MachineProfile:
         offsets=_offsets(data.get("offsets", {}), scale, unknown),
         kinematics=kinematics,
         safety=_safety(_section(data, "safety", unknown), scale),
+        stock=_stock(_section(data, "stock", unknown), scale, present="stock" in data),
         dialect=_dialect(_section(data, "dialect", unknown)),
         unknown_keys=tuple(unknown),
         path=path,
@@ -282,9 +349,105 @@ def _limits(section: dict, scale: float) -> Limits:
     return Limits(
         max_feed=_scaled(section.get("max_feed"), scale),
         max_spindle_rpm=_scaled(section.get("max_spindle_rpm"), 1.0),  # rpm is not a length
+        max_plunge_feed=_scaled(section.get("max_plunge_feed"), scale),
         rotary_wrap_warn=_or_default(
             section.get("rotary_wrap_warn"), 1.0, _DEFAULT_ROTARY_WRAP_WARN
         ),
+    )
+
+
+#: The keys that belong to each `[stock].shape`. A key from the wrong list is refused rather than
+#: ignored: `diameter` under a box would look configured and do nothing.
+_BOX_KEYS = ("min", "max")
+_CYLINDER_KEYS = ("diameter", "length", "axis_min")
+_STOCK_SHAPES = ("box", "cylinder")
+
+
+def _stock(section: dict, scale: float, *, present: bool) -> StockEnvelope | None:
+    """Build `[stock]`, refusing anything half-specified or belonging to the other shape.
+
+    Every key of the chosen shape is mandatory, and none is completed from the others. Defaulting an
+    absent box bound to ±infinity would declare the whole machine envelope to be stock; defaulting it
+    to zero would declare a solid nothing can intersect. Both leave the user believing they had
+    configured a check that is in fact reporting on a different solid, so a partial section raises.
+
+    ``shape`` may be omitted and is then **inferred from the keys present**, so a `[stock]` written
+    before cylinders existed still means what it did. Stating it explicitly is checked against the keys
+    rather than trusted, because the two disagreeing is how a cylinder gets read as a box.
+
+    ``present`` distinguishes an absent section from an empty one, which `_section` cannot: no
+    `[stock]` at all means "no stock declared" and disables the check, while an empty `[stock]` header
+    is the same trap as a half-specified one — written deliberately, and silently doing nothing.
+    """
+    if not present:
+        return None
+    shape = _stock_shape(section)
+    if shape == "cylinder":
+        _refuse_foreign_keys(section, _BOX_KEYS, shape)
+        return _stock_cylinder(_required(section, _CYLINDER_KEYS, shape), scale)
+    _refuse_foreign_keys(section, _CYLINDER_KEYS, shape)
+    return _stock_box(_required(section, _BOX_KEYS, shape), scale)
+
+
+def _stock_shape(section: dict) -> str:
+    declared = section.get("shape")
+    if declared is None:
+        return "cylinder" if any(key in section for key in _CYLINDER_KEYS) else "box"
+    shape = str(declared).lower()
+    if shape not in _STOCK_SHAPES:
+        raise ProfileError(
+            f"[stock].shape must be one of {', '.join(_STOCK_SHAPES)}, got {shape!r}"
+        )
+    return shape
+
+
+def _refuse_foreign_keys(section: dict, foreign: tuple[str, ...], shape: str) -> None:
+    present = [key for key in foreign if key in section]
+    if present:
+        raise ProfileError(
+            f"[stock] has {', '.join(present)}, which {shape} stock does not use. A key from the "
+            f"other shape looks configured and does nothing"
+        )
+
+
+def _required(section: dict, keys: tuple[str, ...], shape: str) -> dict:
+    missing = [key for key in keys if key not in section]
+    if missing:
+        raise ProfileError(
+            f"[stock] with shape '{shape}' needs {', '.join(keys)}; {', '.join(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} absent. Completing one by a guess would make the "
+            f"check report on a different solid"
+        )
+    return section
+
+
+def _stock_box(section: dict, scale: float) -> StockBox:
+    bounds = {}
+    for key in _BOX_KEYS:
+        value = section[key]
+        if not isinstance(value, list) or len(value) != 3:
+            raise ProfileError(f"[stock].{key} must be a list of 3 numbers [x, y, z]")
+        bounds[key] = tuple(_number(component) * scale for component in value)
+    for axis, name in enumerate("xyz"):
+        if bounds["min"][axis] > bounds["max"][axis]:
+            raise ProfileError(
+                f"[stock] min {name} {bounds['min'][axis]} exceeds max {bounds['max'][axis]}"
+            )
+    return StockBox(min=bounds["min"], max=bounds["max"])
+
+
+def _stock_cylinder(section: dict, scale: float) -> StockCylinder:
+    """All three keys are lengths along or across the rotary axis, so all three scale.
+
+    A zero or negative diameter or length is refused rather than clamped: it describes no solid, and a
+    check against nothing would pass every program while looking configured.
+    """
+    values = {key: _number(section[key]) * scale for key in _CYLINDER_KEYS}
+    for key in ("diameter", "length"):
+        if values[key] <= 0.0:
+            raise ProfileError(f"[stock].{key} must be greater than zero, got {values[key]:g}")
+    return StockCylinder(
+        diameter=values["diameter"], length=values["length"], axis_min=values["axis_min"]
     )
 
 

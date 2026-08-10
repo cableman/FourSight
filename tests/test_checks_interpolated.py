@@ -245,3 +245,112 @@ def test_interpolated_checking_scales_to_many_segments() -> None:
     assert len(keys) == len(set(keys)), "one diagnostic per line and axis"
     assert len(found) <= 20 * 3, "at most one per line per linear axis"
     assert len(found) < len(store) / 10, "nowhere near one per segment"
+
+
+# ------------------------------------------------------- the stock envelope, simulated (M7)
+#
+# `geometry.rapid-into-stock` is the one rule here that loses nothing without a simulation — a rapid
+# is a straight line, so its endpoints *are* its path. What the interpolated path adds is rapids the
+# endpoint walker never produces at all, a G28's two legs above everything else.
+
+STOCK_ENVELOPE = """
+[machine]
+units = "mm"
+[stock]
+min = [0.0, 0.0, -20.0]
+max = [100.0, 80.0, 0.0]
+[offsets]
+g54 = [0.0, 0.0, 0.0, 0.0]
+[axes.x]
+max_rapid = 5000.0
+home = 0.0
+[axes.y]
+max_rapid = 5000.0
+home = 0.0
+[axes.z]
+max_rapid = 3000.0
+home = 100.0
+[axes.a]
+type = "rotary"
+wrap = true
+max_rapid = 3600.0
+home = 0.0
+"""
+
+STOCK_RULE = "geometry.rapid-into-stock"
+
+TRAVERSE_AT_DEPTH = """G21 G90 G17 G54
+S8000 M3
+G0 X50 Y40 Z10
+G1 Z-3 F200
+G0 X90 Y70
+G0 Z25
+M30
+"""
+
+# G28 with axis words traverses to the intermediate point and then to the reference point. Both legs
+# are rapids and both share one source line, and neither is reachable from block endpoints: the
+# modal motion here is G1, so the endpoint walker does not treat this block as a rapid at all.
+REFERENCE_RETURN = """G21 G90 G17 G54
+S8000 M3
+G0 X50 Y40 Z10
+G1 Z-3 F200
+G28 X90 Y70
+M30
+"""
+
+
+def _stock(program: str, *, interpolated: bool = True):
+    return [
+        d
+        for d in check(program, STOCK_ENVELOPE, interpolated=interpolated)
+        if d.rule_id == STOCK_RULE
+    ]
+
+
+def test_the_simulated_path_finds_the_traverse_at_depth() -> None:
+    found = _stock(TRAVERSE_AT_DEPTH)
+    assert len(found) == 1
+    assert found[0].line == 5
+    assert "-3 mm" in found[0].message
+
+
+def test_the_two_paths_agree_on_an_ordinary_program() -> None:
+    """The endpoint fallback is exact for this rule, so the two must not merely be similar."""
+    simulated = _stock(TRAVERSE_AT_DEPTH)
+    endpoints = _stock(TRAVERSE_AT_DEPTH, interpolated=False)
+    assert [(d.line, d.message) for d in simulated] == [(d.line, d.message) for d in endpoints]
+
+
+def test_only_the_simulated_path_sees_a_reference_return_crossing_the_stock() -> None:
+    """A G28 leg is a rapid that exists nowhere in the block's own words."""
+    assert _stock(REFERENCE_RETURN, interpolated=False) == []
+    found = _stock(REFERENCE_RETURN)
+    assert len(found) == 1
+    assert found[0].line == 5
+
+
+def test_a_multi_leg_rapid_is_one_diagnostic_for_its_line() -> None:
+    """Both G28 legs cross the envelope; the user needs telling once, about line 5."""
+    profile = load_profile_text(STOCK_ENVELOPE)
+    result = parse(REFERENCE_RETURN)
+    store = simulate(result.commands, profile).store
+    legs = int((store.line == 5).sum())
+    assert legs == 2, "the fixture must really produce two legs, or this proves nothing"
+    assert len(_stock(REFERENCE_RETURN)) == 1
+
+
+def test_a_rapid_from_an_unestablished_position_is_not_judged() -> None:
+    """The simulator draws the opening rapid from the machine reference so the picture keeps its
+    approach move. That assumption is fine for a picture and not fine for a diagnostic: reporting it
+    would announce a collision with a position nobody established.
+    """
+    opening_rapid_through_the_stock = "G21 G90 G17 G54\nS8000 M3\nG0 X50 Y40 Z-3\nM30\n"
+    profile = load_profile_text(STOCK_ENVELOPE)
+    result = parse(opening_rapid_through_the_stock)
+    store = simulate(result.commands, profile).store
+    drawn = store.lin[0, 0, :]
+    assert list(drawn) == [0.0, 0.0, 0.0], (
+        "the fixture depends on the simulator assuming the origin"
+    )
+    assert _stock(opening_rapid_through_the_stock) == []

@@ -20,7 +20,10 @@ The dialect is **selectable** — `[dialect].name` in the machine profile, or `-
 
 ## Non-Goals (v1)
 
-- Material removal / stock simulation (voxel cutting) — deferred, see Future
+- Material removal simulation (voxel/dexel cutting) — deferred, see Future. A **fixed stock
+  envelope** is in scope as of M7, and the two are not the same thing: knowing *where the stock sits*
+  is a six-number bounding box, while knowing *what is left of it* needs the whole removal model. The
+  cheap half catches the crash that actually happens — a rapid traversing the part at cutting depth.
 - 5-axis kinematics
 - Post-processor generation or CAM features
 - Controller-specific macro languages (Fanuc Macro B, LinuxCNC O-words) beyond basic tolerance/skip
@@ -69,6 +72,8 @@ FourSight/
 │   ├── machine/
 │   │   ├── state.py         # MachineState: live position + modal groups during simulation
 │   │   ├── profile.py       # MachineProfile loaded from TOML (limits, offsets, kinematics)
+│   │   ├── profile_doc.py   # the profile as EDITABLE TEXT: surgical key edits (NO Qt)
+│   │   ├── profile_schema.py# which keys the profile editor shows, as data (NO Qt)
 │   │   └── kinematics.py    # rotary table vs rotary head transforms
 │   ├── sim/
 │   │   ├── interpolate.py   # lines, arcs (G2/G3 IJK + R), rotary blending → segments
@@ -97,6 +102,7 @@ FourSight/
 │   │   ├── picking.py       # segment ↔ screen hit-testing (see Picking)
 │   │   ├── editor.py        # code pane, line highlighting
 │   │   ├── timeline.py      # play/pause/scrub
+│   │   ├── profile_dialog.py# the machine-profile form, generated from profile_schema
 │   │   └── diagnostics_panel.py
 │   ├── fileio/              # NOT `io/` — that shadows the stdlib module
 │   │   └── loader.py        # file loading, encoding detection, large-file handling
@@ -407,6 +413,9 @@ units = "mm"                # units the values in THIS FILE are expressed in
 max_feed = 3000.0           # mm/min
 max_spindle_rpm = 24000.0
 rotary_wrap_warn = 360.0    # degrees of rotary travel in one block before warning
+# mm/min above which a straight-down G1 plunge is suspicious. Absent by default: this is a property
+# of the tool and the material, not of the machine, so no generic profile can pick a number.
+# max_plunge_feed = 300.0
 
 [tolerance]
 arc_radius_mismatch = 0.005 # mm — |r_start - r_end| above this is an error
@@ -446,6 +455,13 @@ min_clearance_z = 5.0       # rapids below this → warning
 require_spindle_before_cut = true
 retract_before_toolchange = true
 
+# Where the stock sits, as an axis-aligned box in MACHINE coordinates — the same frame as [axes] and
+# [offsets], because that is the frame verification runs in. Absent by default: a shipped profile
+# cannot know what is clamped to the table today. Both bounds are required together.
+# [stock]
+# min = [0.0, 0.0, -20.0]
+# max = [100.0, 80.0, 0.0]
+
 [dialect]
 name = "linuxcnc"           # "linuxcnc" | "mach3"
 # mach3 only — the controller's IJ Mode setting; absent under linuxcnc, where the G-code decides
@@ -478,11 +494,72 @@ real defaults, because tessellation cannot proceed without a number.
   maximum radius from the centerline.
 - **Head mount without `pivot_to_tip` is refused at load time.** The tip translates as the head
   swings, so its path is unknowable without that distance; refusing beats rendering a wrong path.
+- **`[stock]` is machine coordinates, and both bounds are mandatory together.** A half-specified box
+  is refused rather than completed: defaulting the absent bound to ±infinity would silently declare
+  the whole machine envelope to be stock, and defaulting it to zero would declare a degenerate box
+  that nothing can ever intersect. Either way the user would believe they had configured a check that
+  was in fact reporting on a different solid. `min > max` on any component is likewise refused.
 - **Unknown keys are reported, not raised** (`MachineProfile.unknown_keys`), so a profile written
   for a newer version still loads — but the CLI **must** surface them, because `max_fed = 3000` is a
   typo that would otherwise silently disable the feed check.
 - **Zero is a real value.** `value or default` is wrong here: `rotary_wrap_warn = 0` legitimately
   means "warn on any rotary move" and must not become 360.
+
+### Editing the profile in the GUI (M8)
+
+`File → Machine profile…` shows a structured form over the loaded profile, and Apply changes the
+profile **in memory** and re-runs parse → simulate → verify. The alternative — edit a TOML file, restart
+the application — makes every profile-dependent check impractical to try, which is how `[stock]` and
+`max_plunge_feed` came to need this milestone at all.
+
+The form edits **text**, not a `MachineProfile`, and every decision below follows from that:
+
+- **`MachineProfile` values are already converted to mm, so a form must not read them.** An inch profile
+  writing `max_feed = 100.0` loads as 2540.0; populating a form from the profile would show 2540 to
+  someone who typed 100 and convert it *again* on write — a silent 25.4× corruption per round trip.
+  `ProfileDocument` holds the parsed-but-unconverted values, and those are what the widgets show.
+- **Edits are surgical, so comments survive.** `default_4axis.toml` documents every field inline,
+  including which check each one enables and why several are deliberately unset; regenerating TOML from
+  a parsed profile deletes all of it. One key's value is replaced in place, its trailing comment and
+  *its column* are preserved, and everything else in the file is byte-identical. This is the fix
+  engine's rule applied to the profile: never rewrite a file wholesale when a targeted edit will do.
+- **Switching a field off comments its line out rather than deleting it.** That line is the only place
+  the file says what the field means and what a plausible value looks like, and a user who switches
+  `max_plunge_feed` off should find their number still there when they switch it back on. It also gives
+  the toggle a free feature: ticking `[stock]` **reveals the values its commented-out block already
+  held**, so the shipped profile's example becomes the starting point instead of two empty rows.
+- **An optional field has a "set" checkbox, and clearing it writes nothing.** Absence means unknown and
+  disables a check (§ Loading rules), so `max_feed = 0` and no `max_feed` are different machines. A form
+  with no way to express that difference would quietly turn every unset limit into a zero one.
+- **A section whose keys are mandatory together toggles as a unit.** `[stock]` switched off key-by-key
+  would leave a present-but-empty table, which the loader refuses — so the toggle takes the header with
+  it. `Group.toggle` marks this, and a test asserts no *required* field with no default lives outside a
+  toggled group.
+- **The form is generated from `machine/profile_schema.py`.** A new profile key is a new row in that
+  table, not new widget code, and a test asserts the schema and the loader's key tables describe the
+  same set. Drift matters more than it sounds here: a *missing* field in a settings dialog is
+  indistinguishable from a field that does not exist.
+- **Values are edited as free text, not in spin boxes.** The profile mixes `3000.0` with
+  `arc_radius_mismatch = 0.005` and an inch profile's `0.0002`; any single decimal count rounds one of
+  them. A line edit writes back exactly what was typed, and `0.005` cannot come back as
+  `0.005000000000000001`.
+- **A field the loader would refuse is greyed out rather than offered.** `[dialect].arc_centre` and
+  `dwell_units` raise under LinuxCNC and `pivot_to_tip` is required only for a head mount, so
+  `Field.requires` gates them — read from the *widgets*, so choosing Mach3 enables its two settings
+  immediately rather than only after Apply.
+- **Nothing is half-applied.** An unparseable number or a `ProfileError` leaves the previously applied
+  profile in force, shows the reason in the dialog, and re-runs nothing. `Save as…` applies first, so a
+  profile FourSight itself would refuse can never reach the disk.
+
+**The CLI's `--dialect` override is folded into the document at the boundary**, by
+`profile_doc.apply_dialect_override`. Without that the editor would display
+`[dialect].name = "linuxcnc"` while Mach3 was in force, and the first unrelated edit applied would
+revert the override — arcs then drawn with the wrong I/J convention and no diagnostic to say so, which
+is exactly what "the dialect is resolved once, at the CLI/GUI boundary" exists to prevent. This
+**duplicates `with_dialect`/`with_arc_centre`'s precedence rules**, which the headless CLI still applies
+to a `MachineProfile`. That is the second deliberate duplication in the codebase after `sim/timing.py`'s
+two paths, and it is guarded the same way: a test drives both over every combination of starting dialect,
+override and arc-centre and demands the same result, including the same refusals.
 
 ## Supported G-code Subset (v1)
 
@@ -577,8 +654,9 @@ An unrecognized code that never touches position stays a warning. An unrecognize
 
 ### Process checks (T1.8)
 
-`verify/checks/process.py`, 13 rules covering PLAN.md's Process group, plus the G93-without-F check
-the checklist mandates. Position tracking lives in `machine/state.py` — a minimal, **endpoint-only**
+`verify/checks/process.py`, 15 rules covering PLAN.md's Process group, plus the G93-without-F check
+the checklist mandates, the `G4 P` dwell-units warning added in M6 and the plunge-feed check added in
+M7. Position tracking lives in `machine/state.py` — a minimal, **endpoint-only**
 walker built here for the same reason profile loading moved into M1: the verifier cannot run without
 it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated points.
 
@@ -600,7 +678,9 @@ it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated 
 
 ### Geometry checks (T1.9)
 
-`verify/checks/geometry.py`, 5 rules. **Travel limits here are endpoint-only** — T2.8 re-runs the
+`verify/checks/geometry.py`, 6 rules including M7's `geometry.rapid-into-stock`, which lives here
+rather than in a module of its own because it is an interference check on the same interpolated
+geometry, and reuses this module's `SegmentStore` machinery. **Travel limits here are endpoint-only** — T2.8 re-runs the
 same check over interpolated points, because an arc can bulge past a limit mid-sweep while both of
 its endpoints sit comfortably inside it. Nothing in this module proves a program stays in bounds.
 
@@ -620,6 +700,104 @@ its endpoints sit comfortably inside it. Nothing in this module proves a program
 - **`geometry.rotary-wrap` measures the block's *delta*, not its target.** A350 → A400 is a 50°
   move. It assumes A started at 0 when the axis has no established position, and says so: refusing
   to judge would skip the very first block, often the largest move in a wrapping program.
+
+### Stock and plunge checks (M7)
+
+Two rules aimed at one complaint: *the machine hits the stock*. They sit either side of the line this
+plan draws around material removal — neither needs to know what has already been cut away, and that
+is exactly why both are affordable now.
+
+**`process.plunge-feed-too-high`** — a straight-down G1 at more than `limits.max_plunge_feed`.
+
+- **A plunge is Z-only.** A block with X or Y motion as well is a *ramp*, and ramping in at the
+  contouring feed is normal practice, not a defect. Including ramps would make the rule fire on most
+  well-written programs, which is the fastest way to teach a user to ignore a diagnostic. G2/G3 are
+  excluded for the same reason: an arc with Z motion is a helical entry, which is the *recommended*
+  way in.
+- **Only under G94.** Under G93 `F` is inverse time in 1/minutes and under G95 it is mm/rev; neither
+  is comparable to a mm/min ceiling, and scaling one to look like it would be inventing a number. The
+  rule stays silent there rather than converting.
+- **Reported once per distinct offending F value**, at the first plunge that uses it, with a count of
+  the rest. One misconfigured plunge rate in a post is one fact about the program; a drilling job with
+  200 holes would otherwise produce 200 identical warnings and bury everything else.
+- A **warning**, not an error: a rigid machine plunging a centre-cutting drill into aluminium can
+  legitimately exceed any figure a profile would name. The rule reports a suspicion, and suspicion is
+  what the warning tier is for.
+
+**`geometry.rapid-into-stock`** — a G0 whose straight-line path passes through the `[stock]` solid.
+
+`[stock]` has **two shapes**, and the second is not a convenience — it is what makes the rule work at
+all for 4-axis work:
+
+- **`box`** — `min`/`max`, an axis-aligned box. Prismatic work.
+- **`cylinder`** — `diameter`, `length`, `axis_min`. A blank on the rotary axis.
+
+**A cylinder concentric with the rotary axis is rotation-invariant, and a box is not.** That single fact
+decides the design. Under `rotary_mount = "table"` the stock turns with the part, so a box fixed in
+machine coordinates stops describing where the material is and the rule has to refuse (below). A
+cylinder centred on the rotary axis maps onto *itself* under every A rotation, so the interference test
+is exact at every angle and simply runs — which is precisely the case that most needed checking, since a
+wrapped rotary program is where a traverse at depth is hardest to see by eye.
+
+It follows that **the cylinder's axis cannot be stated in `[stock]`**. It is `[kinematics].rotary_axis`
+through `[kinematics].centerline_offset`, because an off-axis cylinder would lose the invariance and its
+check would be silently wrong the moment the part turned. Offering the option would be offering a
+misconfiguration. `axis_min` is the machine coordinate of the end nearer that axis's minimum.
+
+`shape` may be omitted and is inferred from the keys present, so a `[stock]` written before cylinders
+existed still means a box. Stated explicitly it is *checked* against the keys rather than trusted — the
+two disagreeing is how a cylinder gets read as a box. A key belonging to the other shape is refused
+rather than ignored: one that looks configured and does nothing is the worst of the three outcomes.
+
+- **A warning, deliberately, even though a real hit would break the machine.** The `error` tier
+  belongs to claims we can stand behind, and this one has a known false positive: a rapid *inside*
+  the envelope is safe when it moves through material an earlier pass already removed — repositioning
+  at depth within a cleared pocket is ordinary output. Distinguishing the two is precisely the
+  material-removal model that is out of scope, so the honest tier is the one that says "look at this",
+  not the one that says "this is broken".
+- **A withdrawal is never reported**, and this exclusion is what makes the rule usable rather than
+  academic. Every cut ends with a retract from inside the material, so a plain intersection test would
+  report the `G0 Z25` closing every single pass.
+  - For a **box**, withdrawal is a strictly vertical climb, X and Y held. Sound because the box is
+    convex and the direction constant: a straight line leaving it upward never re-enters.
+  - For a **cylinder** it is moving **radially outward**, with no axial motion — and "up" is not merely
+    inadequate here but *dangerous*. A tool working the underside of a bar retracts in **−Z**, which a
+    vertical rule would report; worse, that rule would *exempt* a `+Z` move from below the centreline,
+    which drives straight through the middle of the stock. Monotonically outward, not merely ending
+    further out: radial distance along a straight line is convex, so a segment can end further from the
+    axis than it started while dipping closer in between. The closest approach is at
+    `t = -(p₀·d)/|d|²`, so requiring `p₀·d ≥ 0` puts it at or before the start.
+  - In both cases only the pure form is exempt: a rapid that withdraws *and* moves laterally sweeps
+    through material on the way out and is reported like any other traverse.
+- **Endpoints are exact here, unlike travel limits.** A rapid is a straight line, so there is no
+  mid-move bulge to miss and the no-simulation fallback loses nothing. The interpolated path is still
+  preferred when a simulation exists, because it carries moves the endpoint walker does not model —
+  a G28's two legs above all — and those are rapids that can cross the table.
+- **A rotating table refuses a box and accepts a cylinder.** Under `kinematics.rotary_mount = "table"`
+  the stock turns with A, so a *box* fixed in machine coordinates stops describing it the moment A moves
+  — and it fails in both directions, passing real collisions and inventing imaginary ones. A program that
+  commands rotary motion therefore gets **one** diagnostic saying the envelope cannot be judged, no
+  per-rapid findings, and a pointer to `shape = "cylinder"`. Silently skipping would be worse than
+  either: a verifier that finds nothing is indistinguishable from a clean program. A *cylinder* needs
+  none of this, being rotation-invariant, and `rotary_mount = "head"` leaves the stock still so both
+  shapes run there.
+- **A is assumed to start at 0** when deciding whether the program moves it, matching
+  `geometry.rotary-wrap`. Without that assumption the `A0` on a safe-start line reads as motion and
+  disables the check for nearly every program that has one.
+- **A rapid whose start position was never established is not judged**, on either path. This one is
+  not obvious from the code: the simulator deliberately draws a program's opening rapid *from the
+  machine reference* so the picture is not missing its approach move, and a box whose corner sits at the
+  g54 origin — the usual setup, part zero on the stock corner — then intersects that fabricated
+  segment. Fine for a picture, not fine for a diagnostic announcing a collision with a position nobody
+  established. The endpoint path gets this for free; the segment path needs the source lines filtered,
+  which is also what makes the two paths agree exactly rather than approximately.
+- Aggregated to **one diagnostic per source line**, at the lowest Z the rapid reaches inside the box.
+  That is the number a machinist checks against the top of the stock, and it is also the reason the
+  message quotes both: any intersection at all requires the move to be below the top face.
+- Judged against `lin` (machine coordinates), never `lin_part`. When the active work offset was never
+  configured those coordinates rest on an assumed zero, so the message carries the same
+  "assumes zero work offset" caveat the clearance rules use — there is no tier below `warning` to
+  downgrade to.
 
 ### Unsupported motion codes (v1)
 
@@ -663,6 +841,11 @@ Severity per the taxonomy above.
 - [x] E: Axis travel limit exceeded — **checked on interpolated points, not just block endpoints** (T2.8), since an arc can bulge past a limit mid-sweep. Downgraded to W when the active work offset is unknown. `Program.segments` carries the `SegmentStore` when a simulation has been run; without one the check falls back to endpoints and says so. Measured: an arc with both endpoints at Y90 inside a Y100 limit reaches **Y110** mid-sweep — 66 offending interpolated points, invisible to the endpoint check. Aggregated to **one diagnostic per (line, axis)** at the worst value, so a long breach reports once rather than per point.
 - [ ] E: Rotary travel limit exceeded when `axes.a.wrap = false`
 - [ ] W: Rotary move > `rotary_wrap_warn` degrees in one block (default 360; legitimate for multi-turn wrapping, so tunable)
+- [x] W: Rapid whose path passes through the `[stock]` envelope — `geometry.rapid-into-stock` (M7,
+  cylinder in M9). A warning rather than an error because a rapid inside already-cleared material is
+  legitimate, and telling the two apart needs the material-removal model that is out of scope. A **box**
+  is refused outright, with one diagnostic saying so, when `rotary_mount = "table"` and the program moves
+  A; a **cylinder** on the rotary axis is rotation-invariant and is checked at every angle.
 
 **Process**
 - [ ] E: Cutting move (G1/G2/G3) with no feed rate ever set
@@ -676,6 +859,8 @@ Severity per the taxonomy above.
 - [ ] W: M6 with no tool number ever set
 - [ ] W: Coolant on with spindle off
 - [ ] W: Rapid below `min_clearance_z`
+- [x] W: Straight-down G1 plunge above `limits.max_plunge_feed` — `process.plunge-feed-too-high` (M7).
+  Z-only moves only: a block with XY motion is a ramp, and ramping in at the contouring feed is normal.
 - [ ] W: G91 active at program end
 - [ ] W: Program lacks M2/M30
 - [x] W: `G4 P` over 60 s under a seconds dialect (likely ms/s confusion) — `process.dwell-units-suspect`
@@ -796,6 +981,43 @@ With the data model already 4-axis-shaped, this milestone is the transform itsel
 - `fileio/loader.py` large-file handling hardened (encoding detection, latin-1 fallback, BOM, CRLF)
 - PyInstaller one-dir builds for Ubuntu and Windows, smoke-tested on both
 - README with screenshots
+
+### M6 — Mach3 dialect support
+
+- `parser/dialect.py`: the dialect as a *value* carrying its own code tables, not a flag
+- `[dialect]` in the profile, `--dialect`/`--arc-centre` on the CLI, resolved once at the boundary
+- The four constructs v1 cannot draw: G68/G69, G51/G50, G16/G15 as suppressed spans, M98/M99 as a
+  lost machine position
+- **Done when:** real posted Mach3 output checks clean, and LinuxCNC behaviour is byte-identical
+
+### M7 — Stock envelope and plunge feed
+
+The two halves of "the machine hits the stock" that need no material-removal model.
+
+- `[stock]` in the profile: an axis-aligned box in machine coordinates, all bounds mandatory
+- `geometry.rapid-into-stock`: segment-vs-box intersection over rapids, refused when the part rotates
+- `limits.max_plunge_feed` and `process.plunge-feed-too-high`: Z-only G1 blocks, G94 only
+- **Done when:** a program that rapids across the part at cutting depth is reported, a ramp entry at
+  contouring feed is not, and both checks stay silent on a profile that configures neither
+
+### M8 — Editing the machine profile in the GUI
+
+Prompted by M7: a check nobody can switch on without restarting the application is a check nobody uses.
+
+- `machine/profile_doc.py`: the profile as editable text, with surgical per-key edits
+- `machine/profile_schema.py`: the editable fields as data, cross-checked against the loader
+- `gui/profile_dialog.py`: the generated form; Apply is in-memory, `Save as…` is explicit
+- **Done when:** a limit can be changed and the diagnostics list responds without restarting, an edit to
+  the shipped profile preserves every comment but one, and an unset field writes nothing rather than zero
+
+### M9 — Cylindrical stock on the rotary axis
+
+The shape that makes the M7 check work for the 4-axis programs it was written for.
+
+- `StockBox` / `StockCylinder`, with the shape inferred from the keys and cross-checked when stated
+- Line-versus-capped-cylinder intersection; withdrawal becomes *radially outward*, not upward
+- **Done when:** a wrapped rotary program is checked at every A rather than refused, a retract from
+  under the bar is not reported, and a `+Z` move from below the centreline is
 
 ## Performance Requirements
 
@@ -1435,7 +1657,13 @@ ignore = ["E501"]  # line length handled by formatter
 
 ## Future (post-v1)
 
-- Stock/material removal simulation (dexel-based, likely C extension or OpenCAMLib)
+- Stock **removal** simulation (dexel-based, likely C extension or OpenCAMLib). The fixed envelope
+  landed in M7 and grew a cylinder in M9; what remains is tracking what is left of it, which is what
+  would let `geometry.rapid-into-stock` become an error instead of a warning and would catch the case it
+  cannot see today: a *cutting* move crossing material no earlier pass removed.
+- Further stock shapes. A box and a cylinder cover prismatic and rotary work; a hexagonal bar or a
+  pre-formed casting would each need their own solid, and only the cylinder has the rotation invariance
+  that makes it exact under a turning table.
 - Tool library with geometry, collision checking against fixtures
 - 5-axis (B/C) support — `rot` generalizes to `(N, 2, R)`
 - Canned cycle expansion (G81–G89), cutter compensation, LinuxCNC O-word subset

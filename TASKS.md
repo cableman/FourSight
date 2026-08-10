@@ -1705,7 +1705,179 @@ in one process.**
 
 ---
 
-**Project status: M0–M6 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M7 — Stock envelope and plunge feed
+
+Prompted by a user report — *the machine "hits" the stock when milling* — and scoped to the two halves
+of that complaint which need no material-removal model. `PLAN.md` § Stock and plunge checks owns the
+reasoning; § Non-Goals now states explicitly which half is still deferred.
+
+- [x] **T7.1 — `limits.max_plunge_feed` and `process.plunge-feed-too-high`** — *done*
+      A straight-down G1 above the configured rate. Nothing new in the data model: the rule reads the
+      existing endpoint walker and `ModalState.feed`.
+      **A plunge moves Z alone.** Ramps and helical entries are deliberately exempt — ramping in at the
+      contouring feed is correct practice, and a rule that fired on most well-written programs would
+      teach the user to ignore it. A-moves are exempt too; a coordinated XYZ+A move is not a plunge.
+      **Judged from positions, not words**, so a post that restates an unchanged `X10 Y20` on the
+      plunge block is still caught, and an unestablished Z is declined rather than guessed.
+      **Silent under G93 and G95**, where `F` is inverse time and mm/rev: neither compares to a mm/min
+      ceiling without inventing a block length or a spindle speed.
+      Reported once per distinct offending feed value, with a count of the rest — a drilling job with
+      200 holes is one misconfigured rate, not 200 findings.
+      Unset in the shipped profile on purpose: a sane plunge rate is a property of the tool and the
+      material, not of the machine, so there is no honest generic number.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/verify/checks/process.py`,
+      `src/foursight/profiles/default_4axis.toml`, `tests/test_checks_process.py`, `tests/test_profile.py`
+
+- [x] **T7.2 — `[stock]` and `geometry.rapid-into-stock`** — *done*
+      `StockEnvelope`, an axis-aligned box in machine coordinates, and a slab-method segment/box
+      intersection over every rapid. Both bounds mandatory together: a half-specified box would be
+      completed by a guess and the check would then report on a different solid.
+      **A warning, not an error.** A rapid inside the envelope is legitimate in material an earlier pass
+      removed, and telling that from a real collision is the removal model `PLAN.md` defers. The
+      `error` tier is for claims we can stand behind.
+      **A strictly vertical climb is exempt, and this is what makes the rule usable.** Every cut ends
+      with a retract from inside the material, so a plain intersection test reports the `G0 Z25`
+      closing every pass. Withdrawing along the tool axis cannot hit anything. Vertical *only* — a
+      climb that also moves X or Y sweeps sideways on the way out and is reported.
+      **Refused, visibly, when the part rotates.** Under `rotary_mount = "table"` a box fixed in
+      machine coordinates stops describing stock that turns with A, and approximating fails in *both*
+      directions — passing real collisions and inventing imaginary ones. One diagnostic says so and no
+      per-rapid findings follow. A is assumed to start at 0, as in `geometry.rotary-wrap`, or the `A0`
+      on a safe-start line would disable the check for nearly every program that has one.
+      **Two defects found by writing the tests, both invisible to a naive implementation:**
+      the simulator draws a program's opening rapid from the machine reference so the picture keeps its
+      approach move, and the segment path was reporting a collision against that *assumed* position —
+      fixed by `_lines_with_known_start`, which also makes the two paths agree exactly; and a segment
+      ruled out by a stationary axis outside its slab carries an infinite bound, where `inf * 0` for a
+      Z that does not move is a NaN that would silently win a `min()`.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/verify/checks/geometry.py`,
+      `src/foursight/profiles/default_4axis.toml`, `tests/test_checks_geometry.py`,
+      `tests/test_checks_interpolated.py`, `tests/test_profile.py`
+
+- **Owed from M7 — `process.feed-too-high` has the feed-mode blind spot T7.1 avoided.** It compares a
+  raw `F` word to `limits.max_feed` under every feed mode, so under G93 a legitimate `F1000` (a 0.06 s
+  block) is reported as "feed 1000 mm/min exceeds 3000 mm/min" — a wrong message, though a harmless
+  direction. Not fixed here because it changes existing behaviour and its own tests; the plunge rule
+  documents the correct treatment next to it.
+- **Owed from M7 — neither new rule has a fix.** `process.plunge-feed-too-high` has an obvious one
+  (rewrite the F on the plunge block), and it would be the first fix keyed to a rule whose diagnostic
+  spans two lines — the plunge and wherever the inherited F was set. Worth doing deliberately rather
+  than as an afterthought.
+
+---
+
+## M8 — Editing the machine profile in the GUI
+
+Prompted directly by M7: `[stock]` and `max_plunge_feed` are both unset in the shipped profile, so the
+only way to try either was to hand-edit a TOML file and restart the application. A check nobody can
+switch on is a check nobody uses. `PLAN.md` § Editing the profile in the GUI owns the reasoning.
+
+- [x] **T8.1 — `profile_doc.py` and `profile_schema.py`: the profile as editable text** — *done*
+      `ProfileDocument` (text + as-written values), `Edit`/`UNSET`, surgical `apply`, and the field
+      schema the form is generated from. **Qt-free**, which is what makes all of it testable: 71 tests.
+      **`MachineProfile` values cannot populate a form.** They are already converted to mm, so an inch
+      profile writing `max_feed = 100.0` would display 2540 and be converted again on write — a silent
+      25.4× corruption per round trip. `ProfileDocument.raw` holds the unconverted values.
+      **Edits are surgical so the comments survive.** The shipped profile's inline comments *are* its
+      documentation. A key's value is replaced in place, keeping its trailing comment **and its column**,
+      and everything else stays byte-identical. Switching a key off comments it out rather than deleting
+      it, which also makes ticking `[stock]` reveal the example values its commented block already held.
+      **Two bugs the tests caught immediately:** the comment column was collapsed to a single space,
+      destroying the file's alignment on the first edit; and on a commented-out key line the leading `#`
+      was read as a *trailing* comment, producing `max_plunge_feed = 250.0 # max_plunge_feed = 300.0`.
+      **`apply_dialect_override` duplicates `with_dialect`/`with_arc_centre`.** The second deliberate
+      duplication in the codebase after `sim/timing.py`, and guarded the same way —
+      `test_the_document_override_agrees_with_the_profile_one` drives both over every combination of
+      starting dialect, override and arc-centre and demands identical results *and identical refusals*.
+      Files: `src/foursight/machine/profile_doc.py`, `src/foursight/machine/profile_schema.py`,
+      `tests/test_profile_doc.py`
+
+- [x] **T8.2 — the profile dialog, and applying a profile in-session** — *done*
+      `ProfileDialog` generated from the schema; `File → Machine profile…` (Ctrl+M), non-modal so the
+      diagnostics list stays visible while a limit is changed. Apply swaps `MainWindow.profile` and
+      re-runs through `_reload_from_buffer` — the same threaded path an applied fix uses, because a
+      profile change alters how the text is *parsed* (`[dialect]`) and how geometry is built
+      (`[kinematics]`), not just which limits are compared.
+      **Apply touches nothing on disk**, matching the fix engine's contract; `Save as…` is a separate act
+      and applies first, so a profile FourSight would refuse cannot reach the disk.
+      **The override had to move into the text.** `app.py` now resolves `--dialect`/`--arc-centre` into
+      the *document* via `resolve_profile`, because an override living only on the `MachineProfile` would
+      show as absent in the editor and be reverted by the first unrelated edit applied — arcs then drawn
+      with the wrong I/J convention, silently. `resolve_profile` imports no Qt and is tested directly.
+      **The rebuilt profile keeps its `path`.** `load_profile_text` defaults it to `None`, so without
+      threading it through, the second open of the dialog fell back to the shipped default.
+      Files: `src/foursight/gui/profile_dialog.py`, `src/foursight/gui/main_window.py`,
+      `src/foursight/gui/app.py`, `tests/test_profile_dialog.py`, `tests/test_main_window.py`,
+      `tests/test_gui_app.py`
+
+- **Owed from M8 — the dialog has no diff preview.** Every other change FourSight makes to a file is
+  reviewable as a unified diff first (`DiffDialog`), and a profile edit is not. `ProfileDocument` holds
+  both texts, so the diff is already available; showing it before `Save as…` would close the gap.
+- **Owed from M8 — `[axes.*].type` is not editable.** The schema deliberately omits it, since the form
+  has no reason to let A become linear, but that means a profile using `[axes.b]` cannot be edited in the
+  GUI at all — it simply does not appear. 5-axis is post-v1, so this is recorded rather than fixed;
+  `test_every_loader_key_is_editable` covers the flat sections and would not catch a new axis.
+
+---
+
+## M9 — Cylindrical stock on the rotary axis
+
+Asked for directly: *"Stock needs to be able to set for rotary? with a diameter and length."* It turned
+out to remove M7's worst limitation rather than merely add a shape — see `PLAN.md` § Stock and plunge
+checks.
+
+- [x] **T9.1 — `StockBox` / `StockCylinder`, and the shape rules** — *done*
+      `[stock]` gains `shape`, `diameter`, `length`, `axis_min`. `StockEnvelope` becomes a union so a
+      rule reading `stock.min` cannot compile against a cylinder.
+      **`shape` is inferred from the keys when absent**, so a `[stock]` written before cylinders existed
+      still means a box; stated explicitly it is *checked* against the keys rather than trusted, because
+      the two disagreeing is how a cylinder gets read as a box. A key from the other shape is refused
+      rather than ignored — one that looks configured and does nothing is the worst of the three
+      outcomes. A zero or negative diameter or length is refused: it describes no solid, and a check
+      against nothing passes every program while looking configured.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/profiles/default_4axis.toml`,
+      `tests/test_profile.py`
+
+- [x] **T9.2 — the cylinder interference check** — *done*
+      Line versus capped cylinder: a quadratic for the radial part, the existing slab machinery for the
+      flat ends, intersected and clamped to [0, 1]. Reported at the **closest approach to the axis**,
+      which unlike the box's lowest Z is not at an endpoint — radial distance is not linear in the
+      parameter, so the extreme is at the perpendicular foot clamped into the inside interval.
+      **This is what makes the rule work under rotation, and that is the point of the whole task.** A
+      cylinder concentric with the rotary axis maps onto itself under every A, so the check is exact at
+      every angle; the box's refusal now applies only to boxes, and its message points at
+      `shape = "cylinder"`. The axis comes from `[kinematics]` and cannot be restated in `[stock]`,
+      because an off-axis cylinder would lose the invariance and be silently wrong once the part turned.
+      **"Up is safe" is wrong for a round blank, and dangerously so.** A tool working the underside of a
+      bar retracts in **−Z**; a vertical rule would report that *and* would exempt a `+Z` move from below
+      the centreline, which drives through the middle of the stock. Withdrawal became *radially outward*
+      with no axial motion, and monotonically so — radial distance along a line is convex, so a segment
+      can end further out than it started while dipping closer in between.
+      Files: `src/foursight/verify/checks/geometry.py`, `tests/test_checks_geometry.py`
+
+- [x] **T9.3 — cylinders in the profile editor, and the gating fix they forced** — *done*
+      A `shape` selector gating the two sets of dimensions, via the schema's existing `requires`.
+      **It exposed a latent M8 bug.** A gated-off field was left alone rather than removed, so switching
+      Stock from box to cylinder produced a section carrying both shapes' keys — and switching the
+      dialect back to LinuxCNC left an `arc_centre` the loader refuses outright. Both made Apply fail for
+      something the user never touched. A gated-off field that is currently set now gets an `UNSET` edit.
+      **Two robustness bugs in the text surgery, both found by rewriting the shipped profile's comments.**
+      Reactivating a section uncommented *every* line in it, including prose — which for a block
+      documenting a second shape produced a file that was not valid TOML; only headers and `key = value`
+      lines are uncommented now. And revealing a commented block filled only the *empty* rows, so a
+      block stating `shape = "cylinder"` left the selector on "box" and described neither solid.
+      Files: `src/foursight/machine/profile_schema.py`, `src/foursight/gui/profile_dialog.py`,
+      `src/foursight/machine/profile_doc.py`, `tests/test_profile_dialog.py`
+
+- **Owed from M9 — the plunge check is still Z-only.** On a rotary job the "plunge" into a bar is radial,
+  and for a tool working the side of a blank that can be a Y move rather than a Z one.
+  `process.plunge-feed-too-high` would not see it. The stock's axis is now known, so the radial direction
+  is available; whether a *rate* limit should be expressed radially is a real question rather than an
+  oversight, so it is recorded rather than guessed at.
+
+---
+
+**Project status: M0–M9 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

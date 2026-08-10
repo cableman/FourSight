@@ -842,3 +842,84 @@ def test_a_destructive_fix_is_labelled_and_has_no_shortcut(window) -> None:
     action = window.fix_actions["fix.strip-line-numbers"]
     assert "destructive" in action.text()
     assert action.shortcut().isEmpty()
+
+
+# --------------------------------------------------------------------- machine profile (T8.2)
+
+
+def test_the_profile_dialog_opens_on_the_loaded_profile(window) -> None:
+    dialog = window.show_profile_dialog()
+    assert dialog.document.value("limits", "max_feed") == 3000.0
+    assert dialog.path == DEFAULT_PROFILE_PATH
+
+
+def test_the_profile_dialog_is_reused_so_unapplied_edits_survive_a_reopen(window) -> None:
+    first = window.show_profile_dialog()
+    first.close()
+    assert window.show_profile_dialog() is first
+
+
+def test_applying_a_profile_swaps_it_and_reruns_the_check(window) -> None:
+    """A profile change is not a display setting: every verifier limit and the dialect read from it,
+    so the whole pipeline re-runs exactly as it does for an applied fix."""
+    assert window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    dialog = window.show_profile_dialog()
+    edited = dialog.document.apply(
+        [_edit("limits", "max_plunge_feed", 10.0), _edit("safety", "min_clearance_z", 500.0)]
+    )
+    dialog.document = edited
+    dialog.applied.emit(edited)
+    _settle(window)
+
+    assert window.profile.limits.max_plunge_feed == 10.0
+    assert window.profile.path == DEFAULT_PROFILE_PATH, "the rebuilt profile keeps its source"
+    rules = {d.rule_id for d in window.diagnostics.diagnostics}
+    assert "process.rapid-below-clearance" in rules, (
+        "the new limit is what the program is checked on"
+    )
+
+
+def test_applying_a_profile_with_no_program_loaded_just_reports_it(window) -> None:
+    dialog = window.show_profile_dialog()
+    edited = dialog.document.apply([_edit("machine", "name", "Bench mill")])
+    dialog.applied.emit(edited)
+    assert window.profile.name == "Bench mill"
+    assert "Bench mill" in window.statusBar().currentMessage()
+
+
+def test_a_changed_rotary_mount_cannot_leave_a_stale_part_transform(window) -> None:
+    """`lin_part` belongs to the old kinematics, and dies with the old store."""
+    assert window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.part_coordinates_action.setChecked(True)
+    dialog = window.show_profile_dialog()
+    edited = dialog.document.apply([_edit("kinematics", "centerline_offset", [0.0, 0.0, 25.0])])
+    dialog.applied.emit(edited)
+    _settle(window)
+    assert window.part_coordinates_action.isChecked() is False
+    assert window.program.simulation.store.lin_part is None
+
+
+def test_the_window_prefers_the_document_it_was_given(qt_app, profile) -> None:
+    """`app.py` folds any --dialect override into the document, so the window must not re-read the
+    file and quietly drop it."""
+    from foursight.gui.main_window import MainWindow
+    from foursight.machine.profile_doc import ProfileDocument
+
+    document = ProfileDocument.from_text('[machine]\nunits = "mm"\n[dialect]\nname = "mach3"\n')
+    window = MainWindow(profile, profile_document=document)
+    assert window.show_profile_dialog().document.value("dialect", "name") == "mach3"
+
+
+def _edit(section: str, key: str, value):
+    from foursight.machine.profile_doc import Edit
+
+    return Edit(section, key, value)
+
+
+def _settle(window, timeout_ms: int = 30_000) -> None:
+    """Pump the event loop until the background reload started by an applied profile finishes."""
+    from PySide6.QtCore import QDeadlineTimer, QEventLoop
+
+    deadline = QDeadlineTimer(timeout_ms)
+    while window._loader is not None and not deadline.hasExpired():
+        QApplication.processEvents(QEventLoop.AllEvents, 20)

@@ -115,3 +115,54 @@ def test_the_arc_centre_override_is_available_to_the_gui() -> None:
     """The launcher mirrors the headless flags; both build the same effective profile."""
     args = build_parser().parse_args(["--dialect", "mach3", "--arc-centre", "absolute"])
     assert args.arc_centre == "absolute"
+
+
+def test_a_dialect_override_reaches_the_profile_and_its_text(tmp_path) -> None:
+    """The override has to be *in the text*, or the profile editor would show the wrong dialect and
+    revert it on the next unrelated edit — arcs then drawn with the wrong I/J convention, silently."""
+    from foursight.gui.app import resolve_profile
+
+    source = tmp_path / "mill.toml"
+    source.write_text('[machine]\nunits = "mm"\n', encoding="utf-8")
+    profile, document = resolve_profile(source, "mach3", "absolute")
+    assert profile.dialect.name == "mach3"
+    assert profile.dialect.arc_centre == "absolute"
+    assert document.value("dialect", "name") == "mach3"
+    assert document.value("dialect", "arc_centre") == "absolute"
+    assert profile.path == source, "the profile keeps its source so the editor can re-read it"
+
+
+def test_no_override_leaves_the_profile_text_untouched(tmp_path) -> None:
+    from foursight.gui.app import resolve_profile
+
+    source = tmp_path / "mill.toml"
+    original = '[machine]\nunits = "mm"\n# a comment worth keeping\n'
+    source.write_text(original, encoding="utf-8")
+    _profile, document = resolve_profile(source, None, None)
+    assert document.text == original
+
+
+def test_an_arc_centre_override_under_linuxcnc_is_refused(tmp_path, capsys) -> None:
+    """Accepting it would let a user believe they had overridden something the G-code decides."""
+    pytest.importorskip("PySide6", reason="the [gui] extra is not installed")
+    source = tmp_path / "mill.toml"
+    source.write_text('[machine]\nunits = "mm"\n', encoding="utf-8")
+    assert main(["--profile", str(source), "--arc-centre", "absolute"]) == USAGE_ERROR
+    assert "cannot load profile" in capsys.readouterr().out
+
+
+def test_resolving_a_profile_needs_no_qt() -> None:
+    """It runs before the window exists, and the Qt-free job imports this module."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; from foursight.gui.app import resolve_profile;"
+        "resolve_profile(None, None, None);"
+        "print('qt' if any(m.startswith('PySide6') for m in sys.modules) else 'clean')"
+    )
+    result = subprocess.run(  # noqa: S603 - `code` is a literal above, not external input
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "clean"

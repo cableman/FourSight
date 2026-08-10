@@ -14,8 +14,9 @@ program is not actionable.
 
 from collections.abc import Iterable
 
-from foursight.machine.state import machine_value, walk
+from foursight.machine.state import Position, machine_value, walk
 from foursight.parser.dialect import DwellUnits
+from foursight.parser.model import Command
 from foursight.verify.report import Diagnostic, Severity, format_feed, format_length
 from foursight.verify.rules import Program, Rule, register_rule
 
@@ -356,6 +357,87 @@ class RapidBelowClearance(Rule):
                     f"{format_length(clearance, units)}{caveat}"
                 ),
             )
+
+
+#: Feed-rate mode in which `F` is a length per minute, and so comparable to a mm/min limit. Under G93
+#: `F` is inverse time in 1/minutes and under G95 it is mm/rev; neither converts without inventing a
+#: spindle speed or a block length, so the plunge check stays silent there rather than guessing.
+UNITS_PER_MINUTE = "94"
+LINEAR_MOTION = "1"
+
+
+@register_rule
+class PlungeFeedTooHigh(Rule):
+    """A straight-down G1 faster than `limits.max_plunge_feed`.
+
+    This is the "the machine bangs into the stock" complaint that needs no stock model: entering
+    material along Z at the contouring feed is a common post-processor misconfiguration, and it sounds
+    exactly like a collision.
+
+    **A plunge moves Z alone.** A block that also moves X or Y is a *ramp*, and ramping in at the
+    contouring feed is correct practice rather than a defect — reporting it would make the rule fire on
+    most well-written programs, which is how a user learns to ignore a diagnostic. G2/G3 are excluded
+    for the same reason: an arc with Z motion is a helical entry, the recommended way into material. A
+    moves are excluded too; a coordinated XYZ+A move is not a plunge.
+
+    Motion is judged from **positions, not words**, so a post that restates the unchanged `X10 Y20` on
+    its plunge block is still recognized as plunging. An axis whose position was never established is
+    treated as motion, so the rule declines to judge rather than guessing — matching this module's
+    rule that no position means no claim.
+
+    A **warning**: a rigid machine plunging a centre-cutting drill into aluminium can legitimately
+    exceed any figure a profile would name.
+    """
+
+    rule_id = "process.plunge-feed-too-high"
+    description = "Straight-down G1 plunge above limits.max_plunge_feed"
+    severity = Severity.WARNING
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        limit = program.profile.limits.max_plunge_feed
+        if limit is None:
+            return
+        # Grouped by feed rate, in first-occurrence order. One misconfigured plunge rate is one fact
+        # about the program; a drilling job with 200 holes would otherwise bury every other finding.
+        offenders: dict[float, list[Command]] = {}
+        for command, before, after in walk(program.commands):
+            feed = _plunge_feed(command, before, after)
+            if feed is not None and feed > limit:
+                offenders.setdefault(feed, []).append(command)
+
+        for feed, commands in offenders.items():
+            first = commands[0]
+            units = first.modal_snapshot.units
+            others = "" if len(commands) == 1 else f" ({len(commands) - 1} more like it)"
+            yield Diagnostic(
+                rule_id=self.rule_id,
+                severity=Severity.WARNING,
+                line=first.ref.line_no,
+                message=(
+                    f"straight-down plunge at {format_feed(feed, units)} exceeds the plunge limit "
+                    f"{format_feed(limit, units)}{others}"
+                ),
+                offset=first.ref.start,
+            )
+
+
+def _plunge_feed(command: Command, before: Position, after: Position) -> float | None:
+    """The active feed rate if this block plunges straight down, else None.
+
+    "Straight down" is all four conditions together: G1, a strictly decreasing Z, and X, Y and A all
+    holding station.
+    """
+    if command.motion != LINEAR_MOTION or not command.words:
+        return None
+    modal = command.modal_snapshot
+    if modal.feed_mode != UNITS_PER_MINUTE or modal.feed is None:
+        return None
+    if before.z is None or after.z is None or after.z >= before.z:
+        return None
+    if any(before.get(letter) != after.get(letter) for letter in ("X", "Y", "A")):
+        return None
+    # The *active* feed, not this block's own F word: a plunge usually inherits the rate set earlier.
+    return float(modal.feed)
 
 
 #: G4 dwell, and the threshold above which a P value looks like milliseconds rather than seconds.

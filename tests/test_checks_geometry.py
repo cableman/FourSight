@@ -331,6 +331,153 @@ def test_rotary_travel_is_never_measured_in_millimetres(profile) -> None:
     assert "mm" not in found[0].message
 
 
+# --------------------------------------------------------------------------- stock envelope (M7)
+
+# 100 x 80 x 20 of stock sitting under the g54 origin, so its top face is machine Z 0.
+STOCK = """
+[machine]
+units = "mm"
+[stock]
+min = [0.0, 0.0, -20.0]
+max = [100.0, 80.0, 0.0]
+[offsets]
+g54 = [0.0, 0.0, 0.0, 0.0]
+"""
+
+RULE = "geometry.rapid-into-stock"
+
+# Starts the tool over the middle of the stock and 10 mm clear of it, so every test below differs from
+# the others only in the move under test. The rapid on this line is itself unjudgeable — the machine's
+# position before it was never established — which is why no test here reports on line 3.
+START = "G21 G90 G17 G94 G54\nS8000 M3\nG0 X50 Y40 Z10\n"
+
+
+def _hits(body: str, profile_text: str = STOCK, *, start: str = START):
+    return of(diagnose(start + body + "M30\n", load_profile_text(profile_text)), RULE)
+
+
+def test_a_rapid_traversing_the_stock_at_depth_is_reported() -> None:
+    """The crash this rule exists for: a G0 across the part while still down in the material."""
+    found = _hits("G1 Z-3 F200\nG0 X90 Y70\n")
+    assert len(found) == 1
+    assert found[0].line == 5
+    assert found[0].severity is Severity.WARNING
+    assert "-3 mm" in found[0].message and "stock top is Z 0 mm" in found[0].message
+
+
+def test_a_rapid_clear_above_the_stock_is_not_reported() -> None:
+    assert _hits("G0 X90 Y70\n") == []
+
+
+def test_a_rapid_beside_the_stock_is_not_reported() -> None:
+    """Below the top face, but never over the footprint."""
+    assert _hits("G0 X150 Y40\nG0 Z-3\nG0 Y70\n") == []
+
+
+def test_a_vertical_retract_out_of_the_cut_is_not_reported() -> None:
+    """Without this exemption the rule would fire on the `G0 Z25` closing every single pass.
+
+    Withdrawing along the tool axis cannot hit anything, whatever is left of the stock.
+    """
+    assert _hits("G1 Z-3 F200\nG0 Z25\n") == []
+
+
+def test_a_climb_that_also_moves_in_xy_is_reported() -> None:
+    """Only a *strictly* vertical climb is safe: this one sweeps sideways on its way out."""
+    found = _hits("G1 Z-3 F200\nG0 X90 Y70 Z25\n")
+    assert len(found) == 1
+    assert found[0].line == 5
+
+
+def test_a_rapid_plunge_into_the_stock_is_reported() -> None:
+    found = _hits("G0 Z-5\n")
+    assert len(found) == 1
+    assert "-5 mm" in found[0].message, "the deepest point reached, not the entry at the top face"
+
+
+def test_a_rapid_passing_clean_through_is_reported_though_both_ends_are_outside() -> None:
+    """The reason this is a segment-versus-box test and not a containment test.
+
+    X sweeps from -50 to 150 at Z-3: neither endpoint is over the stock, and the move crosses the whole
+    of it. An endpoint-in-box test would pass this program.
+    """
+    found = _hits("G0 X-50\nG0 Z-3\nG0 X150\n")
+    assert len(found) == 1
+    assert found[0].line == 6
+
+
+def test_a_cutting_move_through_uncut_stock_is_not_reported() -> None:
+    """A documented limit, not an oversight: telling cut material from uncut needs the removal model
+    that PLAN.md defers, so only rapids are judged."""
+    assert _hits("G1 Z-3 F200\nG1 X90 Y70 F600\n") == []
+
+
+def test_no_stock_section_disables_the_check() -> None:
+    assert _hits("G1 Z-3 F200\nG0 X90 Y70\n", '[machine]\nunits = "mm"\n') == []
+
+
+def test_the_finding_is_a_warning_not_an_error() -> None:
+    """A rapid inside already-cleared material is legitimate, and this rule cannot tell the
+    difference — so it must not claim the certainty an `error` claims."""
+    assert all(d.severity is Severity.WARNING for d in _hits("G1 Z-3 F200\nG0 X90 Y70\n"))
+
+
+def test_an_unknown_work_offset_carries_the_caveat() -> None:
+    no_offsets = STOCK.replace("[offsets]\ng54 = [0.0, 0.0, 0.0, 0.0]\n", "")
+    found = _hits("G1 Z-3 F200\nG0 X90 Y70\n", no_offsets)
+    assert len(found) == 1
+    assert "assumes zero work offset" in found[0].message
+
+
+def test_the_message_uses_the_programs_declared_units() -> None:
+    inch_start = "G20 G90 G17 G94 G54\nS8000 M3\nG0 X2 Y1.5 Z0.4\n"
+    found = _hits("G1 Z-0.1 F20\nG0 X3.5 Y2.5\n", start=inch_start)
+    assert len(found) == 1
+    assert " in" in found[0].message and "mm" not in found[0].message
+
+
+# --------------------------------------------------------------- the envelope and a rotating part
+
+ROTARY_HEAD = STOCK + '[kinematics]\nrotary_mount = "head"\npivot_to_tip = 120.0\n'
+
+
+def test_a_rotating_table_refuses_the_check_and_says_so() -> None:
+    """A box fixed in machine coordinates stops describing stock that turns with the part.
+
+    Refused rather than approximated, because approximating fails in both directions — it would pass
+    real collisions and invent imaginary ones. One diagnostic, and no per-rapid findings.
+    """
+    found = _hits("G1 Z-3 F200\nG1 A90\nG0 X90 Y70\n")
+    assert len(found) == 1
+    assert found[0].line == 5, "reported at the block that turns A"
+    assert "not checked" in found[0].message
+    assert "-3 mm" not in found[0].message, "no per-rapid finding once the check is refused"
+
+
+def test_the_refusal_is_visible_rather_than_silent() -> None:
+    """A verifier that finds nothing is indistinguishable from a clean program."""
+    assert _hits("G1 A90 F200\nG0 X90 Y70\n") != []
+
+
+def test_a_swinging_head_leaves_the_stock_still_so_the_check_runs() -> None:
+    found = _hits("G1 Z-3 F200\nG1 A90\nG0 X90 Y70\n", ROTARY_HEAD)
+    assert len(found) == 1
+    assert found[0].line == 6 and "-3 mm" in found[0].message
+
+
+def test_a_safe_start_a0_does_not_disable_the_check() -> None:
+    """A is assumed to start at 0, as in `geometry.rotary-wrap`. Without that, the `A0` nearly every
+    program's opening lines carry would read as rotary motion and switch the rule off."""
+    found = _hits("G0 A0\nG1 Z-3 F200\nG0 X90 Y70\n")
+    assert len(found) == 1
+    assert found[0].line == 6 and "-3 mm" in found[0].message
+
+
+def test_returning_a_to_where_it_already_was_is_not_rotary_motion() -> None:
+    found = _hits("G1 A90 F200\nG1 A90\nG0 X90 Y70\n")
+    assert len(found) == 1, "the second A90 must not produce a second refusal"
+
+
 # --------------------------------------------------------------------------- fixtures
 
 
@@ -380,3 +527,153 @@ def test_arc_radii_in_the_baseline_are_exact(baseline_text) -> None:
         assert arc.radius_start == pytest.approx(10.0, abs=1e-12)
         assert arc.radius_end == pytest.approx(10.0, abs=1e-12)
         assert math.isclose(arc.radius_start, arc.radius_end, abs_tol=1e-12)
+
+
+# ------------------------------------------------------- cylindrical stock, on the rotary axis (M9)
+
+# A 50 mm bar on the A axis, which runs along machine X through the g54 origin. 200 mm of it, from
+# X0 to X200. Radius 25, so the top of the bar is Z+25 and its underside Z-25.
+BAR = """
+[machine]
+units = "mm"
+[stock]
+shape = "cylinder"
+diameter = 50.0
+length = 200.0
+axis_min = 0.0
+[kinematics]
+rotary_mount = "table"
+rotary_axis = "x"
+centerline_offset = [0.0, 0.0, 0.0]
+[offsets]
+g54 = [0.0, 0.0, 0.0, 0.0]
+"""
+
+# Clear of the bar: 40 mm above the centreline, so 15 mm outside a 25 mm radius.
+OVER_BAR = "G21 G90 G17 G94 G54\nS8000 M3\nG0 X100 Y0 Z40\n"
+
+
+def _bar(body: str, profile_text: str = BAR):
+    return _hits(body, profile_text, start=OVER_BAR)
+
+
+def test_a_rapid_through_the_bar_is_reported() -> None:
+    found = _bar("G1 Z20 F200\nG0 X50\n")
+    assert len(found) == 1
+    assert found[0].line == 5
+    assert "from the rotary axis" in found[0].message
+    assert "stock radius is 25 mm" in found[0].message
+
+
+def test_the_reported_distance_is_the_closest_approach_to_the_axis() -> None:
+    """Radial distance is not linear along a segment, so the extreme is not at an endpoint.
+
+    From (Y-40, Z20) to (Y+40, Z20) the tool passes over the axis at Y0, where it is 20 mm out — closer
+    than either end, which are both ~45 mm out and clear of the bar.
+    """
+    found = _bar("G0 Y-40 Z20\nG0 Y40\n")
+    assert len(found) == 1
+    assert "20 mm from the rotary axis" in found[0].message
+
+
+def test_a_rapid_clear_of_the_bar_is_not_reported() -> None:
+    assert _bar("G0 X50\nG0 Y30\n") == []
+
+
+def test_a_rapid_beyond_the_end_of_the_bar_is_not_reported() -> None:
+    """The flat ends bound it: past X200 there is nothing to hit however low the tool goes."""
+    assert _bar("G0 X250\nG0 Z0\nG0 Y30\n") == []
+
+
+def test_a_radial_retract_is_not_reported() -> None:
+    """The cylinder's equivalent of a vertical retract."""
+    assert _bar("G1 Z20 F200\nG0 Z40\n") == []
+
+
+def test_a_retract_from_under_the_bar_moves_in_minus_z_and_is_not_reported() -> None:
+    """The reason "up is safe" is the wrong rule for a round blank.
+
+    Working the underside, the tool retracts *downward*. A `+Z is always safe` test would miss this and,
+    worse, would exempt a +Z move from below the centreline — which drives through the middle of the bar.
+
+    The tool is put in position with a **feed** move, since only rapids are judged; a `G0` down to Z-20
+    would itself pass through the bar and be reported, which is correct and would mask what is under
+    test here.
+    """
+    assert _bar("G1 Z-20 F200\nG0 Z-40\n") == []
+
+
+def test_climbing_from_below_the_centreline_is_reported() -> None:
+    """+Z from under the bar is not a retract: it goes straight through the material."""
+    found = _bar("G1 Z-20 F200\nG0 Z40\n")
+    assert len(found) == 1
+    assert found[0].line == 5
+
+
+def test_an_axial_move_at_depth_is_reported_though_the_radius_never_changes() -> None:
+    """No radial motion at all: the segment is inside the circle for its whole length."""
+    found = _bar("G1 Z20 F200\nG0 X50\n")
+    assert len(found) == 1
+    assert "20 mm from the rotary axis" in found[0].message
+
+
+# --------------------------------------------------------------- and this is why cylinders exist
+
+
+def test_a_rotating_part_is_checked_when_the_blank_is_a_cylinder() -> None:
+    """The whole point of the second shape.
+
+    A box fixed in machine coordinates stops describing stock that turns with the part, so the rule
+    refuses it. A cylinder concentric with the rotary axis maps onto itself under every A rotation, so
+    there is nothing to approximate and the check simply runs.
+    """
+    found = _bar("G1 A90 F500\nG1 Z20 F200\nG0 X50\n")
+    assert len(found) == 1
+    assert found[0].line == 6
+    assert "not checked" not in found[0].message
+
+
+def test_the_answer_does_not_depend_on_the_angle() -> None:
+    """Rotation invariance, asserted rather than assumed: same program, four different A values."""
+    messages = set()
+    for angle in (0, 45, 90, 137):
+        found = _bar(f"G1 A{angle} F500\nG1 Z20 F200\nG0 X50\n")
+        assert len(found) == 1
+        messages.add(found[0].message)
+    assert len(messages) == 1, messages
+
+
+def test_a_box_still_refuses_a_rotating_part_and_points_at_the_cylinder() -> None:
+    found = _hits("G1 Z-3 F200\nG1 A90\nG0 X90 Y70\n")
+    assert len(found) == 1
+    assert "not checked" in found[0].message
+    assert 'shape = "cylinder"' in found[0].message, "the message says what to do about it"
+
+
+# ------------------------------------------------------------------- the axis comes from kinematics
+
+
+def test_the_cylinder_follows_the_rotary_axis() -> None:
+    """A bar on the Y axis is a different solid, and nothing in [stock] restates the axis."""
+    on_y = BAR.replace('rotary_axis = "x"', 'rotary_axis = "y"')
+    # Y0..Y200 now, so X100 Z20 is 100 mm from the Y axis — well clear.
+    assert _bar("G1 Z20 F200\nG0 X50\n", on_y) == []
+    # On the Y axis itself, the same descent is inside the bar.
+    found = _bar("G0 X0 Y100\nG0 Z20\n", on_y)
+    assert found and "from the rotary axis" in found[0].message
+
+
+def test_the_cylinder_follows_the_centreline_offset() -> None:
+    """A bar raised on a fixture is 50 mm higher, so a rapid at Z40 is now inside it."""
+    raised = BAR.replace(
+        "centerline_offset = [0.0, 0.0, 0.0]", "centerline_offset = [0.0, 0.0, 50.0]"
+    )
+    found = _bar("G0 X50\n", raised)
+    assert len(found) == 1, "Z40 is 10 mm below a centreline at Z50, so inside a 25 mm radius"
+
+
+def test_the_message_uses_the_programs_declared_units_for_a_cylinder() -> None:
+    inch_start = "G20 G90 G17 G94 G54\nS8000 M3\nG0 X4 Y0 Z1.6\n"
+    found = _hits("G1 Z0.8 F20\nG0 X2\n", BAR, start=inch_start)
+    assert len(found) == 1
+    assert " in" in found[0].message and "mm" not in found[0].message

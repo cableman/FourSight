@@ -74,6 +74,28 @@ def _add_dialect_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def resolve_profile(
+    profile_arg, dialect: str | None, arc_centre: str | None
+) -> "tuple[object, object]":
+    """The effective profile *and* the text it came from. Imports no Qt, so it is testable directly.
+
+    Resolved once, at the boundary — and here that means into the profile's own **text**, not only into
+    the loaded object. The GUI can edit the profile (T8.2), so a `--dialect` override that existed only
+    on the `MachineProfile` would show as absent in the editor and be reverted by the first unrelated
+    edit the user applied, drawing arcs with the wrong I/J convention and saying nothing.
+
+    Raises `OSError` or `ProfileError`; `main` turns either into a refusal to start.
+    """
+    from foursight.machine.profile import default_profile_path
+    from foursight.machine.profile_doc import ProfileDocument, apply_dialect_override
+
+    source = Path(profile_arg) if profile_arg else default_profile_path()
+    document = apply_dialect_override(
+        ProfileDocument.from_text(source.read_text(encoding="utf-8")), dialect, arc_centre
+    )
+    return document.profile(path=source), document
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -83,19 +105,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_INSTALL_HINT)
         return MISSING_GUI_EXTRA
 
-    from foursight.machine.profile import (
-        ProfileError,
-        default_profile_path,
-        load_profile,
-        with_arc_centre,
-        with_dialect,
-    )
+    from foursight.machine.profile import ProfileError
 
     try:
-        profile = load_profile(args.profile or default_profile_path())
-        # Resolved once, into the *effective* profile: everything downstream reads the dialect off
-        # the profile it already carries, so there is no second copy to disagree with.
-        profile = with_arc_centre(with_dialect(profile, args.dialect), args.arc_centre)
+        profile, document = resolve_profile(args.profile, args.dialect, args.arc_centre)
     except (OSError, ProfileError) as error:
         # Before the window exists, so there is nowhere to show a dialog. Refusing outright beats
         # opening with a silently substituted default profile: limits and rapid rates would be wrong,
@@ -106,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from foursight.gui.main_window import MainWindow
 
     app = QApplication.instance() or QApplication([])
-    window = MainWindow(profile, block_delete=args.block_delete)
+    window = MainWindow(profile, block_delete=args.block_delete, profile_document=document)
     window.show()
     if args.file is not None:
         window.open_file(args.file)

@@ -37,6 +37,11 @@ name = "linuxcnc" # "linuxcnc" | "mach3"
 [limits]
 max_feed = 3000.0        # mm/min
 max_spindle_rpm = 24000.0
+# mm/min above which a straight-down G1 plunge is reported. Left unset on purpose: a sane plunge rate
+# is a property of the tool and the material, not of the machine, so this generic profile has no
+# honest number to put here. Set it per job and the check switches on.
+# Ramps and helical entries are never reported — only blocks that move Z alone.
+# max_plunge_feed = 300.0
 # Degrees of rotary travel in one block before warning. Multi-turn wrapping is legitimate, so this
 # is tunable; 0 would warn on any rotary move at all.
 rotary_wrap_warn = 360.0
@@ -104,3 +109,35 @@ centerline_offset = [0.0, 0.0, 50.0]
 min_clearance_z = 5.0 # rapids below this → warning
 require_spindle_before_cut = true
 retract_before_toolchange = true
+
+# Where the stock sits, so a rapid that would pass through it can be reported. Stated in MACHINE
+# coordinates — the same frame as [axes] and [offsets] above, because that is the frame verification
+# runs in. With g54 = [0, 0, 0, 0] the two coincide.
+#
+# Left unset here because a shipped profile cannot know what is clamped to the table today. Every key
+# of the shape is required together: the profile refuses to load with only some of them, rather than
+# completing one by a guess and then reporting on a solid that is not the one you have.
+#
+# This is not a material-removal model, so a rapid through material an earlier pass already cleared is
+# reported too — that is why the finding is a warning.
+#
+# There are two shapes, and `shape` may be omitted because it is inferred from the keys present.
+#
+#   shape = "box"       needs  min  and  max            — prismatic work
+#   shape = "cylinder"  needs  diameter, length, axis_min  — a blank on the rotary axis
+#
+# For 4-axis work use the CYLINDER. Its axis is deliberately NOT stated here: it is
+# [kinematics].rotary_axis through [kinematics].centerline_offset above. A cylinder concentric with the
+# rotary axis maps onto itself under any A rotation, so the check stays exact at every angle — whereas a
+# fixed BOX stops describing stock that turns with the part, and a program that moves A then gets one
+# diagnostic saying the envelope cannot be judged instead of per-rapid findings. An off-axis cylinder
+# would have the same problem, which is why it cannot be expressed. `axis_min` is the machine coordinate
+# of the end of the blank nearer the rotary axis's minimum.
+#
+# Every key of the chosen shape is required, and a key from the other shape is refused rather than
+# ignored — one that looks configured and does nothing is the worst of the three outcomes.
+#
+# The box example below is switchable as it stands; for a cylinder, replace its two corner lines.
+# [stock]
+# min = [0.0, 0.0, -20.0]
+# max = [100.0, 80.0, 0.0]

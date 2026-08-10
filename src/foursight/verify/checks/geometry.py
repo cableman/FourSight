@@ -13,6 +13,10 @@ Two tolerances-and-coordinates rules that are easy to get subtly wrong:
 - **`tolerance.arc_radius_mismatch` is read from the profile, at one place.** PLAN.md calls this out
   explicitly: the check and the IJK-recompute fix (T5.2) must not each hard-code it, or they will
   disagree about what counts as broken.
+
+`geometry.rapid-into-stock` (M7) also lives here. It is the one rule in this module that loses nothing
+without a simulation — a rapid is a straight line, so its endpoints *are* its path — but it still
+prefers the interpolated geometry, which contains rapids the endpoint walker never produces.
 """
 
 import math
@@ -21,10 +25,17 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from foursight.machine.profile import AxisLimits, MachineProfile
+from foursight.machine.profile import (
+    AxisLimits,
+    MachineProfile,
+    StockBox,
+    StockCylinder,
+    StockEnvelope,
+)
 from foursight.machine.state import Position, is_machine_absolute, machine_value, walk
 from foursight.parser.model import AXIS_LETTERS, Command
 from foursight.sim.interpolate import PLANES
+from foursight.sim.segments import Kind
 from foursight.verify.report import Diagnostic, Severity, format_angle, format_length
 from foursight.verify.rules import Program, Rule, register_rule
 
@@ -354,6 +365,53 @@ class RotaryTravelExceeded(Rule):
                 )
 
 
+@register_rule
+class RapidIntoStock(Rule):
+    """A rapid whose straight-line path passes through the `[stock]` envelope.
+
+    The narrow half of "the machine hits the stock" (PLAN.md § Stock and plunge checks): a box says
+    where the solid *started*, never what is left of it, and that is enough to catch the traverse
+    across the part at cutting depth that causes the crash.
+
+    **A warning, though a real hit would break the machine.** The `error` tier is for claims we can
+    stand behind, and this one has a known false positive: a rapid inside the envelope is safe when it
+    runs through material an earlier pass removed, which is ordinary output for pocketing. Telling the
+    two apart is exactly the material-removal model that is out of scope, so the honest tier is the one
+    that says "look at this".
+
+    **Endpoints are exact here, unlike travel limits.** A rapid is a straight line, so there is no
+    mid-move bulge for the no-simulation fallback to miss. The interpolated path is still preferred
+    when a simulation exists, because it carries moves the endpoint walker does not model — a G28's two
+    legs above all, which are rapids that can cross the table.
+
+    **A rotating table refuses a box and accepts a cylinder**, and the asymmetry is the whole reason
+    `StockCylinder` exists. A box fixed in machine coordinates stops describing stock that turns with
+    the part, and then fails in *both* directions — passing real collisions and inventing imaginary
+    ones — so such a program gets one diagnostic saying so and no per-rapid findings. Staying silent
+    would be worse still, because a verifier that finds nothing is indistinguishable from a clean
+    program. A cylinder concentric with the rotary axis maps onto itself under every A rotation, so
+    there is nothing to approximate: the check is exact at every angle and simply runs.
+    """
+
+    rule_id = "geometry.rapid-into-stock"
+    description = "Rapid whose path passes through the [stock] envelope"
+    severity = Severity.WARNING
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        stock = program.profile.stock
+        if stock is None:
+            return
+        if isinstance(stock, StockBox):
+            rotating = _first_rotary_move(program)
+            if rotating is not None:
+                yield _box_cannot_turn(self.rule_id, rotating)
+                return
+        paths = _rapid_paths(program)
+        if paths is None:
+            return
+        yield from _stock_breaches(program, stock, *paths)
+
+
 # --------------------------------------------------------------------------- interpolated checking
 
 
@@ -455,4 +513,342 @@ def _worst_per_line(
                 f"{render(bound)}"
                 + ("" if offset_known else " (assumes zero work offset, so unconfirmed)")
             ),
+        )
+
+
+# --------------------------------------------------------------------------- stock interference
+
+_RAPID_MOTION = "0"
+_Z = 2  # the Z column of an (N, 3) point array
+
+
+def _first_rotary_move(program: Program) -> Command | None:
+    """The first block that actually turns A, or None. Only meaningful for a rotating table.
+
+    **A is assumed to start at 0**, matching `geometry.rotary-wrap`. Without that assumption the `A0`
+    on a safe-start line reads as rotary motion and would disable the stock check for nearly every
+    program that has one.
+    """
+    if program.profile.kinematics.rotary_mount != "table":
+        return None  # a swinging head leaves the stock where it is
+    for command, before, after in walk(program.commands):
+        if "A" not in command.words or after.a is None:
+            continue
+        if after.a != (0.0 if before.a is None else before.a):
+            return command
+    return None
+
+
+def _rapid_paths(program: Program) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Every rapid as ``(starts, ends, lines)`` in machine coordinates, or None when there are none.
+
+    Prefers the simulated geometry, which includes rapids the endpoint walker cannot produce — the two
+    legs of a G28 in particular. The fallback is exact rather than approximate for this rule, because a
+    rapid is a straight line.
+    """
+    store = program.segments
+    if store is not None and len(store):
+        mask = store.mask(Kind.RAPID) & np.isin(store.line, _lines_with_known_start(program))
+        if not mask.any():
+            return None
+        lin = store.lin[mask]
+        return lin[:, 0, :], lin[:, 1, :], store.line[mask]
+
+    starts: list[tuple[float, float, float]] = []
+    ends: list[tuple[float, float, float]] = []
+    lines: list[int] = []
+    for command, before, after in walk(program.commands):
+        if command.motion != _RAPID_MOTION or not command.words:
+            continue
+        start = _machine_point(before, command, program.profile)
+        end = _machine_point(after, command, program.profile)
+        if start is None or end is None or start == end:
+            continue
+        starts.append(start)
+        ends.append(end)
+        lines.append(command.ref.line_no)
+    if not lines:
+        return None
+    return (
+        np.array(starts, dtype=np.float64),
+        np.array(ends, dtype=np.float64),
+        np.array(lines, dtype=np.int32),
+    )
+
+
+def _lines_with_known_start(program: Program) -> np.ndarray:
+    """Source lines whose move begins from a position we actually know.
+
+    The endpoint path gets this for free — `_machine_point` returns None on an unestablished axis — but
+    the `SegmentStore` does not, and cannot: the simulator deliberately draws a program's opening
+    rapid from the machine reference so the picture is not missing its approach move. That assumption
+    is fine for a *picture* and not fine for a *diagnostic*, which would otherwise announce a collision
+    between the stock and a position nobody established. Filtering here keeps the two paths in
+    agreement as well, which `test_the_two_paths_agree_on_an_ordinary_program` pins.
+    """
+    known = [
+        command.ref.line_no
+        for command, before, _ in walk(program.commands)
+        if before.x is not None and before.y is not None and before.z is not None
+    ]
+    return np.array(sorted(set(known)), dtype=np.int32)
+
+
+def _machine_point(
+    position: Position, command: Command, profile: MachineProfile
+) -> tuple[float, float, float] | None:
+    """XYZ in machine coordinates, or None when any of the three was never established.
+
+    Whether the work offset was *known* is deliberately ignored here and recovered per line by
+    `_offset_known_by_line`, so both this path and the simulated one carry the caveat the same way.
+    """
+    values = []
+    for letter in ("X", "Y", "Z"):
+        value, _ = machine_value(position.get(letter), letter, command, profile)
+        if value is None:
+            return None
+        values.append(float(value))
+    return (values[0], values[1], values[2])
+
+
+def _box_overlap(
+    starts: np.ndarray, ends: np.ndarray, low: np.ndarray, high: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """The parameter interval of each segment that lies inside the box, clamped to ``[0, 1]``.
+
+    The slab method: each axis contributes the interval over which the segment is between that axis's
+    two faces, and the box interior is their intersection. A segment is inside somewhere iff
+    ``enter <= leave`` in the returned pair.
+
+    An axis with no motion has no crossing parameter at all — the division would be ±inf or, when the
+    start sits exactly on a face, 0/0. Rather than lean on how numpy signs those, such an axis is
+    replaced outright: it either constrains nothing (the segment is within that slab for its whole
+    length) or rules the segment out entirely.
+    """
+    direction = ends - starts
+    with np.errstate(divide="ignore", invalid="ignore"):
+        to_low = (low - starts) / direction
+        to_high = (high - starts) / direction
+    near = np.minimum(to_low, to_high)
+    far = np.maximum(to_low, to_high)
+
+    still = direction == 0.0
+    within = (starts >= low) & (starts <= high)
+    near = np.where(still, np.where(within, -np.inf, np.inf), near)
+    far = np.where(still, np.where(within, np.inf, -np.inf), far)
+
+    enter = np.maximum(near.max(axis=1), 0.0)
+    leave = np.minimum(far.min(axis=1), 1.0)
+    return enter, leave
+
+
+def _box_cannot_turn(rule_id: str, rotating: Command) -> Diagnostic:
+    return Diagnostic(
+        rule_id=rule_id,
+        severity=Severity.WARNING,
+        line=rotating.ref.line_no,
+        message=(
+            "stock envelope not checked: this program moves A and kinematics.rotary_mount is "
+            '"table", so the stock turns with the part and a box fixed in machine coordinates no '
+            'longer describes where it is. Declare the blank as shape = "cylinder" and the check '
+            "holds at every angle"
+        ),
+    )
+
+
+def _withdrawing_from_box(starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """Rapids that only move **up**, along the tool axis, holding X and Y.
+
+    Excluded from the check unconditionally, and this exclusion is what makes the rule usable rather
+    than an academic exercise: every cut ends with a retract from inside the material, so a plain
+    box-intersection test would report the `G0 Z25` at the end of every pass. Withdrawing along the
+    tool axis cannot hit anything, whatever the stock is made of or how much of it is left.
+
+    Strictly vertical only. A rapid that climbs *and* moves in X or Y sweeps laterally through material
+    on its way out and is reported like any other traverse. Soundness rests on the box being convex and
+    the direction constant: a straight line leaving it upward never re-enters.
+    """
+    return (
+        (starts[:, 0] == ends[:, 0]) & (starts[:, 1] == ends[:, 1]) & (ends[:, _Z] > starts[:, _Z])
+    )
+
+
+def _withdrawing_from_cylinder(
+    radial: np.ndarray, radial_end: np.ndarray, axial: np.ndarray, axial_end: np.ndarray
+) -> np.ndarray:
+    """The cylinder's equivalent of a vertical retract: moving **radially outward**, no axial motion.
+
+    "Up" is the wrong test for a round blank, and dangerously so. With the rotary axis along X, a tool
+    working the *underside* of the part retracts in **−Z**, and a `+Z is always safe` rule would both
+    miss that and — worse — exempt a `+Z` move from below the centreline, which drives straight through
+    the middle of the stock. Radially outward is the property that actually makes a withdrawal safe, and
+    it reduces to the vertical case when the tool is above the axis.
+
+    Monotonically outward, not merely ending further out: radial distance along a straight line is
+    convex, so a segment can end further from the axis than it started while dipping closer in between.
+    The closest approach is at ``t = -(p0·d)/|d|²``, so demanding ``p0·d >= 0`` puts it at or before the
+    start and makes the distance non-decreasing across the whole segment.
+    """
+    direction = radial_end - radial
+    moving = (direction * direction).sum(axis=1)
+    outward = (radial * direction).sum(axis=1)
+    return (axial == axial_end) & (moving > 0.0) & (outward >= 0.0)
+
+
+def _radial_overlap(
+    radial: np.ndarray, radial_end: np.ndarray, radius: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Where each segment is within ``radius`` of the axis, as a parameter interval.
+
+    ``radial`` holds each point's offset from the axis in the two axes perpendicular to it, so this is
+    a line-versus-circle problem: solve ``|p + t·d|² = r²``. A segment with no radial motion has no
+    crossing parameter at all and is handled outright, exactly as a stationary axis is in the box case.
+    """
+    direction = radial_end - radial
+    a = (direction * direction).sum(axis=1)
+    b = 2.0 * (radial * direction).sum(axis=1)
+    c = (radial * radial).sum(axis=1) - radius * radius
+
+    moving = a > 0.0
+    discriminant = b * b - 4.0 * a * c
+    with np.errstate(divide="ignore", invalid="ignore"):
+        root = np.sqrt(np.maximum(discriminant, 0.0))
+        near = (-b - root) / (2.0 * a)
+        far = (-b + root) / (2.0 * a)
+
+    # No radial motion: the whole segment is inside the circle, or none of it is.
+    within = c <= 0.0
+    near = np.where(moving, near, np.where(within, -np.inf, np.inf))
+    far = np.where(moving, far, np.where(within, np.inf, -np.inf))
+    # Radially moving but missing the circle entirely.
+    missed = moving & (discriminant < 0.0)
+    return np.where(missed, np.inf, near), np.where(missed, -np.inf, far)
+
+
+def _closest_radius(
+    radial: np.ndarray, radial_end: np.ndarray, enter: np.ndarray, leave: np.ndarray
+) -> np.ndarray:
+    """How near the axis each segment gets *within* its inside interval.
+
+    The reportable number for a round blank, the way the lowest Z is for a box: a machinist compares it
+    against the stock radius. Unlike Z it is not linear in the parameter, so the extreme is at the
+    perpendicular foot ``t = -(p0·d)/|d|²`` clamped into the interval, not at an endpoint.
+    """
+    direction = radial_end - radial
+    moving = (direction * direction).sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        foot = np.where(moving > 0.0, -(radial * direction).sum(axis=1) / moving, 0.0)
+    at = np.clip(foot, enter, leave)
+    closest = radial + at[:, None] * direction
+    return np.hypot(closest[:, 0], closest[:, 1])
+
+
+#: Which coordinate is along the rotary axis, and which two are across it.
+_AXIS_COLUMNS: dict[str, tuple[int, tuple[int, int]]] = {
+    "x": (0, (1, 2)),
+    "y": (1, (0, 2)),
+    "z": (2, (0, 1)),
+}
+
+
+def _breach(
+    profile: MachineProfile, stock: StockEnvelope, starts: np.ndarray, ends: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Which segments enter the stock, how far in each reaches, and the bound to quote against it."""
+    if isinstance(stock, StockBox):
+        return _box_breach(stock, starts, ends)
+    return _cylinder_breach(profile, stock, starts, ends)
+
+
+def _box_breach(
+    stock: StockBox, starts: np.ndarray, ends: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, str]:
+    low = np.asarray(stock.min, dtype=np.float64)
+    high = np.asarray(stock.max, dtype=np.float64)
+    enter, leave = _box_overlap(starts, ends, low, high)
+    inside = (enter <= leave) & ~_withdrawing_from_box(starts, ends)
+    # Narrowed to the intersecting segments *before* the arithmetic, not after. A segment ruled out by
+    # a stationary axis outside its slab carries an infinite bound, and `inf * 0` for a Z that does not
+    # move is a NaN — which would both warn and, if one ever reached the aggregation, silently win a
+    # `min()`. Every `enter`/`leave` that survives the mask is inside [0, 1] and therefore finite.
+    z_start, z_end = starts[inside, _Z], ends[inside, _Z]
+    span = z_end - z_start
+    deepest = np.minimum(z_start + enter[inside] * span, z_start + leave[inside] * span)
+    return inside, deepest, "top"
+
+
+def _cylinder_breach(
+    profile: MachineProfile, stock: StockCylinder, starts: np.ndarray, ends: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """A round blank on the rotary axis, so the test is a line against a capped cylinder.
+
+    The axis comes from `[kinematics]` rather than from `[stock]`, which is what makes this exact under
+    rotation: a cylinder concentric with the rotary axis is unchanged by any A, so there is no angle at
+    which the answer differs.
+    """
+    axial_column, radial_columns = _AXIS_COLUMNS[profile.kinematics.rotary_axis]
+    centre = np.asarray(profile.kinematics.centerline_offset, dtype=np.float64)[
+        list(radial_columns)
+    ]
+    radial = starts[:, radial_columns] - centre
+    radial_end = ends[:, radial_columns] - centre
+    axial = starts[:, axial_column]
+    axial_end = ends[:, axial_column]
+
+    radial_near, radial_far = _radial_overlap(radial, radial_end, stock.radius)
+    # The flat ends, as a one-axis slab — the same machinery the box uses, over a single column.
+    axial_near, axial_far = _box_overlap(
+        axial[:, None],
+        axial_end[:, None],
+        np.array([stock.axis_min]),
+        np.array([stock.axis_max]),
+    )
+    enter = np.maximum(np.maximum(radial_near, axial_near), 0.0)
+    leave = np.minimum(np.minimum(radial_far, axial_far), 1.0)
+    inside = (enter <= leave) & ~_withdrawing_from_cylinder(radial, radial_end, axial, axial_end)
+    closest = _closest_radius(radial[inside], radial_end[inside], enter[inside], leave[inside])
+    return inside, closest, "radius"
+
+
+def _stock_breaches(
+    program: Program,
+    stock: StockEnvelope,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    lines: np.ndarray,
+) -> Iterator[Diagnostic]:
+    """One diagnostic per source line, at the furthest into the stock that line's rapids reach.
+
+    "Furthest in" is the lowest Z for a box and the closest approach to the axis for a cylinder. Both
+    are the number a machinist checks against the blank, and both are always meaningful: no intersection
+    is possible without the move getting past the face or inside the radius.
+    """
+    inside, reach, bound = _breach(program.profile, stock, starts, ends)
+    if not inside.any():
+        return
+    breached_lines = lines[inside]
+    known = _offset_known_by_line(program)
+    units_by_line = {
+        command.ref.line_no: command.modal_snapshot.units for command in program.commands
+    }
+
+    for line in sorted({int(value) for value in breached_lines}):
+        worst = float(reach[breached_lines == line].min())
+        units = units_by_line.get(line, "mm")
+        caveat = "" if known.get(line, True) else " (assumes zero work offset)"
+        if bound == "radius":
+            detail = (
+                f"reaching {format_length(worst, units)} from the rotary axis while the stock "
+                f"radius is {format_length(stock.radius, units)}"
+            )
+        else:
+            detail = (
+                f"reaching Z {format_length(worst, units)} while the stock top is Z "
+                f"{format_length(stock.max[_Z], units)}"
+            )
+        yield Diagnostic(
+            rule_id="geometry.rapid-into-stock",
+            severity=Severity.WARNING,
+            line=line,
+            message=f"rapid passes through the stock envelope, {detail}{caveat}",
         )

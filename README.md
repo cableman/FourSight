@@ -104,6 +104,73 @@ foursight check part.nc --profile my-mill.toml
 
 See `src/foursight/profiles/default_4axis.toml`, which documents every field inline.
 
+### Editing the profile in the app
+
+`File → Machine profile…` (Ctrl+M) opens a form over the loaded profile. It is non-modal, and **Apply
+changes the profile in memory and re-checks the open program immediately** — so a limit can be tried
+against a real file and the diagnostics list responds, rather than requiring a file edit and a restart.
+
+Nothing is written to disk until `Save as…`, which is also the only way to keep changes to the profile
+that ships inside the package. Three details worth knowing:
+
+- Optional fields have a **set** checkbox. Clearing it writes *nothing* rather than a zero, because an
+  unset limit disables its check and a zero one does not.
+- Saving keeps the file's comments, and its layout: one key's value is replaced in place. A field you
+  switch off is commented out rather than deleted, so your number and its explanation are still there
+  when you switch it back on.
+- Values you type are written verbatim — `0.005` stays `0.005`.
+
+### Stock, and rapids that would hit it
+
+Two optional settings answer the commonest complaint about a previewer — *it doesn't tell me the machine is
+going to hit the stock*.
+
+```toml
+[limits]
+max_plunge_feed = 300.0     # mm/min; a straight-down G1 faster than this is reported
+
+[stock]                     # a box, in MACHINE coordinates — for prismatic work
+min = [0.0, 0.0, -20.0]
+max = [100.0, 80.0, 0.0]
+```
+
+For 4-axis work, describe the blank as a **cylinder** instead:
+
+```toml
+[stock]
+shape = "cylinder"
+diameter = 50.0
+length = 200.0
+axis_min = 0.0              # machine coordinate of the end nearer the axis minimum
+```
+
+Its axis is not stated here — it is `[kinematics].rotary_axis` through `centerline_offset`. That is the
+point rather than a shortcut: a cylinder concentric with the rotary axis is unchanged by any A rotation,
+so the check stays exact at every angle. A **box** cannot manage that, because it stops describing stock
+that turns with the part, so a program that moves A gets one diagnostic saying the envelope cannot be
+judged instead of per-rapid findings. An off-axis cylinder would have the same problem, which is why it
+cannot be expressed.
+
+Both are unset by default, because neither has an honest generic value: a sane plunge rate belongs to the
+tool and the material, and no shipped profile knows what is clamped to your table today.
+
+What they catch and what they do not is worth being precise about:
+
+- **Plunging** is reported only for blocks that move **Z alone**. A ramp or a helical entry at the
+  contouring feed is correct practice, not a defect, so neither is reported however fast it is.
+- **`[stock]` is an envelope, not a material-removal model.** It knows where the solid started, never
+  what is left of it — so a rapid repositioning at depth inside a pocket an earlier pass already cleared
+  is reported too. That is why the finding is a **warning**: it is worth a look, not a claim that the
+  program is broken. A cutting move through uncut material is not caught at all; that needs the removal
+  simulation which is still future work.
+- A **retract is never reported**, or the rule would flag the `G0 Z25` at the end of every single pass.
+  Out of a box that means straight up; out of a cylinder it means radially away from the axis — so a
+  tool working the underside of a bar can retract *downward* without being flagged, and a `+Z` move
+  from below the centreline is flagged, because that one goes through the material.
+- When the **part rotates** and the blank is a **box**, a solid fixed in machine coordinates no longer
+  describes where the stock is. FourSight says so in one diagnostic and checks nothing further, rather
+  than reporting collisions it cannot stand behind. Declare a **cylinder** and the check holds.
+
 ### Dialect
 
 LinuxCNC is normative. Mach3 is selectable, because two of its behaviours are **controller

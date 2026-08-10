@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M6 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1333 tests**.
+**M0–M9 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1533 tests**.
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -12,7 +12,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1290) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1490) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -102,6 +102,38 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   drawn. `CoordTransformMode.field` is three names at once — the `_GROUPS` key, the `ModalState`
   field, and the attribute both layers read — and a rename that misses one makes every span vanish
   silently.
+- **The profile editor edits the profile's *text*, never a `MachineProfile`.** Two things break if that
+  is reversed. `MachineProfile` values are already mm, so a form populated from one shows 2540 for an
+  inch profile's `max_feed = 100.0` and converts it again on write — 25.4× per round trip, silent. And
+  regenerating TOML from a parsed profile deletes every comment in `default_4axis.toml`, which is where
+  the format is documented. `machine/profile_doc.py` does surgical per-key edits; switching a key off
+  comments it out rather than deleting it. Also: **an unset field must write nothing, never `0`**, and a
+  section whose keys are mandatory together (`[stock]`) toggles as a unit including its header, or the
+  loader refuses the present-but-empty table it would leave behind.
+- **`profile_doc.apply_dialect_override` duplicates `with_dialect`/`with_arc_centre`** — the second
+  deliberate duplication after `sim/timing.py`'s two paths, because the GUI needs the CLI override as
+  *text* or the editor would show the wrong dialect and revert it on the next edit.
+  `test_profile_doc.py::test_the_document_override_agrees_with_the_profile_one` drives both over every
+  combination and demands identical results **and identical refusals**. Do not weaken it.
+- **`[stock]` is an envelope, not a material-removal model**, and `geometry.rapid-into-stock` must stay
+  a **warning** because of it. It says where the solid started, never what is left of it, so a rapid
+  inside it is legitimate whenever an earlier pass cleared that material — which is ordinary pocketing
+  output. Promoting the rule to `error` on the grounds that "a collision would break the machine" would
+  make `foursight check` exit 1 on correct programs.
+- **A cylinder is rotation-invariant; a box is not.** That asymmetry is the whole reason `[stock]` has
+  two shapes, and it decides several things that look arbitrary otherwise. A box under
+  `rotary_mount = "table"` is **refused** with one diagnostic once the program moves A, because it stops
+  describing stock that turns with the part. A cylinder concentric with the rotary axis maps onto itself
+  under every rotation, so it is checked at every angle — which is why its axis comes from
+  `[kinematics]` and **cannot** be restated in `[stock]`: an off-axis cylinder loses the invariance and
+  would be silently wrong the moment the part turned.
+- **Withdrawal is exempt from the stock check, and "upward" is the wrong test for a cylinder.** Every cut
+  ends with a retract from inside the material, so without an exemption the rule fires on every pass —
+  do not "tidy away" either form. For a box it is a strictly vertical climb. For a cylinder it is
+  *radially outward with no axial motion*: a tool working the underside of a bar retracts in **−Z**, and
+  a vertical rule would both report that and exempt a `+Z` move from below the centreline, which drives
+  through the middle of the stock. Monotonically outward, not merely ending further out — radial distance
+  along a line is convex.
 - **All geometry is numpy float64; internal units are always mm.** Convert G20 (inch) input at parse time. But report diagnostics in the program's declared units — "X exceeds 400 mm" against an inch program isn't actionable.
 - **G-codes are strings (`'90.1'`), never floats.** A block carries multiple G- and M-words, so they live in `Command.gcodes` / `Command.mcodes` lists, not in the `words` dict.
 - **`slots=True` on every hot-path dataclass** — the 50k lines/sec parse target doesn't survive otherwise.
