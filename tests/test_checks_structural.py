@@ -9,12 +9,21 @@ governing principle exists to prevent.
 import pytest
 
 from conftest import DEFAULT_PROFILE_PATH, diagnose, fixture_text
-from foursight.machine.profile import load_profile
+from foursight.machine.profile import load_profile, load_profile_text
+from foursight.parser.model import (
+    COORD_TRANSFORM_CANCELS,
+    COORD_TRANSFORM_CODES,
+    COORD_TRANSFORM_MODES,
+    SUBPROGRAM_MCODES,
+)
 from foursight.verify.checks.structural import (
     CANNED_CYCLES,
     CUTTER_COMP,
     INTERPRETED_GCODES,
+    INTERPRETED_MCODES,
+    UNSUPPORTED_MCODES,
     UNSUPPORTED_ONE_SHOT,
+    _all_unsupported,
 )
 from foursight.verify.report import Severity
 
@@ -238,15 +247,152 @@ def test_distinct_unknown_codes_are_reported_separately(profile) -> None:
 
 
 def test_no_code_is_both_interpreted_and_unsupported() -> None:
-    """A code in both tables would report and not report depending on rule order."""
-    unsupported = CANNED_CYCLES | CUTTER_COMP | set(UNSUPPORTED_ONE_SHOT)
-    assert not (INTERPRETED_GCODES & unsupported)
+    """A code in both tables would report and not report depending on rule order.
+
+    Asserted against `_all_unsupported()` itself, not a union rebuilt here. Re-listing the tables in
+    the test is the same drift that let the M-branch of `UnknownCodes` go years without an
+    unsupported table at all: the mirror agreed with itself while the code did something else.
+    """
+    assert INTERPRETED_GCODES.isdisjoint(_all_unsupported())
+    assert _all_unsupported() >= CANNED_CYCLES | CUTTER_COMP | COORD_TRANSFORM_CODES
+    assert set(UNSUPPORTED_ONE_SHOT) <= _all_unsupported()
+
+
+def test_no_mcode_is_both_interpreted_and_unsupported() -> None:
+    assert INTERPRETED_MCODES.isdisjoint(UNSUPPORTED_MCODES)
+
+
+def test_the_unsupported_mcode_table_matches_the_parse_layer() -> None:
+    """`sim` reads SUBPROGRAM_MCODES and `verify` reads UNSUPPORTED_MCODES; they must agree.
+
+    They cannot be one table — one carries a message and the other does not — so this is the pin.
+    """
+    assert set(UNSUPPORTED_MCODES) == set(SUBPROGRAM_MCODES)
 
 
 def test_the_cancel_codes_are_interpreted_and_their_activations_are_not() -> None:
     assert {"40", "80"} <= INTERPRETED_GCODES
+    assert COORD_TRANSFORM_CANCELS <= INTERPRETED_GCODES
     assert not ({"41", "42"} & INTERPRETED_GCODES)
     assert not (CANNED_CYCLES & INTERPRETED_GCODES)
+    assert INTERPRETED_GCODES.isdisjoint(COORD_TRANSFORM_CODES)
+
+
+@pytest.mark.parametrize("code", sorted(_all_unsupported()))
+def test_no_unsupported_gcode_is_also_called_unknown(code: str, profile) -> None:
+    """Closes the class of bug rather than the instance.
+
+    `_all_unsupported()` is the only thing keeping `UnknownCodes` quiet about codes the unsupported
+    rule owns. A fifth table added later and not unioned in there fails here the moment it exists,
+    instead of quietly producing both a warning and an unsupported diagnostic for the same code —
+    with the warning saying the code is "assumed inert", which would contradict the other.
+    """
+    found = check(PREAMBLE + f"G{code}\n", profile)
+    assert not of(found, "structural.unknown-code")
+
+
+@pytest.mark.parametrize("code", sorted(UNSUPPORTED_MCODES))
+def test_no_unsupported_mcode_is_also_called_unknown(code: str, profile) -> None:
+    found = check(PREAMBLE + f"M{code} P1000\n", profile)
+    assert not of(found, "structural.unknown-code")
+
+
+# --------------------------------------------------------------------------- coordinate transforms
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_coordinate_transform_is_unsupported_not_a_warning(mode, profile) -> None:
+    """A warning would license the renderer to draw the untransformed path as if it were the truth."""
+    found = of(
+        check(PREAMBLE + f"G{mode.activate}\nG1 X10 F100\nG{mode.cancel}\n", profile),
+        "structural.unsupported-motion",
+    )
+    assert len(found) == 1
+    assert found[0].severity is Severity.UNSUPPORTED
+    assert found[0].severity is not Severity.WARNING
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_transform_span_names_its_extent(mode, profile) -> None:
+    body = f"G{mode.activate}\nG1 X10 F100\nG1 X20\nG{mode.cancel}\n"
+    found = of(check(PREAMBLE + body, profile), "structural.unsupported-motion")
+    assert "from line 3 to 5" in found[0].message
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_an_uncancelled_transform_span_says_so(mode, profile) -> None:
+    found = of(
+        check(PREAMBLE + f"G{mode.activate}\nG1 X10 F100\n", profile),
+        "structural.unsupported-motion",
+    )
+    assert f"never cancelled by G{mode.cancel}" in found[0].message
+
+
+def test_two_rotation_spans_separated_by_a_cancel_are_two_diagnostics(profile) -> None:
+    body = "G68\nG1 X10 F100\nG69\nG1 X20\nG68\nG1 X30\nG69\n"
+    assert len(of(check(PREAMBLE + body, profile), "structural.unsupported-motion")) == 2
+
+
+def test_simultaneous_transforms_report_separately(profile) -> None:
+    """Two transforms at once are two things wrong; collapsing them leaves the user guessing."""
+    body = "G68\nG51 P2\nG1 X10 F100\nG50\nG69\n"
+    found = of(check(PREAMBLE + body, profile), "structural.unsupported-motion")
+    assert len(found) == 2
+    assert {"rotation" in d.message for d in found} == {True, False}
+
+
+def test_the_polar_message_says_x_and_y_are_not_cartesian(profile) -> None:
+    """The least arguable of the three: under G16 the drawn curve is a *different* curve."""
+    found = of(check(PREAMBLE + "G16\nG1 X50 Y30 F100\n", profile), "structural.unsupported-motion")
+    assert "radius and an angle" in found[0].message
+
+
+def test_g50_alone_is_silent(profile) -> None:
+    """G50 is ambiguous — lathe max-spindle-speed, or the scaling cancel.
+
+    Read as the cancel, because this is a mill previewer. If that guess is wrong the cost is
+    silence; giving it a diagnostic of its own would print a confidently wrong message instead.
+    """
+    assert check(PREAMBLE + "G50\nG1 X10 F100\n" + POSTAMBLE, profile) == []
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_transform_and_its_cancel_in_one_block_is_a_modal_conflict(mode, profile) -> None:
+    """The machine cannot be in both states; Fanuc puts each pair in one modal group."""
+    found = check(PREAMBLE + f"G{mode.activate} G{mode.cancel}\n", profile)
+    assert of(found, "structural.modal-group-conflict")
+
+
+# --------------------------------------------------------------------------- subprograms
+
+
+@pytest.mark.parametrize("code", sorted(UNSUPPORTED_MCODES))
+def test_a_subprogram_code_is_unsupported_not_a_warning(code: str, profile) -> None:
+    found = of(check(PREAMBLE + f"M{code} P1000\n", profile), "structural.unsupported-motion")
+    assert len(found) == 1
+    assert found[0].severity is Severity.UNSUPPORTED
+    assert found[0].severity is not Severity.WARNING
+
+
+def test_the_subprogram_message_says_the_position_is_lost(profile) -> None:
+    found = of(check(PREAMBLE + "M98 P1000\n", profile), "structural.unsupported-motion")
+    assert "lost" in found[0].message
+
+
+def test_every_subprogram_call_is_reported(profile) -> None:
+    """Each call is a distinct place the picture breaks, unlike a once-per-program modal setting."""
+    body = "M98 P1000\nG0 X1 Y1 Z1\nM98 P1001\n"
+    assert len(of(check(PREAMBLE + body, profile), "structural.unsupported-motion")) == 2
+
+
+def test_g98_and_g99_are_not_confused_with_m98_and_m99(profile) -> None:
+    """The tables are keyed on bare digits, and the two live in different lists on one Command.
+
+    G98/G99 are the canned-cycle return modes: interpreted, inert without a cycle, and silent.
+    M98/M99 cost us the machine position entirely. Confusing them is the likeliest bug here.
+    """
+    assert check(PREAMBLE + "G98\nG99\nG1 X10 F100\n" + POSTAMBLE, profile) == []
+    assert of(check(PREAMBLE + "M98 P1000\n", profile), "structural.unsupported-motion")
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -323,3 +469,32 @@ def test_g49_alone_reports_nothing(profile) -> None:
 def test_a_program_without_tool_length_reports_nothing(profile) -> None:
     diagnostics = diagnose("G21 G90 G94\nG1 X10 F600\n", profile)
     assert not [d for d in diagnostics if d.rule_id == "structural.tool-length-not-modelled"]
+
+
+# --------------------------------------------------------------------------- dialect-gated codes
+
+
+def test_g71_is_unknown_under_linuxcnc_and_interpreted_under_mach3() -> None:
+    """The dialect decides whether a code is ours to interpret.
+
+    Deliberately not interpreted globally: in Fanuc, G71 is a turning roughing cycle — very much
+    motion-affecting — so reading it as "millimetres" is only safe once the user has named Mach3.
+    """
+    linuxcnc = load_profile(DEFAULT_PROFILE_PATH)
+    mach3 = load_profile_text('[machine]\nunits = "mm"\n[dialect]\nname = "mach3"\n')
+    program = PREAMBLE + "G71\nG1 X10 F100\n" + POSTAMBLE
+
+    assert of(check(program, linuxcnc), "structural.unknown-code")
+    assert not of(check(program, mach3), "structural.unknown-code")
+
+
+def test_the_mach3_safe_start_line_produces_no_diagnostics() -> None:
+    """The end-to-end shape of the fix: real posted output must check clean.
+
+    `G00 G21 G17 G90 G40 G49 G80` followed by `G71` is exactly what Vectric's Mach2/3 post emits,
+    and under LinuxCNC it produced a hard error plus a warning — so `foursight check` exited 1 on a
+    correct program.
+    """
+    mach3 = load_profile_text('[machine]\nunits = "mm"\n[dialect]\nname = "mach3"\n')
+    posted = "G00G21G17G90G40G49G80\nG71G91.1\nG54\nS8000 M3\nG1 X10 F100\nM5\nM30\n"
+    assert check(posted, mach3) == []

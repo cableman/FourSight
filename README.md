@@ -104,6 +104,29 @@ foursight check part.nc --profile my-mill.toml
 
 See `src/foursight/profiles/default_4axis.toml`, which documents every field inline.
 
+### Dialect
+
+LinuxCNC is normative. Mach3 is selectable, because two of its behaviours are **controller
+configuration** rather than G-code — nothing in the file can tell us which way they are set, and
+guessing wrong at the arc-centre mode draws every unqualified arc in the program in the wrong place
+with no diagnostic at all.
+
+```toml
+[dialect]
+name = "mach3"
+arc_centre = "absolute"   # Mach3's Config -> General "IJ Mode" radio button
+```
+
+```bash
+foursight check part.nc --dialect mach3 --arc-centre absolute
+```
+
+Precedence is `--dialect`/`--arc-centre` > the profile's `[dialect]` > `linuxcnc`. Selecting a
+dialect adds no G-codes and removes none; it changes only what `PLAN.md` § Dialect Divergences lists.
+Mach3-specific codes FourSight cannot interpret — `G68`/`G69` rotation, `G51`/`G50` scaling,
+`G16`/`G15` polar, `M98`/`M99` subprogram calls — are reported as `unsupported` and **not drawn**,
+rather than being assumed inert and drawn as if absent.
+
 ## Performance
 
 Measured on an Intel Iris Xe / Mesa 25.1.5 baseline:

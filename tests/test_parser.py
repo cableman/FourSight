@@ -15,14 +15,16 @@ import pytest
 
 from foursight.parser.model import (
     AXIS_LETTERS,
+    COORD_TRANSFORM_MODES,
     LINEAR_LENGTH_LETTERS,
     ROTARY_LETTERS,
     WORD_LETTERS,
     Command,
     ModalState,
+    ParseErrorKind,
     SourceRef,
 )
-from foursight.parser.resolver import parse
+from foursight.parser.resolver import _GROUP_OF, parse
 
 # PLAN.md § Core Data Model — Parse layer. Asserted verbatim so a field rename or a dropped field
 # fails here rather than surfacing as a mystery three milestones later.
@@ -41,6 +43,9 @@ EXPECTED_FIELDS = {
         "tool",
         "length_offset",
         "cutter_comp",
+        "rotation",
+        "scaling",
+        "polar",
     ),
     Command: ("ref", "gcodes", "mcodes", "motion", "words", "modal_snapshot"),
 }
@@ -96,6 +101,9 @@ def test_modal_state_annotations_match_plan() -> None:
     assert hints["tool"] == int | None
     assert hints["length_offset"] == int | None
     assert hints["cutter_comp"] == str | None
+    assert hints["rotation"] == str | None
+    assert hints["scaling"] == str | None
+    assert hints["polar"] == str | None
 
 
 @pytest.mark.parametrize(
@@ -461,3 +469,46 @@ def test_changing_the_feed_does_allocate() -> None:
     commands, _ = _cmds("G1 X1 F1200\nX2 F600\n")
     assert commands[1].modal_snapshot is not commands[0].modal_snapshot
     assert commands[1].modal_snapshot.feed == 600.0
+
+
+# --------------------------------------------------------------------------- coordinate transforms
+
+
+def test_every_coordinate_transform_mode_matches_its_group_and_state_field() -> None:
+    """`mode.field` is three names at once and they must stay identical.
+
+    The resolver routes a code to a `ModalState` field via the modal-group *name*, so a rename that
+    misses one spelling makes the field silently never update — and every transform span quietly
+    vanishes, which is the failure this whole milestone exists to prevent.
+    """
+    for mode in COORD_TRANSFORM_MODES:
+        assert _GROUP_OF[mode.activate] == mode.field
+        assert _GROUP_OF[mode.cancel] == mode.field
+        assert hasattr(ModalState(), mode.field)
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_transform_is_carried_across_bare_blocks_until_its_cancel(mode) -> None:
+    text = f"G{mode.activate}\nX10\nX20\nG{mode.cancel}\nX30\n"
+    states = [command.modal_snapshot for command in parse(text).commands]
+    assert [getattr(state, mode.field) for state in states[:3]] == [mode.activate] * 3
+    assert getattr(states[-1], mode.field) is None
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_transform_does_not_disturb_the_carried_motion_mode(mode) -> None:
+    """`G68 G1 X10` must keep G1 active: the transform groups are not the motion group."""
+    commands = parse(f"G1 X10 F100\nG{mode.activate}\nX20\n").commands
+    assert [command.motion for command in commands] == ["1", "1", "1"]
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_transform_and_its_cancel_in_one_block_conflict(mode) -> None:
+    result = parse(f"G{mode.activate} G{mode.cancel}\n")
+    assert [error.kind for error in result.errors] == [ParseErrorKind.MODAL_GROUP_CONFLICT]
+
+
+def test_the_transform_fields_do_not_defeat_copy_on_write() -> None:
+    """Three more None fields must not make each block allocate a fresh ModalState."""
+    commands = parse("G21 G90 G54\n" + "".join(f"G1 X{i} F100\n" for i in range(30))).commands
+    assert len({id(command.modal_snapshot) for command in commands}) <= 2

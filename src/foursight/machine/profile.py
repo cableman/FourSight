@@ -20,10 +20,18 @@ file said, and every stored number is already mm (or degrees, for rotary).
 """
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
+from foursight.parser.dialect import (
+    ARC_CENTRE_CODES,
+    PRESETS,
+    Dialect,
+    DialectName,
+    DwellUnits,
+    preset,
+)
 from foursight.parser.model import ROTARY_LETTERS
 
 INCH_TO_MM = 25.4
@@ -51,9 +59,12 @@ _DEFAULT_ARC_CHORD = 0.01
 _DEFAULT_ROTARY_CHORD = 0.01
 _DEFAULT_ROTARY_WRAP_WARN = 360.0
 
-_SECTIONS = frozenset({"machine", "limits", "tolerance", "axes", "offsets", "kinematics", "safety"})
+_SECTIONS = frozenset(
+    {"machine", "limits", "tolerance", "axes", "offsets", "kinematics", "safety", "dialect"}
+)
 _KEYS: dict[str, frozenset[str]] = {
     "machine": frozenset({"name", "units"}),
+    "dialect": frozenset({"name", "arc_centre", "dwell_units"}),
     "limits": frozenset({"max_feed", "max_spindle_rpm", "rotary_wrap_warn"}),
     "tolerance": frozenset({"arc_radius_mismatch", "arc_chord", "rotary_chord"}),
     "kinematics": frozenset({"rotary_mount", "rotary_axis", "centerline_offset", "pivot_to_tip"}),
@@ -133,6 +144,36 @@ class Safety:
 
 
 @dataclass(slots=True, frozen=True)
+class DialectSettings:
+    """Which controller this profile describes, plus the settings a program cannot state.
+
+    ``arc_centre`` and ``dwell_units`` are *controller configuration*: they appear nowhere in the
+    G-code, so a file cannot tell us and we cannot infer them. They are only meaningful for a
+    dialect that treats them as settings — under LinuxCNC the G-code decides (G90.1/G91.1) and G4 P
+    is seconds by specification — so the loader refuses them there rather than ignoring them, which
+    would let a user believe they had configured something.
+    """
+
+    name: str = DialectName.LINUXCNC
+    arc_centre: str = "incremental"  # 'incremental' → G91.1, 'absolute' → G90.1
+    dwell_units: str = DwellUnits.SECONDS
+
+    def as_parser_dialect(self) -> Dialect:
+        """The parse-layer value for these settings.
+
+        Built by `replace`-ing the **preset**, never by constructing a bare `Dialect`: the preset
+        carries the dialect's code tables (`unit_aliases`, `cycle_cancel_conflicts`) as well as its
+        defaults, and listing fields here would silently drop every one this method forgot — so a
+        Mach3 profile would parse with LinuxCNC's code table while calling itself Mach3.
+        """
+        return replace(
+            preset(self.name),
+            arc_distance=ARC_CENTRE_CODES[self.arc_centre],
+            dwell_units=self.dwell_units,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class MachineProfile:
     """A machine description. Every length is mm; rotary values stay in degrees."""
 
@@ -144,10 +185,22 @@ class MachineProfile:
     offsets: dict[str, WorkOffset] = field(default_factory=dict)  # keyed '54'..'59'
     kinematics: Kinematics = field(default_factory=Kinematics)
     safety: Safety = field(default_factory=Safety)
+    dialect: DialectSettings = field(default_factory=DialectSettings)
     # Reported rather than raised, so a newer profile still loads — but the CLI must surface these:
     # `max_fed = 3000` is a typo that would otherwise silently disable the feed check.
     unknown_keys: tuple[str, ...] = ()
     path: Path | None = None
+
+    @property
+    def parser_dialect(self) -> Dialect:
+        """The value to hand `parse(..., dialect=...)`.
+
+        The one bridge from the machine layer to the parse layer, and the only place the two
+        vocabularies meet. Derived rather than stored anywhere downstream: a `Program` or a
+        `FixContext` that kept its own copy could disagree with the profile travelling beside it,
+        and that disagreement surfaces as arithmetically wrong I/J in an applied fix.
+        """
+        return self.dialect.as_parser_dialect()
 
     def offset(self, code: str | None) -> WorkOffset | None:
         """The offset for a `ModalState.offset` code ('54'), or None when it was never configured.
@@ -207,6 +260,7 @@ def _build(data: dict, *, path: Path | None) -> MachineProfile:
         offsets=_offsets(data.get("offsets", {}), scale, unknown),
         kinematics=kinematics,
         safety=_safety(_section(data, "safety", unknown), scale),
+        dialect=_dialect(_section(data, "dialect", unknown)),
         unknown_keys=tuple(unknown),
         path=path,
     )
@@ -304,6 +358,82 @@ def _safety(section: dict, scale: float) -> Safety:
         require_spindle_before_cut=bool(section.get("require_spindle_before_cut", True)),
         retract_before_toolchange=bool(section.get("retract_before_toolchange", True)),
     )
+
+
+#: `[dialect]` keys that describe a *controller setting* rather than the controller's identity.
+_CONTROLLER_SETTINGS = ("arc_centre", "dwell_units")
+
+
+def _dialect(section: dict) -> DialectSettings:
+    """Build `[dialect]`, refusing a setting stated where it means nothing.
+
+    The presence checks have to live here rather than in `_validate`: once the section is a
+    `DialectSettings`, its defaults have erased the difference between "absent" and "explicitly set
+    to the default", and only the raw table still knows.
+    """
+    name = str(section.get("name", DialectName.LINUXCNC)).lower()
+    if name not in PRESETS:
+        raise ProfileError(f"[dialect].name must be one of {', '.join(PRESETS)}, got {name!r}")
+    if name == DialectName.LINUXCNC:
+        for key in _CONTROLLER_SETTINGS:
+            if key in section:
+                raise ProfileError(
+                    f"[dialect].{key} is meaningful only where it is a controller setting; under "
+                    f"'linuxcnc' the G-code decides (G90.1/G91.1) and G4 P is seconds by "
+                    f'specification. Remove the key, or set [dialect].name = "mach3".'
+                )
+
+    arc_centre = str(section.get("arc_centre", "incremental")).lower()
+    if arc_centre not in ARC_CENTRE_CODES:
+        raise ProfileError(
+            f"[dialect].arc_centre must be one of {', '.join(ARC_CENTRE_CODES)}, got {arc_centre!r}"
+        )
+    dwell_units = str(section.get("dwell_units", DwellUnits.SECONDS)).lower()
+    if dwell_units not in set(DwellUnits):
+        raise ProfileError(
+            f"[dialect].dwell_units must be 'seconds' or 'milliseconds', got {dwell_units!r}"
+        )
+    return DialectSettings(name=name, arc_centre=arc_centre, dwell_units=dwell_units)
+
+
+def with_dialect(profile: MachineProfile, name: str | None) -> MachineProfile:
+    """Apply a CLI dialect override, producing the *effective* profile.
+
+    Resolved once, at the CLI/GUI boundary, so that every later stage reads the dialect off the
+    profile it already carries and there is exactly one source of truth. Precedence is
+    ``--dialect`` > ``[dialect].name`` > ``linuxcnc``.
+
+    Overriding to the dialect the profile already names is a no-op, so the profile's controller
+    settings survive. Overriding to a *different* dialect resets them, because settings tuned for
+    one controller describe nothing about another — and under LinuxCNC they are not settings at all.
+    """
+    if name is None or name == profile.dialect.name:
+        return profile
+    if name not in PRESETS:
+        raise ProfileError(f"unknown dialect {name!r}; expected one of {', '.join(PRESETS)}")
+    return replace(profile, dialect=DialectSettings(name=name))
+
+
+def with_arc_centre(profile: MachineProfile, arc_centre: str | None) -> MachineProfile:
+    """Apply a CLI arc-centre override.
+
+    Refused under a dialect where the arc centre is not a controller setting, for the same reason
+    the loader refuses the key there: silently accepting it would let a user believe they had
+    overridden something the G-code actually decides.
+    """
+    if arc_centre is None:
+        return profile
+    if arc_centre not in ARC_CENTRE_CODES:
+        raise ProfileError(
+            f"--arc-centre must be one of {', '.join(ARC_CENTRE_CODES)}, got {arc_centre!r}"
+        )
+    if profile.dialect.name == DialectName.LINUXCNC:
+        raise ProfileError(
+            "--arc-centre applies only where the arc centre is a controller setting; under "
+            "'linuxcnc' the G-code decides it (G90.1/G91.1). Add --dialect mach3, or state "
+            "G90.1/G91.1 in the program."
+        )
+    return replace(profile, dialect=replace(profile.dialect, arc_centre=arc_centre))
 
 
 def _validate(profile: MachineProfile) -> None:

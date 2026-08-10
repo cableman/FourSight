@@ -201,6 +201,40 @@
     ],
     "unknown_durations": 0
   },
+  "coord_rotation_span.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 12.34,
+    "feed": 3,
+    "geometry_sha256": "cb8774f7c9a29958c918f8e1d5798565",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 6,
+    "spans": [
+      [
+        12,
+        14,
+        "suppressed"
+      ]
+    ],
+    "unknown_durations": 0
+  },
   "cutter_comp_span.nc": {
     "bounds_mm_deg": {
       "A": [
@@ -289,6 +323,45 @@
     "rapid": 3,
     "segments": 65,
     "spans": [],
+    "unknown_durations": 0
+  },
+  "subprogram_call.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        10.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 19.54,
+    "feed": 4,
+    "geometry_sha256": "2a462445748fd5bf2a96b93e06412b44",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 7,
+    "spans": [
+      [
+        13,
+        13,
+        "suppressed"
+      ],
+      [
+        14,
+        16,
+        "suppressed"
+      ]
+    ],
     "unknown_durations": 0
   }
 }

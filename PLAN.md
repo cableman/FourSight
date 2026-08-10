@@ -6,6 +6,8 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 
 **Reference dialect:** LinuxCNC is the normative dialect. Fanuc-isms are supported as documented deviations (see Dialect Divergences). Where the two conflict and no explicit setting resolves it, LinuxCNC wins.
 
+The dialect is **selectable** — `[dialect].name` in the machine profile, or `--dialect` on the command line — and defaults to `linuxcnc`. Selecting another dialect never adds or removes a supported G-code; it changes only what § Dialect Divergences lists, which in v1 is the starting arc-centre mode and the units of `G4 P`.
+
 ## Goals
 
 - Load and parse G-code files (LinuxCNC dialect, Fanuc-compatible subset)
@@ -23,6 +25,8 @@ A cross-platform (Ubuntu + Windows) desktop application that parses, simulates, 
 - Post-processor generation or CAM features
 - Controller-specific macro languages (Fanuc Macro B, LinuxCNC O-words) beyond basic tolerance/skip
 - Executing canned cycles (G81–G89) — v1 **detects and refuses** them, see Unsupported Motion Codes
+- Coordinate transforms (G68/G69 rotation, G51/G50 scaling, G16/G15 polar) — detected and refused
+- Subprogram expansion (M98/M99) — detected and refused, and the machine position is treated as **lost** from the call onward
 
 ## Tech Stack
 
@@ -158,7 +162,7 @@ Three things the earlier draft got wrong and this fixes:
 
 **Implemented in T1.1, with three decisions the sketch above left open:**
 
-- **`ModalState` fields carry the dialect defaults**, so a program that never states them still has a well-defined starting state: `units='mm'`, `plane='17'`, `distance='90'`, `arc_distance='91.1'` (per Dialect Divergences), `feed_mode='94'`. Everything genuinely not-yet-established — `offset`, `feed`, `spindle_on`, `tool`, `length_offset`, `cutter_comp` — starts `None`, so the verifier can distinguish "never set" from "set to zero".
+- **`ModalState` fields carry the dialect defaults**, so a program that never states them still has a well-defined starting state: `units='mm'`, `plane='17'`, `distance='90'`, `feed_mode='94'`. `arc_distance` starts from the **selected dialect** (`'91.1'` under the default); `ModalState`'s own field default stays the LinuxCNC value, so the parser is usable with no dialect at all, and `resolve()` injects the dialect's at the one place a `ModalState` is ever constructed. Everything genuinely not-yet-established — `offset`, `feed`, `spindle_on`, `tool`, `length_offset`, `cutter_comp`, and the three refused-transform fields `rotation`/`scaling`/`polar` — starts `None`, so the verifier can distinguish "never set" from "set to zero" and "not in force" from "active".
 - **`units` is never `None`**, unlike `offset`. A program with neither G20 nor G21 still has an effective unit, whereas "no work offset active yet" is a real modal state. "Units never explicitly set" is a property of the whole program rather than of a modal group, so the verifier detects it by looking for G20/G21 across the command stream, not via a sentinel.
 - **`parser/model.py` owns the word-letter tables**, because the G20 inch conversion in the resolver depends on classifying letters correctly and getting it wrong is silent:
   - `WORD_LETTERS` — `X Y Z A I J K R F S T P H D L Q`; excludes G and M, which are lists of strings.
@@ -362,7 +366,7 @@ resolved differently on purpose:**
   than the tool tip. **A verifier rule reporting this is still owed** — by the strict taxonomy it is
   motion-affecting and uninterpreted, i.e. `unsupported`.
 
-G4 dwell is carried through in **seconds** (LinuxCNC); the `P > 60` ms/s-confusion warning stays the
+G4 dwell is carried through in **seconds**, converted from the P word's units per `[dialect].dwell_units`; the `P > 60` ms/s-confusion warning stays the
 verifier's call, not the stepper's.
 
 ### Segment store implementation (T2.1)
@@ -441,6 +445,13 @@ centerline_offset = [0.0, 0.0, 50.0]
 min_clearance_z = 5.0       # rapids below this → warning
 require_spindle_before_cut = true
 retract_before_toolchange = true
+
+[dialect]
+name = "linuxcnc"           # "linuxcnc" | "mach3"
+# mach3 only — the controller's IJ Mode setting; absent under linuxcnc, where the G-code decides
+# arc_centre = "incremental"   # "incremental" (G91.1) | "absolute" (G90.1)
+# mach3 only — some posts emit G4 P in milliseconds
+# dwell_units = "seconds"      # "seconds" | "milliseconds"
 ```
 
 ### Loading rules (T1.5)
@@ -491,7 +502,10 @@ real defaults, because tessellation cannot proceed without a number.
 - Words: X Y Z A I J K R F S T P H D L Q
 - Tool change: T + M6 (position tracking only, no geometry in v1)
 
-**Detected and refused (see below):** G40/G41/G42 cutter compensation, G80–G89 canned cycles.
+**Detected and refused (see below):** G40/G41/G42 cutter compensation, G80–G89 canned cycles,
+G68/G69 coordinate rotation, G51/G50 scaling, G16/G15 polar coordinates, M98/M99 subprogram calls.
+
+Selecting a dialect adds no codes to this list and removes none.
 
 ### Diagnostic severity taxonomy
 
@@ -613,6 +627,12 @@ These are common enough that silently mis-drawing them is the most likely way Fo
 
 - **G40/G41/G42 cutter compensation** — while comp is active the real path is offset by the tool radius. v1 renders the programmed centerline and marks the span: "compensation active; displayed path is the programmed centerline."
 - **G80–G89 canned cycles** — under an active G81, a block containing only `X10 Y10` is a full drill cycle, not a linear move. Drawing a straight line there is exactly the failure mode we refuse. v1 detects the cycle, suppresses motion geometry until G80, and emits one `unsupported` diagnostic per cycle span.
+- **G68/G69 coordinate rotation, G51/G50 scaling, G16/G15 polar mode** — Fanuc/Mach3 constructs with no LinuxCNC equivalent, all three changing the programmed → machine mapping. Each is a **suppressed** span, not a drawn-and-marked one, and the asymmetry with cutter comp is the point: comp is wrong by one tool radius and G43 by a uniform Z datum shift, both bounded and mentally correctable, whereas a rotation about a fixture origin displaces the whole path by an unbounded amount, a negative scale factor **mirrors** the geometry (turning climb into conventional), and under G16 the axis words are a radius and an angle so the drawn curve is a *different curve* — a polar arc renders as a straight line. One `unsupported` diagnostic per mode per span.
+  **G50 is ambiguous** and is read as the scaling cancel. On a lathe it means maximum spindle speed, or a position-register set; FourSight is a 4-axis mill previewer, where the reading is unambiguous. The asymmetry settles it: a right guess correctly closes a scaling span, and a wrong one costs *silence* — we lose a warning and never state anything false. Giving G50 a diagnostic of its own would invert that. No heuristic on a preceding G51 or a trailing S word: a rule that is right most of the time and inexplicable the rest is worse than one plain rule.
+- **M98/M99 subprogram call and return** — not a modal span, because the call is a point event whose *consequence* is what spans. v1 does not expand subprograms, so after one the machine position is genuinely unknown: `MachineState` clears it and sets `position_lost`, the same pathway as an undrawable G28, and every following move is suppressed until X, Y **and** Z are all restated in absolute coordinates. Drawing them would draw a straight line from wherever the main program left off to wherever the subprogram happened to end — a fabricated move at full confidence.
+  These are **M**-codes. G98/G99 are the canned-cycle return modes, are interpreted, and are silent; the tables are keyed on bare digit strings and the two live in different lists on the same `Command`, so confusing them is the likeliest bug in this area and is pinned at both the verify and machine layers.
+
+**One artefact, deliberately accepted.** The first drawn move after a G69/G50/G15 starts from the untransformed in-span endpoint, which is not where the tool physically is. This is the same imprecision the canned-cycle span already has after G80, where in-span blocks update the programmed position through `_ordinary_move` including a wrong Z from `G81 Z-5`. Mirrored rather than special-cased.
 
 ## Arc Semantics
 
@@ -635,7 +655,7 @@ Severity per the taxonomy above.
 - [ ] E: Syntax errors, malformed words
 - [ ] E: Two G-codes from the same modal group in one block
 - [ ] W: Unknown/unsupported *inert* G/M code
-- [ ] U: Unsupported *motion-affecting* code (cutter comp, canned cycles)
+- [x] U: Unsupported *motion-affecting* code (cutter comp, canned cycles, coordinate transforms, subprogram calls)
 
 **Geometry**
 - [ ] E: Arc geometry invalid — radius mismatch beyond `tolerance.arc_radius_mismatch`
@@ -658,6 +678,7 @@ Severity per the taxonomy above.
 - [ ] W: Rapid below `min_clearance_z`
 - [ ] W: G91 active at program end
 - [ ] W: Program lacks M2/M30
+- [x] W: `G4 P` over 60 s under a seconds dialect (likely ms/s confusion) — `process.dwell-units-suspect`
 
 Diagnostics report positions **in the program's declared units**. A message reading "X exceeds 400 mm" against a program written in inches is not actionable.
 
@@ -1308,16 +1329,50 @@ version-specific.
 
 ## Dialect Divergences
 
-Where LinuxCNC and Fanuc disagree, and what we do:
+Where the dialects disagree, and what we do:
 
-| Construct | LinuxCNC | Fanuc | FourSight |
-|---|---|---|---|
-| `G4 P` units | seconds | milliseconds | seconds; warn if P > 60 as a likely ms/s confusion |
-| Arc center default | G91.1 (incremental) | always incremental | G91.1 default, G90.1 honoured |
-| Comments | `( )` and `;` | `( )` | both accepted |
-| Comment placement | stripped before parsing, so `X (c) 10` == `X10` | same | strip first (LinuxCNC) |
-| O-words | flow control (`O100 sub`) | `Oxxxx` program number | bare `Oxxxx` consumed silently; flow control reported as one `unsupported` construct |
-| Program framing | none required | `%` … `%`, `Oxxxx` | consumed silently, never flagged |
+| Construct | LinuxCNC | Fanuc | Mach3 | FourSight |
+|---|---|---|---|---|
+| `G4 P` units | seconds | milliseconds | seconds, but some posts emit ms | seconds unless `[dialect].dwell_units = "milliseconds"`; warn on P > 60 as a likely ms/s confusion (`process.dwell-units-suspect`) |
+| Arc center default | G91.1 (incremental) | always incremental | **controller-configured** (Config → General, "IJ Mode") | G91.1 default, G90.1 honoured, and `[dialect].arc_centre` sets the start under a dialect where it is a setting |
+| Comments | `( )` and `;` | `( )` | `( )` and `;` | both accepted |
+| Comment placement | stripped before parsing, so `X (c) 10` == `X10` | same | same | strip first (LinuxCNC) |
+| O-words | flow control (`O100 sub`) | `Oxxxx` program number | `Oxxxx` program number | bare `Oxxxx` consumed silently; flow control reported as one `unsupported` construct |
+| Program framing | none required | `%` … `%`, `Oxxxx` | `%` … `%`, `Oxxxx` | consumed silently, never flagged |
+| Coordinate rotation | none (`G10 L2 R` rotates the system) | `G68`/`G69` | `G68`/`G69` | refused as `unsupported`, span suppressed |
+| Scaling | none | `G51`/`G50` | `G51`/`G50` | refused as `unsupported`, span suppressed |
+| `G50` meaning | n/a | mill: cancel scaling; lathe: max spindle speed | cancel scaling | read as the **scaling cancel**, silently — this is a mill previewer, and guessing wrong costs silence rather than a false claim |
+| Polar coordinates | none | `G16`/`G15` | `G16`/`G15` | refused as `unsupported`, span suppressed |
+| Subprograms | O-word `sub`/`call` | `M98 P` / `M99` | `M98 P` / `M99` | both refused; M98/M99 additionally mark the machine position **lost** from the call onward |
+| `G70`/`G71` | not codes | turning cycles (G71 is roughing) | inch / mm, alongside G20/G21 | interpreted as units **under mach3 only**; unknown code elsewhere. Not global: reading Fanuc's G71 as "millimetres" would be confidently wrong about a motion-affecting cycle |
+| `G80` with a motion code | modal group 1 conflict — `G0 G80` is an error | accepted | accepted; `G00 G21 G17 G90 G40 G49 G80` is the standard safe-start line | an error under linuxcnc, accepted under mach3. Only the G80 pair is exempt — `G1 G2` stays an error everywhere, because that one really is ambiguous |
+
+### Selecting a dialect
+
+Precedence is **`--dialect` / `--arc-centre` > `[dialect]` in the profile > `linuxcnc`**.
+
+- **The dialect is resolved once**, at the CLI/GUI boundary, into an *effective* `MachineProfile`
+  (`with_dialect`, `with_arc_centre`). Everything downstream reads it off the profile it already
+  carries, via `MachineProfile.parser_dialect`. There is deliberately no second copy on `Program`,
+  `FixContext` or `ModalState`: a copy can disagree with the profile, and the disagreement surfaces
+  as arithmetically wrong I/J written into the user's file by `fix.recompute-arc-centre`, in a diff
+  that looks entirely plausible.
+- **`parse()` takes a `parser.dialect.Dialect`, never a `MachineProfile`**, because `parser/` must
+  not import `machine/`. `machine/profile.py` builds the one from the other, which is the legal
+  direction.
+- **A controller setting is refused where it means nothing.** `arc_centre` and `dwell_units` under
+  `linuxcnc` raise `ProfileError` rather than being ignored — there the G-code decides and G4 P is
+  seconds by specification, so accepting the key would let a user believe they had configured
+  something. The check tests for the key's *presence*, which only the raw TOML table can see: once
+  built, `DialectSettings`' defaults have erased the difference between absent and explicitly-default.
+- **The dialect sets the start, never a lock.** An explicit G90.1 or G91.1 in the program still
+  switches: a program that states its arc mode is unambiguous, and no controller setting overrides it.
+- **The `mach3` preset's values are identical to `linuxcnc`'s**, and that is the honest answer rather
+  than an oversight — Mach3 ships with incremental I/J and specifies G4 P in seconds. What the name
+  buys is the ability to *say otherwise*.
+- **Units are never inferred from a value's magnitude.** A dwell of P5000 is warned about and never
+  rescaled: a legitimate 90-second tool-cooling dwell silently becoming 0.09 s is precisely the
+  confidently-wrong output this plan forbids.
 
 **Block delete (`/`)**: simulated **with block-delete OFF by default** (deleted blocks execute), matching the common control-panel default. Exposed as a toggle in the GUI and a `--block-delete` CLI flag; the verifier runs against the active mode.
 

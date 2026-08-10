@@ -13,6 +13,27 @@
 name = "Generic 4-axis mill"
 units = "mm" # units the values in THIS file are expressed in ("mm" or "inch")
 
+# The controller this profile describes. LinuxCNC is normative; anything else is a documented
+# deviation (PLAN.md § Dialect Divergences). Selecting a dialect never adds or removes supported
+# G-codes — it only changes what is listed there.
+#
+# The two keys below it are controller *configuration*: settings that appear nowhere in the G-code,
+# so a program cannot tell us and we must not guess. They are meaningful only under a dialect that
+# treats them as settings, and the profile refuses to load if one is set where it is not.
+[dialect]
+name = "linuxcnc" # "linuxcnc" | "mach3"
+
+# mach3 only — Mach3's Config → General "IJ Mode" radio button. With "absolute", an arc's I/J are
+# the centre's coordinates rather than an offset from the start point, and getting this wrong draws
+# every unqualified arc in the program wrongly with no diagnostic. A program that states G90.1 or
+# G91.1 itself overrides this; it sets the starting mode, not a lock.
+# arc_centre = "incremental" # "incremental" (G91.1) | "absolute" (G90.1)
+
+# mach3 only — G4 P is seconds on both controllers, but some Mach3 posts emit milliseconds. Never
+# inferred from the magnitude of P: a 90-second tool-cooling dwell is legitimate, and rescaling it
+# to 0.09 s on a hunch is exactly the confidently-wrong output this tool refuses.
+# dwell_units = "seconds" # "seconds" | "milliseconds"
+
 [limits]
 max_feed = 3000.0        # mm/min
 max_spindle_rpm = 24000.0

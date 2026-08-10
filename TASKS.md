@@ -1567,7 +1567,145 @@ The data model is already 4-axis-shaped, so this milestone is the transform itse
       it is Qt's; `linspace` in `interpolate._straight` and `state._to_machine` are next in our own code.
       Files: `src/foursight/sim/timing.py`, `src/foursight/sim/simulator.py`, `tests/test_timing.py`, `PLAN.md`
 
-**Project status: M0–M5 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+---
+
+## M6 — Mach3 dialect support
+
+- [x] **T6.1 — `parser/dialect.py`: the parser-layer dialect value** — *done*
+      `Dialect`/`DialectName`/`DwellUnits`/`PRESETS`/`preset()`; `parse`/`resolve` take `dialect=`, and
+      `ModalState` is constructed with `arc_distance=dialect.arc_distance` at the one place a
+      `ModalState` is ever built. A *value*, not a flag: the next divergence becomes a field rather
+      than another keyword argument. `block_delete` stays separate — it is a control-panel switch an
+      operator flips per run, not part of the controller's identity.
+      A separate module rather than `model.py`, whose docstring declares it the parse-layer *record*
+      types and whose field tuple `tests/test_parser.py` pins by name.
+      **Default behaviour is byte-identical**: `DEFAULT_ARC_DISTANCE` is unchanged, so `ModalState()`
+      still means LinuxCNC and the parser is usable with no dialect at all.
+      Copy-on-write proven unbroken — still **1 distinct `ModalState` across 42,858 commands**.
+      Files: `src/foursight/parser/dialect.py`, `src/foursight/parser/resolver.py`, `tests/test_dialect.py`
+
+- [x] **T6.2 — `[dialect]` in the machine profile** — *done*
+      `DialectSettings`, `MachineProfile.dialect`, the `parser_dialect` bridge, `_SECTIONS`/`_KEYS`,
+      `_dialect()`, `with_dialect()`, `with_arc_centre()`, and the shipped TOML.
+      **A controller setting is refused where it means nothing**: `arc_centre`/`dwell_units` under
+      `linuxcnc` raise `ProfileError` rather than being ignored, because ignoring one would let a user
+      believe they had configured something. The check must live in the builder, not `_validate` —
+      once built, `DialectSettings`' defaults have erased the difference between absent and
+      explicitly-default, and only the raw TOML table still knows.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/profiles/default_4axis.toml`
+
+- [x] **T6.3 — the refused Mach3 constructs** — *done*
+      G68/G69 rotation, G51/G50 scaling, G16/G15 polar as **suppressed** modal spans; M98/M99 as
+      `unsupported` plus a lost machine position. Shared tables `COORD_TRANSFORM_MODES` and
+      `SUBPROGRAM_MCODES` in `parser/model.py`, three new `ModalState` fields and `_GROUPS` entries,
+      `UNSUPPORTED_MCODES` and `_transform_spans` in `verify`, `_subprogram` in `machine/state.py`,
+      the `_track_span` precedence in `sim`.
+      **The M-code half had no mechanism at all**: `UnknownCodes`'s G branch consulted
+      `_all_unsupported()` and its M branch consulted nothing, so M98 would have produced both a
+      warning and an unsupported diagnostic — with the warning saying the code is "assumed inert",
+      which is a flat lie about one that costs us the position entirely.
+      **Suppressed, not drawn-and-marked**, unlike cutter comp: comp is wrong by one tool radius and
+      G43 by a uniform Z shift, both bounded; a rotation about a fixture origin displaces the whole
+      path by an unbounded amount, a negative scale factor mirrors it, and under G16 the drawn curve
+      is a different curve.
+      **`_one_line_span` had to learn to coalesce.** Without it a program calling subprograms fifty
+      times produced hundreds of one-line spans and the summary read "Not drawn: 480 spans at lines
+      41, 42, 43 and 477 more". Guarded on `_emitted_since_span` and `_open is None`, so two
+      identically-worded refusals with drawn geometry between them stay two spans. It improves the
+      pre-existing G28 case for free and moved no golden.
+      Files: `src/foursight/parser/model.py`, `resolver.py`, `verify/checks/structural.py`,
+      `machine/state.py`, `sim/simulator.py`
+
+- [x] **T6.4 — `--dialect` and `--arc-centre`, CLI and GUI** — *done*
+      Both on `_add_common`, and **`--profile` moved there too**: without it `foursight parse --modal`
+      would print `arc=G91.1` for a file `foursight check` reads as absolute, the two subcommands
+      disagreeing about the same file — which is what `--modal` exists to rule out.
+      `--arc-centre` exists because **`--dialect mach3` alone changes nothing observable**: Mach3's
+      defaults are LinuxCNC's, so without it the CLI half of "configurable in both places" is hollow.
+      `default=None` on both, never `"linuxcnc"`, which would silently beat every profile.
+      **The load-bearing edit is `fix/fixes.py`'s four re-parses.** `fix.recompute-arc-centre`
+      branches on the resolved `arc_distance` to decide whether to write the centre's coordinates or
+      an offset from the start point — re-parsing under the wrong dialect writes arithmetically wrong
+      numbers into the user's file in a diff that looks entirely plausible, with no diagnostic.
+      No stored `Program.dialect` or `FixContext.dialect`: both already carry `profile`, and a second
+      copy could only ever disagree with it.
+      Files: `src/foursight/cli.py`, `src/foursight/gui/app.py`, `src/foursight/gui/session.py`,
+      `src/foursight/fix/fixes.py`, `src/foursight/sim/simulator.py`
+
+- [x] **T6.5 — dwell units, and the `P > 60` rule owed since M1** — *done*
+      `_dwell_seconds` honours `[dialect].dwell_units`; `process.dwell-units-suspect` warns on P > 60
+      under a seconds dialect and stays silent under a milliseconds one.
+      **Never inferred from the magnitude of P.** Warn, never rescale: a legitimate 90-second
+      tool-cooling dwell becoming 0.09 s is exactly the confidently-wrong output the plan forbids.
+      Files: `src/foursight/machine/state.py`, `src/foursight/verify/checks/process.py`
+
+- [x] **T6.6 — the Mach3 code table** — *done*
+      Two divergences found by running real posted output (a Vectric Mach2/3 wrapped-rotary job)
+      through `check`, both gated on the dialect so LinuxCNC stays strict.
+      **`G00 G21 G17 G90 G40 G49 G80` was reported as an `error`.** LinuxCNC puts G80 in modal group 1
+      with G0, so it genuinely is a conflict there — but that is the safe-start line nearly every post
+      emits, Mach3 accepts it, and it is unambiguous. `foursight check` was exiting 1 on ordinary,
+      correct output. Exempted for the G80 pair only: `G1 G2` still errors under every dialect.
+      Fixing it also removed an **order dependence** in `_resolve_motion`: it returned on whichever of
+      the two came first, so `G0 G80` and `G80 G0` meant different things.
+      **G70/G71 are Mach3's inch/mm codes** and were unknown-code warnings. Interpreted under Mach3
+      only: in Fanuc, G71 is a turning roughing cycle, so reading it as "millimetres" is safe only
+      once the user has named the dialect. `Dialect` gained `unit_aliases` and
+      `cycle_cancel_conflicts`, and `_ModalTables` resolves them once per parse.
+      **`DialectSettings.as_parser_dialect` had to be rebuilt from the preset** rather than listing
+      fields, or it silently dropped every preset field it forgot — a Mach3 profile would have parsed
+      under LinuxCNC's code table while still calling itself Mach3.
+      **`conftest.diagnose` was parsing under the default dialect while verifying against the given
+      profile**, which split the one thing this design insists cannot be split and hid every
+      parse-layer divergence from every test using a non-default profile.
+      Files: `src/foursight/parser/dialect.py`, `resolver.py`, `machine/profile.py`,
+      `verify/checks/structural.py`, `tests/test_dialect.py`, `tests/conftest.py`
+
+**M6 COMPLETE** — **1333 tests pass** (1290 + 43 in `test_dialect.py`), ruff clean, every
+pre-existing golden byte-identical. **But see the open issue below: the suite cannot currently be run
+in one process.**
+
+- **OPEN — the full suite segfaults, and `tests/test_dialect.py` is the trigger.**
+  `pytest -q` dies with `Fatal Python error: Segmentation fault` at
+  `test_editor.py::test_loading_a_program_shows_the_parsed_text`, reproducibly (3/3). Run the same
+  suite with `--ignore=tests/test_dialect.py` and it is green (1290 passed); run `test_dialect.py`
+  alone and it is green (43 passed). **Every test passes; they cannot all run in one process.**
+
+  What the evidence says, so the next person does not have to rediscover it:
+  - Pristine HEAD is green 3/3, so this arrived with M6.
+  - `test_dialect.py` contains no Qt and no threads. It only shifts *allocation timing*.
+  - The faulthandler dump is unambiguous: the **main thread is `Garbage-collecting`** while a
+    background `ProgramLoader` QThread is inside `tokenize`. PySide6 destroys Qt C++ objects during
+    that collection while the worker is still executing Python.
+  - Forcing `gc.collect()` after every test gets far past the crash, which fits: the danger is one
+    large accumulated collection landing at the wrong moment, not any single object.
+  - Running everything up to and including `test_editor.py` (417 tests) is green. The crash needs the
+    *whole* suite to have been collected, i.e. every test module imported.
+
+  Tried and **did not** fix it: closing the window in `test_editor.py`, and giving
+  `test_main_window.py`'s `window` fixture a teardown that calls `close()` (which is what cancels and
+  joins the loader). Both are arguably right anyway; neither addressed the cause, so both were
+  reverted rather than left in as a half-fix that reads like a solution.
+
+  Not diagnosed: **which** orphaned Qt object is unsafe to collect. Candidates are the unparented
+  widgets returned by the `editor` and `panel` fixtures, which are never deleted. The product itself
+  looks careful here — `MainWindow.closeEvent` cancels and waits for the loader precisely to avoid
+  "a QThread outliving its parent widget", and the real application pumps a true event loop rather
+  than `processEvents` in a tight loop — so this reads as test-harness fragility rather than a
+  shipping defect. That should be confirmed, not assumed.
+
+- **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`.** The value is computed, converted and
+  tested, and the timeline does not include dwell time. So the dwell-units change is correct and
+  currently unobservable outside tests. Worth closing when the timeline is next touched.
+- **Owed from M6 — `UNSUPPORTED_ONE_SHOT` is diagnosed only.** G10, G33, G38.x and G92 are reported
+  by `verify` and still drawn as ordinary moves by `sim`. G92 is the same bug class G68 was — a
+  coordinate-system shift drawn as if absent — and deserves the same treatment.
+  `tests/test_simulator.py::test_the_diagnostic_only_codes_are_listed_deliberately` pins the set, so
+  a new code cannot join the gap by accident.
+
+---
+
+**Project status: M0–M6 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

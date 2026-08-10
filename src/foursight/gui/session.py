@@ -163,7 +163,7 @@ def open_loaded(
     to be incremental. Cancellation is checked once after it, because a user who clicks Cancel during a
     long parse should not then wait out the whole simulation.
     """
-    result = parse(loaded.text, block_delete=block_delete)
+    result = parse(loaded.text, block_delete=block_delete, dialect=profile.parser_dialect)
     if cancelled is not None and cancelled():
         raise SimulationCancelled("cancelled after parsing")
     simulation = simulate(result.commands, profile, progress=progress, cancelled=cancelled)

@@ -16,26 +16,47 @@ being re-derived here.
 
 from collections.abc import Iterable, Iterator, Sequence
 
-from foursight.parser.model import CANNED_CYCLE_CODES, Command, ParseErrorKind
+from foursight.parser.model import (
+    CANNED_CYCLE_CODES,
+    COORD_TRANSFORM_CODES,
+    COORD_TRANSFORM_MODES,
+    Command,
+    CoordTransformMode,
+    ParseErrorKind,
+)
 from foursight.verify.report import Diagnostic, Severity
 from foursight.verify.rules import Program, Rule, register_rule
 
 # Codes v1 interprets. Anything here produces no diagnostic of its own.
 INTERPRETED_GCODES = frozenset({
     "0", "1", "2", "3", "4",
+    "15",                                    # polar mode CANCEL; see the transform note below
     "17", "18", "19",
     "20", "21",
     "28", "28.1", "30", "30.1",
     "40",                                    # cutter comp CANCEL is interpreted; 41/42 are not
     "43", "44", "49",
+    "50",                                    # scaling CANCEL; see the G50 note below
     "53",
     "54", "55", "56", "57", "58", "59", "59.1", "59.2", "59.3",
     "61", "61.1", "64",                      # path-control modes: see note below
+    "69",                                    # rotation CANCEL
     "80",                                    # canned-cycle CANCEL
     "90", "91", "90.1", "91.1",
     "93", "94", "95",
     "98", "99",                              # canned-cycle return mode; only meaningful with 8x
 })  # fmt: skip
+
+# G15/G50/G69 join G40 and G80 as cancels: a cancel ends a refused span rather than being a refused
+# construct, so it is interpreted and silent.
+#
+# **G50 is ambiguous** and is read here as the scaling cancel. On a lathe it means maximum spindle
+# speed, or a position-register set. FourSight is a 4-axis *mill* previewer, where the reading is
+# unambiguous. The asymmetry settles it: if the guess is right we correctly close a scaling span; if
+# a lathe program ever appears, the cost is *silence* — we lose a warning and never say anything
+# false. Giving G50 a diagnostic of its own would invert that and print a confidently wrong message.
+# Heuristics on a preceding G51 or a trailing S word are deliberately not attempted: a mode that is
+# right most of the time and inexplicable the rest is worse than one plain rule.
 
 # G61/G61.1/G64 are accepted silently rather than warned about. They select exact-stop versus
 # blending, which changes how the machine *corners* but not the programmed centreline we render, so
@@ -61,6 +82,22 @@ UNSUPPORTED_ONE_SHOT: dict[str, str] = {
     "92.1": "G92.1 clears coordinate-system offsets, which v1 does not model",
     "92.2": "G92.2 suspends coordinate-system offsets, which v1 does not model",
     "92.3": "G92.3 restores coordinate-system offsets, which v1 does not model",
+}
+
+# The M-code counterpart of UNSUPPORTED_ONE_SHOT, and `UnknownCodes`'s M branch **must** consult it.
+# Without the exclusion, M98 yields both a warning and an unsupported diagnostic — and the warning's
+# text ("assumed inert and the path is drawn as if it were absent") would be a flat lie about a code
+# that costs us the machine position entirely.
+UNSUPPORTED_MCODES: dict[str, str] = {
+    "98": (
+        "M98 subprogram call is not expanded in v1: the called blocks are not simulated, and the "
+        "machine position is treated as lost from here on, so the following moves are not drawn "
+        "until X, Y and Z are all restated in absolute coordinates"
+    ),
+    "99": (
+        "M99 subprogram return is not interpreted in v1: execution does not continue to the next "
+        "line, so the machine position is treated as lost from here on"
+    ),
 }
 
 # ParseError kinds that are genuine malformed input, as opposed to a recognized-but-unsupported
@@ -152,16 +189,20 @@ class UnknownCodes(Rule):
     def check(self, program: Program) -> Iterable[Diagnostic]:
         # Report each distinct code once per line, but a code repeated across a 100k-line file
         # should not yield 100k warnings either — so report the first occurrence of each code.
+        unsupported = _all_unsupported()  # built once, not once per G-word in the file
+        # Codes the selected dialect interprets and the normative subset does not — Mach3's G70/G71.
+        # Read from the profile, so a program checked under LinuxCNC still hears about them.
+        interpreted = INTERPRETED_GCODES | program.profile.parser_dialect.extra_gcodes
         seen: set[str] = set()
         for command in program.commands:
             for code in command.gcodes:
-                if code in INTERPRETED_GCODES or code in _all_unsupported():
+                if code in interpreted or code in unsupported:
                     continue
                 if f"G{code}" not in seen:
                     seen.add(f"G{code}")
                     yield self._unknown(command, "G", code)
             for code in command.mcodes:
-                if code in INTERPRETED_MCODES:
+                if code in INTERPRETED_MCODES or code in UNSUPPORTED_MCODES:
                     continue
                 if f"M{code}" not in seen:
                     seen.add(f"M{code}")
@@ -238,6 +279,14 @@ class UnsupportedMotionCodes(Rule):
       of the program.
     - **Cutter compensation (G41/G42).** While comp is active the real path is offset by the tool
       radius; v1 draws the programmed centreline and says so. The span runs to G40 or program end.
+    - **Coordinate transforms (G68 rotation, G51 scaling, G16 polar).** Fanuc/Mach3 constructs that
+      change the programmed → machine mapping. Unlike comp, the error is unbounded — a rotation
+      about a fixture origin displaces the whole path, a negative scale factor mirrors it, and under
+      G16 the axis words are a radius and an angle — so these spans are suppressed, not drawn.
+
+    ``rule_id`` is shared with the one-shot codes and the subprogram calls on purpose. All of them
+    say the same thing — the picture is not what the program does — and splitting them across ids
+    would fragment that for the panel and for any future suppression mechanism keyed on the id.
     """
 
     rule_id = "structural.unsupported-motion"
@@ -247,6 +296,7 @@ class UnsupportedMotionCodes(Rule):
     def check(self, program: Program) -> Iterable[Diagnostic]:
         commands = program.commands
         yield from self._cycle_spans(commands)
+        yield from self._transform_spans(commands)
         yield from self._comp_spans(commands)
         yield from self._one_shots(commands)
 
@@ -267,6 +317,29 @@ class UnsupportedMotionCodes(Rule):
                 offset=commands[start].ref.start,
             )
 
+    def _transform_spans(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
+        """G68/G51/G16 spans, from the same table `sim` uses to decide not to draw them.
+
+        One pass per mode rather than one combined span: two transforms active at once are two
+        things wrong with the program, and collapsing them would leave the user guessing which.
+        """
+        for mode in COORD_TRANSFORM_MODES:
+            for start, end in _spans(commands, _transform_active(mode)):
+                first = commands[start].ref.line_no
+                last = commands[end].ref.line_no
+                closed = end + 1 < len(commands) and mode.cancel in commands[end + 1].gcodes
+                yield Diagnostic(
+                    rule_id=self.rule_id,
+                    severity=Severity.UNSUPPORTED,
+                    line=first,
+                    message=(
+                        f"G{mode.activate} {mode.name} active from line {first} to {last}"
+                        f"{'' if closed else f' (never cancelled by G{mode.cancel})'}"
+                        f"; {mode.consequence}"
+                    ),
+                    offset=commands[start].ref.start,
+                )
+
     def _comp_spans(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
         active = _spans(commands, lambda c: c.modal_snapshot.cutter_comp is not None)
         for start, end in active:
@@ -284,22 +357,48 @@ class UnsupportedMotionCodes(Rule):
             )
 
     def _one_shots(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
+        """Per-occurrence codes: one-shot, or a point event whose *consequence* is what spans.
+
+        M98 is the second kind. Each call is a distinct place the picture breaks, so each is
+        reported; the lost-position span that follows is `sim`'s to report, not this rule's.
+        """
         for command in commands:
-            for code in command.gcodes:
-                reason = UNSUPPORTED_ONE_SHOT.get(code)
-                if reason is not None:
-                    yield Diagnostic(
-                        rule_id=self.rule_id,
-                        severity=Severity.UNSUPPORTED,
-                        line=command.ref.line_no,
-                        message=reason,
-                        offset=command.ref.start,
-                    )
+            yield from self._from_table(command, command.gcodes, UNSUPPORTED_ONE_SHOT)
+            yield from self._from_table(command, command.mcodes, UNSUPPORTED_MCODES)
+
+    def _from_table(
+        self, command: Command, codes: Sequence[str], table: dict[str, str]
+    ) -> Iterator[Diagnostic]:
+        for code in codes:
+            reason = table.get(code)
+            if reason is not None:
+                yield Diagnostic(
+                    rule_id=self.rule_id,
+                    severity=Severity.UNSUPPORTED,
+                    line=command.ref.line_no,
+                    message=reason,
+                    offset=command.ref.start,
+                )
+
+
+def _transform_active(mode: CoordTransformMode):
+    """A predicate for one transform mode.
+
+    A closure rather than a lambda written inline in the loop: `lambda c: getattr(c.modal_snapshot,
+    mode.field)` is late-bound over `mode`, so every span would be reported under the last mode.
+    Ruff's B023 catches it, but it is worth not writing.
+    """
+    field = mode.field
+    return lambda command: getattr(command.modal_snapshot, field) is not None
 
 
 def _all_unsupported() -> frozenset[str]:
-    """Codes handled by `UnsupportedMotionCodes`, so `UnknownCodes` stays quiet about them."""
-    return CANNED_CYCLES | CUTTER_COMP | frozenset(UNSUPPORTED_ONE_SHOT)
+    """G-codes handled by `UnsupportedMotionCodes`, so `UnknownCodes` stays quiet about them.
+
+    **Every table that rule owns must appear here.** One that does not produces both a warning and
+    an unsupported diagnostic for the same code, and the warning's text contradicts the other.
+    """
+    return CANNED_CYCLES | CUTTER_COMP | COORD_TRANSFORM_CODES | frozenset(UNSUPPORTED_ONE_SHOT)
 
 
 def _spans(commands: Sequence[Command], active) -> list[tuple[int, int]]:

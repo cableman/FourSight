@@ -15,6 +15,7 @@ program is not actionable.
 from collections.abc import Iterable
 
 from foursight.machine.state import machine_value, walk
+from foursight.parser.dialect import DwellUnits
 from foursight.verify.report import Diagnostic, Severity, format_feed, format_length
 from foursight.verify.rules import Program, Rule, register_rule
 
@@ -355,3 +356,59 @@ class RapidBelowClearance(Rule):
                     f"{format_length(clearance, units)}{caveat}"
                 ),
             )
+
+
+#: G4 dwell, and the threshold above which a P value looks like milliseconds rather than seconds.
+#: Not a hard rule — a tool-cooling dwell can legitimately exceed a minute, which is why this is a
+#: warning and why nothing is rescaled on the strength of it.
+DWELL = "4"
+DWELL_SECONDS_SUSPECT = 60.0
+
+
+@register_rule
+class DwellUnitsSuspect(Rule):
+    """G4 P far larger than any plausible pause: the post probably emitted milliseconds.
+
+    **Owed since M1**, promised by PLAN.md § Dialect Divergences and never implemented. LinuxCNC and
+    Mach3 both specify G4 P in seconds; Fanuc uses milliseconds, and posts configured for a Fanuc
+    control emit them anyway. `G4 P5000` is then either a 5-second pause or an 83-minute one, and
+    the two are not distinguishable from the program.
+
+    A warning, and nothing is rescaled: inferring the units from the magnitude of P would turn a
+    legitimate 90-second tool-cooling dwell into 0.09 s, which is the confidently-wrong output the
+    plan forbids. The way to *fix* it is `[dialect].dwell_units`, and the message says so.
+
+    Reported once, at the first offending block, matching this module's convention: one
+    misconfigured post is one fact about the program, not one per dwell.
+    """
+
+    rule_id = "process.dwell-units-suspect"
+    description = "G4 P over 60 s, which is more likely a millisecond value"
+    severity = Severity.WARNING
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        if program.profile.dialect.dwell_units == DwellUnits.MILLISECONDS:
+            # The profile has already answered the question; P5000 really is 5 seconds.
+            return
+        offenders = [
+            command
+            for command in program.commands
+            if DWELL in command.gcodes and command.words.get("P", 0.0) > DWELL_SECONDS_SUSPECT
+        ]
+        if not offenders:
+            return
+        first = offenders[0]
+        seconds = first.words["P"]
+        others = "" if len(offenders) == 1 else f" ({len(offenders) - 1} more like it.)"
+        yield Diagnostic(
+            rule_id=self.rule_id,
+            severity=Severity.WARNING,
+            line=first.ref.line_no,
+            message=(
+                f"G4 P{seconds:g} is a dwell of {seconds:g} s ({seconds / 60:.0f} min): G4 P is "
+                f"seconds under this dialect, and a value this large usually means the post emitted "
+                f'milliseconds. Set [dialect].dwell_units = "milliseconds" if that is intended.'
+                f"{others}"
+            ),
+            offset=first.ref.start,
+        )

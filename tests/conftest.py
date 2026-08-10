@@ -145,6 +145,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         "cutter_compensation", "N120 G1 X10.0 Y30.0", "N120 G41 D1",
         "structural.unsupported-motion", "U: cutter comp active; displayed path is the centerline",
     ),
+    Mutation(
+        "coordinate_rotation", "N120 G1 X10.0 Y30.0", "N120 G68 X0.0 Y0.0 R45.0",
+        "structural.unsupported-motion", "U: G68 rotation; the drawn path would be the unrotated one",
+    ),
+    Mutation(
+        "coordinate_scaling", "N120 G1 X10.0 Y30.0", "N120 G51 X0.0 Y0.0 P2.0",
+        "structural.unsupported-motion", "U: G51 scaling; the drawn path would be unscaled",
+    ),
+    Mutation(
+        "polar_coordinates", "N120 G1 X10.0 Y30.0", "N120 G16",
+        "structural.unsupported-motion", "U: G16 polar; X and Y are a radius and an angle",
+    ),
+    Mutation(
+        "subprogram_call", "N120 G1 X10.0 Y30.0", "N120 M98 P1000",
+        "structural.unsupported-motion", "U: M98 is not expanded; position is lost from here on",
+    ),
 )  # fmt: skip
 
 
@@ -178,7 +194,11 @@ def diagnose(text: str, profile: MachineProfile) -> list[Diagnostic]:
     assertions only checked that a specific rule_id was absent. Every fixture and check test routes
     through here, so this one assertion closes that hole everywhere at once.
     """
-    result = parse(text)
+    # Parsed under the profile's own dialect, exactly as `cli.run_check` and `gui.session` do.
+    # Passing the profile to `verify` while parsing under the default would split the one thing the
+    # dialect design insists cannot be split, and would quietly hide every parse-layer divergence
+    # from every test that uses a non-default profile.
+    result = parse(text, dialect=profile.parser_dialect)
     program = Program(commands=result.commands, profile=profile, parse_errors=result.errors)
     diagnostics = verify(program)
     crashed = [d.message for d in diagnostics if d.rule_id == "internal.rule-failed"]

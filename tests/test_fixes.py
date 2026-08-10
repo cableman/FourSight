@@ -441,3 +441,49 @@ def test_history_clears() -> None:
     history.record("fix.a", "x")
     history.clear()
     assert history.depth == 0
+
+
+# --------------------------------------------------------------------------- dialect (M6)
+
+MACH3_ABSOLUTE = """
+[machine]
+units = "mm"
+[tolerance]
+arc_radius_mismatch = 0.005
+[dialect]
+name = "mach3"
+arc_centre = "absolute"
+"""
+
+
+def test_arc_centre_recomputation_honours_an_absolute_dialect() -> None:
+    """The load-bearing case for threading the dialect into the fix engine.
+
+    `fix.recompute-arc-centre` re-parses the buffer and then branches on the resolved
+    `arc_distance` to decide whether to write the centre's coordinates or an offset from the start
+    point. Under a Mach3-absolute profile, re-parsing with the default dialect writes an *offset*
+    where the controller expects a *coordinate* — a diff that looks entirely plausible and is
+    arithmetically wrong, with no diagnostic anywhere to say so.
+
+    Geometry: start (4,0), end (24,0), so the true centre is (14,0). The start point is deliberately
+    off the origin, because at (0,0) the absolute and incremental spellings coincide and the test
+    would pass either way. `I14.01` absolute and `I10.01` incremental describe the *same* arc — the
+    pair below is the same slightly-wrong arc written for each controller.
+    """
+    profile = load_profile_text(MACH3_ABSOLUTE)
+    text = "G21 G90 G94 G17\nG0 X4 Y0\nG2 X24 Y0 I14.01 J0 F600\n"
+    result = run("fix.recompute-arc-centre", text, profile, line=3)
+    assert result.applied, result.refusal
+    written = parse(result.text, dialect=profile.parser_dialect).commands[-1]
+    assert written.words["I"] == pytest.approx(14.0, abs=1e-6), (
+        "the centre was written as an incremental offset under an absolute-I/J dialect"
+    )
+
+
+def test_arc_centre_recomputation_stays_incremental_by_default(profile) -> None:
+    """The same geometry under the default dialect writes the offset, not the coordinate."""
+    text = "G21 G90 G94 G17\nG0 X4 Y0\nG2 X24 Y0 I10.01 J0 F600\n"
+    result = run("fix.recompute-arc-centre", text, profile, line=3)
+    assert result.applied, result.refusal
+    written = parse(result.text).commands[-1]
+    assert written.words["I"] == pytest.approx(10.0, abs=1e-6)

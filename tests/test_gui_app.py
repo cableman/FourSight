@@ -103,3 +103,15 @@ def test_a_missing_profile_file_is_refused(tmp_path, capsys) -> None:
     pytest.importorskip("PySide6", reason="the [gui] extra is not installed")
     assert main(["--profile", str(tmp_path / "absent.toml")]) == USAGE_ERROR
     assert "cannot load profile" in capsys.readouterr().out
+
+
+def test_the_dialect_defaults_to_the_profiles() -> None:
+    """A CLI default of "linuxcnc" would silently beat every profile's [dialect].name."""
+    assert build_parser().parse_args([]).dialect is None
+    assert build_parser().parse_args(["--dialect", "mach3"]).dialect == "mach3"
+
+
+def test_the_arc_centre_override_is_available_to_the_gui() -> None:
+    """The launcher mirrors the headless flags; both build the same effective profile."""
+    args = build_parser().parse_args(["--dialect", "mach3", "--arc-centre", "absolute"])
+    assert args.arc_centre == "absolute"

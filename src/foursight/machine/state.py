@@ -22,7 +22,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 
 from foursight.machine.profile import MachineProfile
-from foursight.parser.model import AXIS_LETTERS, Command
+from foursight.parser.dialect import DwellUnits
+from foursight.parser.model import AXIS_LETTERS, SUBPROGRAM_MCODES, Command
 
 # G53 makes a block's coordinates machine-absolute for that block only.
 _MACHINE_COORDS = "53"
@@ -156,7 +157,7 @@ class Step:
 
     command: Command
     moves: tuple[Move, ...] = ()
-    dwell: float = 0.0  # seconds; G4 P is seconds in LinuxCNC
+    dwell: float = 0.0  # always seconds; the P word's units come from [dialect].dwell_units
     undrawable: str | None = None  # why this block's geometry cannot be produced
     tool_length_unmodelled: bool = False
 
@@ -199,6 +200,11 @@ class MachineState:
         """Advance the state by one block and describe what it did."""
         self._track_tool_length(command)
 
+        subprogram = [code for code in command.mcodes if code in SUBPROGRAM_MCODES]
+        if subprogram:
+            # First: if a block calls or returns from a subprogram, nothing else about it can be
+            # honoured, because we do not know what the called blocks did.
+            return self._subprogram(command, subprogram)
         if _DWELL in command.gcodes:
             return Step(command=command, dwell=self._dwell_seconds(command))
         if any(code in _REFERENCE_RETURN for code in command.gcodes):
@@ -273,13 +279,43 @@ class MachineState:
             tool_length_unmodelled=self.active_h is not None,
         )
 
-    def _dwell_seconds(self, command: Command) -> float:
-        """G4 P in **seconds** (LinuxCNC). Fanuc uses milliseconds; the divergence is documented.
+    def _subprogram(self, command: Command, codes: list[str]) -> Step:
+        """M98/M99: v1 does not expand subprograms, so the position afterwards is unknown.
 
-        The ms/s confusion warning (P > 60) is the verifier's call, not this module's — here the
-        value is simply carried through to the timeline.
+        The same machinery as an undrawable G28, for the same reason: we *had* a position and no
+        longer do. Drawing the next block would draw a straight line from wherever the main program
+        left off to wherever the subprogram happened to end — a fabricated move at full confidence.
+
+        Reads ``mcodes``. G98/G99 are the canned-cycle return modes, are interpreted, and never
+        reach here; the tables are keyed on bare digits, so reading the wrong list would confuse two
+        unrelated constructs.
         """
-        return float(command.words.get("P", 0.0))
+        self.programmed = Position()
+        self.position_lost = True
+        names = "/".join(f"M{code}" for code in codes)
+        return Step(
+            command=command,
+            undrawable=(
+                f"{names} subprogram call/return is not expanded in v1, so the machine position "
+                "after it is unknown; this block and the moves after it are not drawn until X, Y "
+                "and Z are all restated in absolute coordinates"
+            ),
+        )
+
+    def _dwell_seconds(self, command: Command) -> float:
+        """G4 P → seconds.
+
+        LinuxCNC and Mach3 both specify seconds; Fanuc uses milliseconds, and some Mach3 posts emit
+        them too. That is a property of the *post*, which no program states, so it comes from
+        `[dialect].dwell_units` and is **never** inferred from the magnitude of P — inferring would
+        turn a legitimate 90-second tool-cooling dwell into 0.09 s.
+
+        The ms/s confusion *warning* stays the verifier's call (`process.dwell-units-suspect`).
+        """
+        value = float(command.words.get("P", 0.0))
+        if self._profile.dialect.dwell_units == DwellUnits.MILLISECONDS:
+            return value / 1000.0
+        return value
 
     def _track_tool_length(self, command: Command) -> None:
         for code in command.gcodes:

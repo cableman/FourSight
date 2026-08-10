@@ -14,6 +14,8 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
+from foursight.parser.dialect import ARC_CENTRE_CODES, DIALECT_NAMES
+
 USAGE_ERROR = 2
 MISSING_GUI_EXTRA = 3
 
@@ -42,7 +44,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="honour block-delete '/' and skip those blocks (default: they execute, as on most controls)",
     )
+    _add_dialect_arguments(parser)
     return parser
+
+
+def _add_dialect_arguments(parser: argparse.ArgumentParser) -> None:
+    """The dialect overrides, shared with the headless CLI's wording.
+
+    Imported at module scope is fine: `parser.dialect` pulls in nothing but `dataclasses`, `enum`
+    and `parser.model`, so it cannot drag Qt or numpy into a `--help` run.
+    """
+    parser.add_argument(
+        "--dialect",
+        choices=DIALECT_NAMES,
+        default=None,  # not "linuxcnc": a default here would silently beat every profile
+        help=(
+            "controller dialect, overriding the profile's [dialect].name "
+            "(default: the profile's, which is linuxcnc unless it says otherwise)"
+        ),
+    )
+    parser.add_argument(
+        "--arc-centre",
+        choices=tuple(ARC_CENTRE_CODES),
+        default=None,
+        help=(
+            "arc I/J mode, overriding the profile's [dialect].arc_centre. Applies only where the "
+            "arc centre is a controller setting, so it requires a non-linuxcnc dialect"
+        ),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -54,10 +83,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_INSTALL_HINT)
         return MISSING_GUI_EXTRA
 
-    from foursight.machine.profile import ProfileError, default_profile_path, load_profile
+    from foursight.machine.profile import (
+        ProfileError,
+        default_profile_path,
+        load_profile,
+        with_arc_centre,
+        with_dialect,
+    )
 
     try:
         profile = load_profile(args.profile or default_profile_path())
+        # Resolved once, into the *effective* profile: everything downstream reads the dialect off
+        # the profile it already carries, so there is no second copy to disagree with.
+        profile = with_arc_centre(with_dialect(profile, args.dialect), args.arc_centre)
     except (OSError, ProfileError) as error:
         # Before the window exists, so there is nowhere to show a dialog. Refusing outright beats
         # opening with a silently substituted default profile: limits and rapid rates would be wrong,

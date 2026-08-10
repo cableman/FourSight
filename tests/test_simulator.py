@@ -14,6 +14,7 @@ import pytest
 
 from conftest import DEFAULT_PROFILE_PATH, fixture_text
 from foursight.machine.profile import load_profile, load_profile_text
+from foursight.parser.model import COORD_TRANSFORM_MODES
 from foursight.parser.resolver import parse
 from foursight.sim.segments import Kind
 from foursight.sim.simulator import simulate, simulate_text
@@ -318,3 +319,130 @@ def test_block_delete_changes_the_geometry(profile) -> None:
     executed, _ = simulate_text(fixture_text("block_delete.nc"), profile)
     skipped, _ = simulate_text(fixture_text("block_delete.nc"), profile, block_delete=True)
     assert len(executed.store) > len(skipped.store)
+
+
+# ------------------------------------------------- coordinate transforms and subprograms (M6)
+
+
+@pytest.mark.parametrize("mode", COORD_TRANSFORM_MODES, ids=lambda m: m.field)
+def test_a_coordinate_transform_span_produces_no_geometry(mode, profile) -> None:
+    """Suppressed, not drawn-and-marked, unlike cutter comp.
+
+    Comp is wrong by one tool radius and G43 by a uniform Z shift — both bounded and mentally
+    correctable. A rotation about a fixture origin displaces the whole path by an unbounded amount,
+    a negative scale factor mirrors it, and under G16 the axis words are a radius and an angle, so
+    the drawn curve is a different curve entirely.
+    """
+    body = f"G{mode.activate}\nG1 X10 F600\nG1 X20\nG{mode.cancel}\nG1 X30\n"
+    sim = run(PREAMBLE + body, profile)
+    assert len(sim.suppressed) == 1
+    assert sim.unverified == ()
+    span = sim.suppressed[0]
+    assert (span.first_line, span.last_line) == (5, 7)
+    assert not {6, 7} & lines_with_segments(sim)
+    assert 9 in lines_with_segments(sim), "motion after the cancel is drawn again"
+
+
+def test_a_transform_outranks_cutter_comp(profile) -> None:
+    """Precedence, invisible to every other test.
+
+    With both active, calling the span "drawn, centreline only" would understate it by an unbounded
+    rigid transform — so suppression wins.
+    """
+    # Line 5 is comp only; lines 6-7 are comp AND rotation; line 8 cancels the rotation.
+    sim = run(PREAMBLE + "G41 D1\nG68\nG1 X10 F600\nG69\nG40\n", profile)
+    assert any(not span.drawn and span.contains(7) for span in sim.spans), (
+        "the block under both must be suppressed"
+    )
+    assert not any(span.drawn and span.contains(7) for span in sim.spans), (
+        "the block under both must not be reported as merely unverified"
+    )
+    assert 7 not in lines_with_segments(sim)
+
+
+def test_simultaneous_transforms_read_differently_from_one_alone(profile) -> None:
+    """Span identity is the reason string, so cancelling one must start a new span, not extend."""
+    sim = run(PREAMBLE + "G68\nG1 X10 F600\nG51 P2\nG1 X20\nG50\nG1 X30\nG69\n", profile)
+    reasons = {span.reason for span in sim.suppressed}
+    assert len(reasons) > 1, "G68 alone and G68+G51 must not share a span reason"
+
+
+def test_a_subprogram_call_suppresses_its_own_line_and_the_moves_after_it(profile) -> None:
+    sim = run(PREAMBLE + "G1 X10 F600\nM98 P1000\nG1 X20\nG1 X30\n", profile)
+    assert 5 in lines_with_segments(sim), "the move before the call is still drawn"
+    assert not {6, 7, 8} & lines_with_segments(sim)
+    assert any("subprogram" in span.reason for span in sim.suppressed)
+
+
+def test_a_long_tail_after_a_subprogram_call_is_not_one_span_per_line(profile) -> None:
+    """Otherwise the summary reads "Not drawn: 40 spans at lines 7, 8, 9 and 37 more".
+
+    The refusals that repeat are the consequential ones — every block after a lost position is
+    refused for the identical reason — so they coalesce.
+    """
+    tail = "".join(f"G1 X{index}\n" for index in range(40))
+    sim = run(PREAMBLE + "G1 X10 F600\nM98 P1000\n" + tail, profile)
+    assert len(sim.suppressed) <= 2, [span.reason for span in sim.suppressed]
+    assert sim.suppressed[-1].last_line - sim.suppressed[-1].first_line >= 30
+
+
+def test_two_unrelated_refusals_are_not_merged_into_one_span(profile) -> None:
+    """The guard on the coalescing: merging across drawn geometry would report it as not drawn."""
+    body = "G0 X1 Y1 Z1\nM98 P1000\nG0 X2 Y2 Z2\nG1 X10 F600\nG1 X20\nM98 P1001\nG1 X30\n"
+    sim = run(PREAMBLE + body, profile)
+    drawn = lines_with_segments(sim)
+    assert drawn, "the recovered stretch must still be drawn"
+    for span in sim.suppressed:
+        assert not any(span.contains(line) for line in drawn), (
+            f"span {span.first_line}-{span.last_line} covers drawn lines {sorted(drawn)}"
+        )
+
+
+# ------------------------------------------------- sim and verify must agree
+
+#: Every construct v1 refuses, and whether its geometry is drawn-but-untrusted or not drawn at all.
+SPAN_CONSTRUCTS = [
+    ("G81 Z-5 R2 F100\nX10\nG80\n", False),
+    ("G41 D1\nG1 X10 F100\nG40\n", True),
+    ("G68\nG1 X10 F100\nG69\n", False),
+    ("G51 P2\nG1 X10 F100\nG50\n", False),
+    ("G16\nG1 X10 Y30 F100\nG15\n", False),
+    ("M98 P1000\n", False),
+]
+
+
+@pytest.mark.parametrize(("body", "drawn"), SPAN_CONSTRUCTS)
+def test_every_refusal_is_both_reported_and_not_drawn(body: str, drawn: bool, profile) -> None:
+    """`sim` imports nothing from `verify`; the two decide independently from a shared table.
+
+    A construct reported as unsupported but still drawn as an ordinary move is the exact failure
+    this milestone exists to fix, and nothing else in the suite would catch it coming back.
+    """
+    from conftest import diagnose
+
+    text = PREAMBLE + body
+    sim = run(text, profile)
+    reported = [d for d in diagnose(text, profile) if d.rule_id == "structural.unsupported-motion"]
+    assert reported, f"verify stayed silent about {body!r}"
+    matching = [span for span in sim.spans if span.drawn == drawn]
+    assert matching, f"sim produced no {'unverified' if drawn else 'suppressed'} span for {body!r}"
+    assert any(span.contains(d.line) for span in matching for d in reported), (
+        f"the reported line is outside every span sim produced for {body!r}"
+    )
+
+
+#: Codes `verify` reports and `sim` still draws as ordinary moves. Listed so the gap is visible.
+DIAGNOSTIC_ONLY = {"10", "33", "38.2", "38.3", "38.4", "38.5", "92", "92.1", "92.2", "92.3"}
+
+
+def test_the_diagnostic_only_codes_are_listed_deliberately() -> None:
+    """A pre-existing gap, recorded rather than closed here.
+
+    These are reported by `verify` and drawn normally by `sim`. G92 in particular shifts the
+    coordinate system with no simulator consequence at all — the same bug class as G68 was, and it
+    deserves the same treatment in a follow-up. Pinning the set means a *new* code cannot join it by
+    accident: adding one to `UNSUPPORTED_ONE_SHOT` without a `sim` branch fails here.
+    """
+    from foursight.verify.checks.structural import UNSUPPORTED_ONE_SHOT
+
+    assert set(UNSUPPORTED_ONE_SHOT) == DIAGNOSTIC_ONLY

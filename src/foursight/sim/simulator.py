@@ -23,12 +23,19 @@ six columns PLAN.md specifies.
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from operator import attrgetter
 
 import numpy as np
 
 from foursight.machine.profile import MachineProfile
 from foursight.machine.state import MachineState, Move, Position, Step
-from foursight.parser.model import CANNED_CYCLE_CODES, Command
+from foursight.parser.model import (
+    CANNED_CYCLE_CODES,
+    COORD_TRANSFORM_MODES,
+    Command,
+    CoordTransformMode,
+    ModalState,
+)
 from foursight.sim.interpolate import interpolate
 from foursight.sim.segments import Kind, SegmentBuilder, SegmentStore
 from foursight.sim.timing import Rates, polyline_durations, rates_for
@@ -174,6 +181,8 @@ class _Run:
     notes: set[str] = field(default_factory=set)
     unknown_durations: int = 0
     _open: Span | None = None
+    #: Whether geometry has been emitted since the last one-line span. See `_one_line_span`.
+    _emitted_since_span: bool = False
     #: One-entry rate cache: (modal snapshot, rapid, rates). See `_rates`.
     _rates_cache: tuple[object, bool, Rates] | None = None
 
@@ -198,9 +207,14 @@ class _Run:
     # ------------------------------------------------------------------ spans
 
     def _track_span(self, command: Command, line: int) -> None:
-        """Open, extend or close the span covering this block."""
+        """Open, extend or close the span covering this block.
+
+        Ordered by the severity of the lie, not by convenience. Suppression outranks drawing: with a
+        rotation and cutter comp both active, calling the span "drawn, centreline only" would
+        understate it by an unbounded rigid transform.
+        """
+        modal = command.modal_snapshot
         cycle = command.motion if command.motion in CANNED_CYCLE_CODES else None
-        comp = command.modal_snapshot.cutter_comp
 
         if cycle is not None:
             self._extend(
@@ -209,10 +223,14 @@ class _Run:
                 drawn=False,
             )
             return
-        if comp is not None:
+        transforms = _active_transforms(modal)
+        if transforms:
+            self._extend(line, _transform_reason(transforms), drawn=False)
+            return
+        if modal.cutter_comp is not None:
             self._extend(
                 line,
-                f"G{comp} cutter compensation active; the drawn path is the programmed "
+                f"G{modal.cutter_comp} cutter compensation active; the drawn path is the programmed "
                 "centerline, not the compensated path",
                 drawn=True,
             )
@@ -245,7 +263,31 @@ class _Run:
             self._close(commands[-1].ref.line_no if commands else self._open.last_line)
 
     def _one_line_span(self, line: int, reason: str, *, drawn: bool) -> None:
-        self.spans.append(Span(line, line, reason, drawn))
+        """Record a block that could not be drawn, merging into the previous one when it repeats.
+
+        Merging matters because the reasons that repeat are the *consequential* ones: after an
+        undrawable G28 or an M98 call, every subsequent move is refused for the identical reason, so
+        a program calling subprograms fifty times would otherwise produce hundreds of one-line spans
+        and the summary would read "Not drawn: 480 spans at lines 41, 42, 43 and 477 more".
+
+        Two guards make it safe. ``_emitted_since_span`` stops two identically-worded refusals three
+        hundred lines apart from merging into one span that covers the drawn geometry between them —
+        which would report drawn lines as not drawn. ``_open is None`` keeps a one-line span from
+        swallowing an enclosing span that has not been appended yet.
+        """
+        last = self.spans[-1] if self.spans else None
+        if (
+            last is not None
+            and self._open is None
+            and not self._emitted_since_span
+            and last.reason == reason
+            and last.drawn == drawn
+            and line >= last.last_line
+        ):
+            self.spans[-1] = Span(last.first_line, line, reason, drawn)
+        else:
+            self.spans.append(Span(line, line, reason, drawn))
+        self._emitted_since_span = False
 
     def _suppressing(self) -> bool:
         return self._open is not None and not self._open.drawn
@@ -291,6 +333,7 @@ class _Run:
             rotations=path.rotations,
             durations=durations,
         )
+        self._emitted_since_span = True
 
     def _durations(
         self, points: np.ndarray, rotations: np.ndarray, command: Command, *, rapid: bool
@@ -327,6 +370,37 @@ class _Run:
         return rates
 
 
+#: One attrgetter over every transform field, built once. `_track_span` runs per block and the
+#: overwhelming majority of blocks have none active, so the common case is one C-level call.
+_TRANSFORM_VALUES = attrgetter(*(mode.field for mode in COORD_TRANSFORM_MODES))
+
+
+def _active_transforms(modal: ModalState) -> tuple[CoordTransformMode, ...]:
+    """The refused coordinate transforms in force for this block, in table order."""
+    values = _TRANSFORM_VALUES(modal)
+    if not any(values):
+        return ()
+    return tuple(
+        mode for mode, value in zip(COORD_TRANSFORM_MODES, values, strict=True) if value is not None
+    )
+
+
+def _transform_reason(modes: tuple[CoordTransformMode, ...]) -> str:
+    """Why a transform span is not drawn.
+
+    Span identity is the reason *string* (`_extend`), so G68 alone and G68-plus-G51 must read
+    differently — otherwise cancelling one would silently extend the other's span rather than
+    starting a new one with accurate text.
+    """
+    if len(modes) == 1:
+        return f"G{modes[0].activate} {modes[0].name} active; {modes[0].consequence}"
+    heads = ", ".join(f"G{mode.activate} {mode.name}" for mode in modes)
+    return (
+        f"{heads} active; the coordinates in this span are the untransformed ones, "
+        "so it is not drawn"
+    )
+
+
 def _xyz(position) -> np.ndarray | None:
     """A position as ``(3,)`` XYZ, or None if any linear axis was never established."""
     if position.x is None or position.y is None or position.z is None:
@@ -342,8 +416,12 @@ def _zeroed(position) -> np.ndarray:
 def simulate_text(
     text: str, profile: MachineProfile, *, block_delete: bool = False
 ) -> tuple[Simulation, Iterable[str]]:
-    """Convenience for tests and the CLI: parse then simulate. Returns parse error messages too."""
+    """Convenience for tests and the CLI: parse then simulate. Returns parse error messages too.
+
+    The dialect comes from the profile rather than being a parameter of its own: this function has
+    the profile in hand, and a second way to specify it could disagree with it.
+    """
     from foursight.parser.resolver import parse
 
-    result = parse(text, block_delete=block_delete)
+    result = parse(text, block_delete=block_delete, dialect=profile.parser_dialect)
     return simulate(result.commands, profile), [error.message for error in result.errors]

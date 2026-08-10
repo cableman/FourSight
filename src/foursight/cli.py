@@ -33,7 +33,10 @@ from foursight.machine.profile import (
     ProfileError,
     default_profile_path,
     load_profile,
+    with_arc_centre,
+    with_dialect,
 )
+from foursight.parser.dialect import ARC_CENTRE_CODES, DIALECT_NAMES
 from foursight.parser.model import Command
 from foursight.parser.resolver import ParseResult, parse
 from foursight.sim.segments import SegmentStore
@@ -80,12 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
     check_cmd = subcommands.add_parser("check", help="run the verifier")
     _add_common(check_cmd)
     check_cmd.add_argument(
-        "--profile",
-        type=Path,
-        default=None,
-        help="machine profile TOML (default: the profile bundled with foursight)",
-    )
-    check_cmd.add_argument(
         "--no-simulate",
         action="store_true",
         help=(
@@ -107,12 +104,44 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
             "control-panel default, where deleted blocks still execute"
         ),
     )
+    # `--profile` is common rather than `check`-only because the profile now carries the dialect,
+    # and the dialect decides how arcs are read. Without it here, `foursight parse --modal` would
+    # print arc=G91.1 for a file that `foursight check` reads as absolute — the two subcommands
+    # disagreeing about the same file, which is exactly what --modal exists to rule out.
+    sub.add_argument(
+        "--profile",
+        type=Path,
+        default=None,
+        help="machine profile TOML (default: the profile bundled with foursight)",
+    )
+    sub.add_argument(
+        "--dialect",
+        choices=DIALECT_NAMES,
+        # Not "linuxcnc": a default here would silently beat every profile's [dialect].name.
+        # `choices` also means argparse rejects an unknown name with a usage error and exit 2.
+        default=None,
+        help=(
+            "controller dialect, overriding the profile's [dialect].name "
+            "(default: the profile's, which is linuxcnc unless it says otherwise)"
+        ),
+    )
+    sub.add_argument(
+        "--arc-centre",
+        choices=tuple(ARC_CENTRE_CODES),
+        default=None,
+        help=(
+            "arc I/J mode, overriding the profile's [dialect].arc_centre. Applies only where the "
+            "arc centre is a controller setting rather than a G-code, so it requires a "
+            "non-linuxcnc dialect; under linuxcnc, G90.1/G91.1 in the program decide it"
+        ),
+    )
 
 
 def run_parse(args: argparse.Namespace) -> int:
+    profile = _load_profile(args)
     loaded = load(args.file)
     _report_load(loaded)
-    result = parse(loaded.text, block_delete=args.block_delete)
+    result = parse(loaded.text, block_delete=args.block_delete, dialect=profile.parser_dialect)
 
     for command in result.commands:
         print(_format_command(command, show_modal=args.modal))
@@ -126,10 +155,10 @@ def run_parse(args: argparse.Namespace) -> int:
 
 
 def run_check(args: argparse.Namespace) -> int:
-    profile = _load_profile(args.profile)
+    profile = _load_profile(args)
     loaded = load(args.file)
     _report_load(loaded)
-    result = parse(loaded.text, block_delete=args.block_delete)
+    result = parse(loaded.text, block_delete=args.block_delete, dialect=profile.parser_dialect)
     # Simulating by default is the more correct choice: without interpolated points the travel check
     # can pass a program whose arc leaves the machine's envelope mid-sweep. --no-simulate trades that
     # away for speed.
@@ -165,8 +194,15 @@ def _program(
     )
 
 
-def _load_profile(path: Path | None) -> MachineProfile:
+def _load_profile(args: argparse.Namespace) -> MachineProfile:
+    """Load the profile and apply the dialect overrides, producing the *effective* profile.
+
+    Resolved once, here, so that every later stage reads the dialect off the profile it already
+    carries. Precedence is ``--dialect``/``--arc-centre`` > ``[dialect]`` > ``linuxcnc``.
+    """
+    path = args.profile
     profile = load_profile(path if path is not None else default_profile_path())
+    profile = with_arc_centre(with_dialect(profile, args.dialect), args.arc_centre)
     if profile.unknown_keys:
         # Loading tolerates unknown keys so a newer profile still works, but an unsurfaced typo
         # silently disables a check: `max_fed = 3000` would leave the feed limit unset.
@@ -196,13 +232,19 @@ def _format_command(command: Command, *, show_modal: bool) -> str:
     if not show_modal:
         return line
     modal = command.modal_snapshot
+    # Refused transforms are shown only while in force. They are the reason a span goes undrawn, and
+    # a suppressed span with no visible cause is exactly what --modal exists to explain.
+    transforms = " ".join(
+        f"G{code}" for code in (modal.rotation, modal.scaling, modal.polar) if code is not None
+    )
     return (
         f"{line}\n"
         f"         units={modal.units} plane=G{modal.plane} dist=G{modal.distance} "
         f"arc=G{modal.arc_distance} feed_mode=G{modal.feed_mode} "
         f"offset={f'G{modal.offset}' if modal.offset else '-'} feed={modal.feed} "
         f"spindle={modal.spindle_on or '-'}@{modal.spindle_rpm} tool={modal.tool} "
-        f"comp={f'G{modal.cutter_comp}' if modal.cutter_comp else '-'}"
+        f"comp={f'G{modal.cutter_comp}' if modal.cutter_comp else '-'} "
+        f"transform={transforms or '-'}"
     )
 
 

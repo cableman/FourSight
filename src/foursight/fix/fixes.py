@@ -96,7 +96,9 @@ def _remove_word(block: str, letter: str) -> str:
 
 def _command_on_line(context: FixContext, line_no: int):
     """The parsed command for ``line_no``, with the machine state before it. None if it has no motion."""
-    result = parse(context.text, block_delete=context.block_delete)
+    result = parse(
+        context.text, block_delete=context.block_delete, dialect=context.profile.parser_dialect
+    )
     for command, before, _ in walk(result.commands):
         if command.ref.line_no == line_no:
             return command, before
@@ -324,7 +326,9 @@ def add_safety_preamble(context: FixContext) -> FixResult:
     restated, and a diff that rewrites lines it did not have to change makes the real edit harder to see.
     """
     fix_id = "fix.add-safety-preamble"
-    result = parse(context.text, block_delete=context.block_delete)
+    result = parse(
+        context.text, block_delete=context.block_delete, dialect=context.profile.parser_dialect
+    )
     present = {code for command in result.commands for code in command.gcodes}
     missing = [code for code in _SAFETY_PREAMBLE if code.lstrip("G") not in present]
     if not missing:
@@ -373,7 +377,9 @@ def inject_feed_rate(context: FixContext) -> FixResult:
     if feed <= 0:
         return refuse(fix_id, f"a feed rate must be positive; got {feed:g}")
 
-    result = parse(context.text, block_delete=context.block_delete)
+    result = parse(
+        context.text, block_delete=context.block_delete, dialect=context.profile.parser_dialect
+    )
     for command in result.commands:
         if command.motion in ("1", "2", "3") and command.modal_snapshot.feed is None:
             block = _set_word(_lines(context.text)[command.ref.line_no - 1], "F", feed)
@@ -391,7 +397,9 @@ def inject_feed_rate(context: FixContext) -> FixResult:
 def append_program_end(context: FixContext) -> FixResult:
     """Append `M30` if the program does not end."""
     fix_id = "fix.append-program-end"
-    result = parse(context.text, block_delete=context.block_delete)
+    result = parse(
+        context.text, block_delete=context.block_delete, dialect=context.profile.parser_dialect
+    )
     if any(code in ("2", "30") for command in result.commands for code in command.mcodes):
         return FixResult(fix_id=fix_id, text=context.text, diff="", note="the program already ends")
     lines = _lines(context.text)

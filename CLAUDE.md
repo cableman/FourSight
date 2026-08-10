@@ -4,9 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M5 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1157 tests** and CI
-is green on Ubuntu and Windows for py3.11 and py3.12. The two open items are **T0.8/T0.9** — launching the
+**M0–M6 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1333 tests**.
+CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
+and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
+
+**The full suite currently cannot be run in one process.** `pytest -q` segfaults at
+`test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
+while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1290) and `pytest
+tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
+contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
+§ M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
+until it is fixed**, and do not read a green `--ignore` run as a green suite.
 
 `PLAN.md` remains the single source of truth for the design: architecture, tech stack, G-code subset,
 verifier rules, milestones, and the reasoning behind every decision including the ones that were reversed.
@@ -44,6 +54,9 @@ Planned CLI (M1, headless — no Qt needed):
 ```bash
 .venv/bin/foursight parse file.nc    # dump parsed commands
 .venv/bin/foursight check file.nc    # run the verifier
+
+# Dialect overrides; both subcommands accept --profile, --dialect and --arc-centre.
+.venv/bin/foursight check file.nc --dialect mach3 --arc-centre absolute
 ```
 
 ## Architecture
@@ -75,6 +88,20 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
 - **`lin` is always machine coordinates.** Verification needs machine coords; table-mount display needs part coords. The display transform writes `lin_part` and never mutates `lin`.
 - **Every segment traces back to a source line** via `line[i]`. Editor↔viewport sync, diagnostics, and fixes all depend on this.
 - **Every module outside `gui/` must import without Qt installed.**
+- **The dialect is resolved once, at the CLI/GUI boundary, into the effective `MachineProfile`.**
+  `parse()` takes a `parser.dialect.Dialect` because `parser/` cannot import `machine/`; everything
+  downstream derives it from the profile it already carries, via `MachineProfile.parser_dialect`.
+  Never store a second copy on `Program`, `FixContext` or `ModalState` — a copy can disagree with the
+  profile, and the disagreement surfaces as arithmetically wrong I/J written into the user's file by
+  `fix.recompute-arc-centre`, in a diff that looks entirely plausible.
+- **`COORD_TRANSFORM_MODES` in `parser/model.py` is the single source for the refused coordinate
+  transforms** (G68/G69, G51/G50, G16/G15), and `SUBPROGRAM_MCODES` likewise for M98/M99. `sim`
+  decides not to draw them and `verify` reports them from the same table, for exactly the reason
+  `CANNED_CYCLE_CODES` lives there: `sim` cannot import `verify`, so a second copy would be a second
+  copy of *the refusal decision*, and the two halves disagreeing is how a confidently wrong path gets
+  drawn. `CoordTransformMode.field` is three names at once — the `_GROUPS` key, the `ModalState`
+  field, and the attribute both layers read — and a rename that misses one makes every span vanish
+  silently.
 - **All geometry is numpy float64; internal units are always mm.** Convert G20 (inch) input at parse time. But report diagnostics in the program's declared units — "X exceeds 400 mm" against an inch program isn't actionable.
 - **G-codes are strings (`'90.1'`), never floats.** A block carries multiple G- and M-words, so they live in `Command.gcodes` / `Command.mcodes` lists, not in the `words` dict.
 - **`slots=True` on every hot-path dataclass** — the 50k lines/sec parse target doesn't survive otherwise.
@@ -94,7 +121,7 @@ The governing principle. A previewer that refuses to draw is recoverable; one th
 Diagnostics have three tiers, and the distinction matters:
 
 - **error** — malformed, or would break the machine.
-- **unsupported** — well-formed, recognized, and **affects motion**, but not interpreted by v1 (cutter compensation, canned cycles G80–G89). The affected span is marked or suppressed, never drawn as if understood. Under an active G81, a block containing only `X10 Y10` is a drill cycle, not a linear move.
+- **unsupported** — well-formed, recognized, and **affects motion**, but not interpreted by v1 (cutter compensation, canned cycles G80–G89, coordinate transforms G68/G51/G16, subprogram calls M98/M99). The affected span is marked or suppressed, never drawn as if understood. Under an active G81, a block containing only `X10 Y10` is a drill cycle, not a linear move.
 - **warning** — suspicious, or unrecognized but inert. Rendered normally.
 
 An unrecognized code that never touches position is a warning. One that changes how subsequent motion is interpreted is `unsupported`, never a warning.
@@ -166,7 +193,8 @@ overridable and set from `PLAN.md`'s requirement rather than from local measurem
 
 - Every Python invocation goes through `.venv/` — see Commands. This includes one-off checks and throwaway scripts, not just the mandated commands.
 - Distribution name is `foursight-cnc` (plain `foursight` is taken on PyPI); the import package is `foursight`.
-- LinuxCNC is the normative dialect; Fanuc-isms are documented deviations in `PLAN.md`.
+- LinuxCNC is the **default and normative** dialect. Mach3 is selectable via `[dialect].name` or
+  `--dialect`; both are documented deviations in `PLAN.md` § Dialect Divergences.
 - No new third-party dependencies without updating the Tech Stack table in `PLAN.md`.
 - Prefer dataclasses over dicts for structured data; keep functions under ~50 lines.
 - Applying a fix invalidates every line number. The contract is **one fix → full re-parse → re-verify → rebuild segments**. No batch application, no diff rebasing.

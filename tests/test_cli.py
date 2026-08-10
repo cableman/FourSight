@@ -17,7 +17,13 @@ from pathlib import Path
 import pytest
 
 from conftest import FIXTURES, fixture_text
-from foursight.cli import EXIT_CANNOT_RUN, EXIT_ERRORS_FOUND, EXIT_OK, main
+from foursight.cli import (
+    EXIT_CANNOT_RUN,
+    EXIT_ERRORS_FOUND,
+    EXIT_OK,
+    build_parser,
+    main,
+)
 
 BASELINE = FIXTURES / "baseline_4axis.nc"
 ALL_FIXTURES = sorted(path.name for path in FIXTURES.glob("*.nc"))
@@ -330,3 +336,95 @@ def test_the_console_script_is_installed_and_runs() -> None:
 def test_fixture_text_helper_still_matches_disk() -> None:
     """Guards the assumption the tests above rest on: the CLI reads the same bytes we do."""
     assert fixture_text("baseline_4axis.nc") == BASELINE.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- dialect (M6)
+
+MACH3_ABSOLUTE = """
+[machine]
+units = "mm"
+[dialect]
+name = "mach3"
+arc_centre = "absolute"
+"""
+
+
+def _profile(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "profile.toml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_modal_output_reports_the_profiles_arc_centre(capsys, tmp_path: Path) -> None:
+    """`parse --modal` and `check` must not disagree about the same file.
+
+    This is why `--profile` is common to both subcommands rather than `check`-only: without it here,
+    --modal would print the default arc mode for a file the verifier reads under another.
+    """
+    program = tmp_path / "arc.nc"
+    program.write_text("G21 G90 G17 G54\nG2 X20 Y0 I10 J0 F600\n", encoding="utf-8")
+    code, out, _ = run(
+        ["parse", str(program), "--modal", "--profile", str(_profile(tmp_path, MACH3_ABSOLUTE))],
+        capsys,
+    )
+    assert code == EXIT_OK
+    assert "arc=G90.1" in out
+
+
+def test_modal_output_is_incremental_by_default(capsys, tmp_path: Path) -> None:
+    program = tmp_path / "arc.nc"
+    program.write_text("G21 G90 G17 G54\nG2 X20 Y0 I10 J0 F600\n", encoding="utf-8")
+    code, out, _ = run(["parse", str(program), "--modal"], capsys)
+    assert code == EXIT_OK
+    assert "arc=G91.1" in out
+
+
+def test_the_dialect_flag_overrides_the_profile(capsys, tmp_path: Path) -> None:
+    """--dialect > [dialect].name > linuxcnc. Overriding away resets the controller settings."""
+    program = tmp_path / "arc.nc"
+    program.write_text("G21 G90 G17 G54\nG2 X20 Y0 I10 J0 F600\n", encoding="utf-8")
+    argv = ["parse", str(program), "--modal", "--profile", str(_profile(tmp_path, MACH3_ABSOLUTE))]
+    code, out, _ = run([*argv, "--dialect", "linuxcnc"], capsys)
+    assert code == EXIT_OK
+    assert "arc=G91.1" in out
+
+
+def test_the_arc_centre_flag_overrides_without_editing_the_profile(capsys, tmp_path: Path) -> None:
+    """The flag that makes the CLI half of "configurable in both places" real."""
+    program = tmp_path / "arc.nc"
+    program.write_text("G21 G90 G17 G54\nG2 X20 Y0 I10 J0 F600\n", encoding="utf-8")
+    code, out, _ = run(
+        ["parse", str(program), "--modal", "--dialect", "mach3", "--arc-centre", "absolute"],
+        capsys,
+    )
+    assert code == EXIT_OK
+    assert "arc=G90.1" in out
+
+
+def test_the_arc_centre_flag_is_refused_under_linuxcnc(capsys) -> None:
+    """Under LinuxCNC the G-code decides it, so accepting the flag would be a false promise."""
+    code, _, err = run(["parse", str(BASELINE), "--arc-centre", "absolute"], capsys)
+    assert code == EXIT_CANNOT_RUN
+    assert "controller setting" in err
+
+
+def test_an_unknown_dialect_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["check", str(BASELINE), "--dialect", "haas"])
+    assert raised.value.code == EXIT_CANNOT_RUN
+
+
+def test_the_dialect_defaults_to_the_profiles(capsys) -> None:
+    """A CLI default of "linuxcnc" would silently beat every profile's [dialect].name."""
+    assert build_parser().parse_args(["check", str(BASELINE)]).dialect is None
+
+
+def test_a_subprogram_call_is_reported_without_failing_the_run(capsys, tmp_path: Path) -> None:
+    program = tmp_path / "sub.nc"
+    program.write_text(
+        "G21 G90 G17 G94 G54\nS8000 M3\nG1 X10 F600\nM98 P1000\nM5\nM30\n", encoding="utf-8"
+    )
+    code, out, _ = run(["check", str(program)], capsys)
+    assert code == EXIT_OK
+    assert "structural.unsupported-motion" in out
+    assert "M98" in out

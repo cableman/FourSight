@@ -37,6 +37,64 @@ ROTARY_LETTERS = frozenset("A")
 # the *cancel* and is deliberately absent: it ends a cycle rather than being one.
 CANNED_CYCLE_CODES = frozenset({"73", "76", "81", "82", "83", "84", "85", "86", "87", "88", "89"})
 
+
+@dataclass(slots=True, frozen=True)
+class CoordTransformMode:
+    """A modal coordinate transform v1 refuses rather than models.
+
+    ``field`` is three names at once, and they must stay identical: the ``_GROUPS`` key in the
+    resolver, the ``ModalState`` field the resolver writes, and the attribute `sim` and `verify` both
+    read. A rename that misses one makes the field silently never update, and every span quietly
+    vanishes — so `tests/test_parser.py` pins the correspondence.
+
+    Defined here for the same reason as ``CANNED_CYCLE_CODES``: `sim` cannot import `verify`, so a
+    second copy would be a second copy of *the refusal decision*, and the two halves disagreeing is
+    exactly how a confidently wrong path gets drawn. ``consequence`` is shared for the same reason —
+    one sentence of user-facing text in the parse layer, in exchange for the two layers being unable
+    to contradict each other about why the span is not drawn.
+    """
+
+    field: str
+    activate: str
+    cancel: str
+    name: str
+    consequence: str
+
+
+# Rotation, scaling and polar mode. All three are Fanuc/Mach3 constructs LinuxCNC has no equivalent
+# for, all three change the programmed → machine mapping, and none is interpreted in v1. They are
+# *suppressed* rather than drawn-and-marked, unlike cutter comp: comp is wrong by one tool radius and
+# G43 by a uniform Z shift, both bounded and mentally correctable, while a rotation about a fixture
+# origin displaces the whole path by an unbounded amount, a negative scale factor mirrors it, and
+# under G16 the axis words are a radius and an angle so the drawn curve is a different curve.
+COORD_TRANSFORM_MODES: tuple[CoordTransformMode, ...] = (
+    CoordTransformMode(
+        "rotation", "68", "69", "coordinate system rotation",
+        "the coordinates in this span are the unrotated ones, so the span is not drawn",
+    ),
+    CoordTransformMode(
+        "scaling", "51", "50", "coordinate system scaling",
+        "the coordinates in this span are unscaled, so the span is not drawn",
+    ),
+    CoordTransformMode(
+        "polar", "16", "15", "polar coordinate mode",
+        "under G16 X and Y are a radius and an angle rather than cartesian coordinates, so the "
+        "span is not drawn",
+    ),
+)  # fmt: skip
+
+COORD_TRANSFORM_CODES = frozenset(mode.activate for mode in COORD_TRANSFORM_MODES)
+COORD_TRANSFORM_CANCELS = frozenset(mode.cancel for mode in COORD_TRANSFORM_MODES)
+
+# Subprogram call and return. v1 does not expand subprograms, so the position after one is genuinely
+# unknown and `MachineState` treats it as lost — the same machinery as an undrawable G28, for the
+# same reason: we had a position and no longer do.
+#
+# These are **M**-codes and are tested against `Command.mcodes`. G98/G99 are the canned-cycle return
+# modes, are interpreted, and are silent; the tables are keyed on bare digits, so testing the wrong
+# list would confuse two unrelated constructs.
+SUBPROGRAM_MCODES = frozenset({"98", "99"})
+
 # Dialect defaults for a program that never states them, used as ModalState's field defaults.
 # PLAN.md § Dialect Divergences pins arc-centre mode: G91.1 default, G90.1 honoured.
 DEFAULT_PLANE = "17"
@@ -160,7 +218,9 @@ class ModalState:
     group, so the verifier detects it by looking for G20/G21 across the command stream.
 
     ``offset`` *is* optional, because "no work offset selected yet" is a genuine modal state and
-    the verifier warns on motion that occurs while it holds.
+    the verifier warns on motion that occurs while it holds. ``rotation``, ``scaling`` and ``polar``
+    read the same way as ``cutter_comp``: ``None`` means "not in force", and a code means the span
+    it opened is still open.
     """
 
     units: str = DEFAULT_UNITS  # 'mm' | 'inch' — what the program declared
@@ -175,6 +235,11 @@ class ModalState:
     tool: int | None = None
     length_offset: int | None = None  # active H number under G43, None under G49
     cutter_comp: str | None = None  # '41' | '42' | None
+    # Refused coordinate transforms; see COORD_TRANSFORM_MODES. Each holds the activating code while
+    # in force and None once cancelled.
+    rotation: str | None = None  # '68' under G68, None under G69
+    scaling: str | None = None  # '51' under G51, None under G50
+    polar: str | None = None  # '16' under G16, None under G15
 
 
 @dataclass(slots=True)

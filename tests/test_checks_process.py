@@ -304,3 +304,59 @@ def test_the_clean_baseline_reports_nothing(profile, baseline_text) -> None:
 def test_targeted_fixtures_report_no_process_problems(name: str, profile) -> None:
     found = [d for d in check(fixture_text(name), profile) if d.rule_id.startswith("process.")]
     assert found == [], [d.message for d in found]
+
+
+# --------------------------------------------------------------------------- dwell units (M6)
+
+MILLISECOND_DIALECT = """
+[machine]
+units = "mm"
+[dialect]
+name = "mach3"
+dwell_units = "milliseconds"
+"""
+
+PREAMBLE = "G21 G90 G17 G94 G54\nS8000 M3\n"
+
+
+def _dwell(text: str, profile):
+    return [d for d in check(text, profile) if d.rule_id == "process.dwell-units-suspect"]
+
+
+def test_a_suspiciously_long_dwell_is_flagged(profile) -> None:
+    """Owed since M1: PLAN.md § Dialect Divergences promised this warning and never had it."""
+    found = _dwell(PREAMBLE + "G4 P5000\nG1 X10 F100\n", profile)
+    assert len(found) == 1
+    assert found[0].severity is Severity.WARNING
+    assert "milliseconds" in found[0].message
+
+
+def test_a_plausible_dwell_is_not_flagged(profile) -> None:
+    assert _dwell(PREAMBLE + "G4 P30\nG1 X10 F100\n", profile) == []
+
+
+def test_a_dwell_without_p_is_not_flagged(profile) -> None:
+    assert _dwell(PREAMBLE + "G4\nG1 X10 F100\n", profile) == []
+
+
+def test_a_milliseconds_profile_silences_the_rule() -> None:
+    """The profile has already answered the question; P5000 really is 5 seconds there."""
+    milliseconds = load_profile_text(MILLISECOND_DIALECT)
+    assert _dwell(PREAMBLE + "G4 P5000\nG1 X10 F100\n", milliseconds) == []
+
+
+def test_the_dwell_warning_reports_once_and_counts_the_rest(profile) -> None:
+    """One misconfigured post is one fact about the program, not one per dwell."""
+    found = _dwell(PREAMBLE + "G4 P5000\nG1 X10 F100\nG4 P4000\nG4 P3000\n", profile)
+    assert len(found) == 1
+    assert "2 more" in found[0].message
+
+
+def test_nothing_is_rescaled_on_the_strength_of_the_warning(profile) -> None:
+    """Inferring the units from P would turn a legitimate 90-second dwell into 0.09 s."""
+    from foursight.machine.state import MachineState
+    from foursight.parser.resolver import parse
+
+    state = MachineState(profile)
+    steps = [state.apply(command) for command in parse(PREAMBLE + "G4 P5000\n").commands]
+    assert steps[-1].dwell == 5000.0

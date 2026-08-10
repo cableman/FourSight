@@ -261,3 +261,63 @@ def test_every_move_from_the_baseline_has_a_known_offset(baseline_text: str) -> 
     """The default fixture profile sets g54, so nothing should be guessing."""
     for move in moves(baseline_text, WITH_OFFSET):
         assert move.offset_known is True
+
+
+# --------------------------------------------------------------------------- M98/M99 subprograms
+
+MILLISECOND_DWELL = """
+[machine]
+units = "mm"
+[dialect]
+name = "mach3"
+dwell_units = "milliseconds"
+"""
+
+
+@pytest.mark.parametrize("code", ["98", "99"])
+def test_a_subprogram_call_loses_the_position_and_is_undrawable(code: str) -> None:
+    """We do not expand subprograms, so afterwards we genuinely do not know where the machine is.
+
+    Drawing the next block would draw a straight line from wherever the main program left off to
+    wherever the subprogram happened to end — a fabricated move at full confidence.
+    """
+    collected, state = steps(f"G21 G90 G54\nG0 X10 Y10 Z5\nM{code} P1000\n")
+    assert collected[-1].undrawable is not None
+    assert not collected[-1].moved
+    assert state.position_lost
+    assert state.programmed == Position()
+
+
+def test_a_subprogram_call_outranks_everything_else_in_its_block() -> None:
+    """Nothing else about the block can be honoured once we stop knowing what ran."""
+    collected, _ = steps("G21 G90 G54\nG0 X10 Y10 Z5\nG1 X20 M98 P1000 F100\n")
+    assert collected[-1].undrawable is not None
+    assert not collected[-1].moved
+
+
+def test_g98_and_g99_do_not_lose_the_position() -> None:
+    """They are canned-cycle return modes, not subprogram calls. Same digits, different letter."""
+    collected, state = steps("G21 G90 G54\nG98\nG99\nG1 X10 F100\n")
+    assert not state.position_lost
+    assert all(step.undrawable is None for step in collected)
+
+
+def test_a_full_absolute_restatement_re_establishes_the_position_after_m98() -> None:
+    """A partial restatement is not enough: `_advance` leaves the unmentioned axes unknown."""
+    collected, _ = steps("G21 G90 G54\nG0 X10 Y10 Z5\nM98 P1000\nG0 X1 Y2 Z3\nG1 X4 F100\n")
+    assert collected[-1].moved
+    assert collected[-1].moves[0].start.x == 1.0
+
+
+# --------------------------------------------------------------------------- dialect dwell units
+
+
+def test_a_milliseconds_dialect_converts_the_dwell_to_seconds() -> None:
+    """The units come from the profile, never from the magnitude of P."""
+    collected, _ = steps("G21 G90 G54\nG4 P2500\n", MILLISECOND_DWELL)
+    assert collected[-1].dwell == 2.5
+
+
+def test_the_default_dialect_leaves_the_dwell_in_seconds() -> None:
+    collected, _ = steps("G21 G90 G54\nG4 P2500\n")
+    assert collected[-1].dwell == 2500.0

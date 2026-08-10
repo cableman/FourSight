@@ -206,6 +206,22 @@ def test_the_fingerprint_records_spans_not_just_geometry(profile) -> None:
     assert fingerprint(unverified)["spans"] == [[9, 11, "unverified"]]
 
 
+def test_the_refused_transform_and_subprogram_spans_are_pinned(profile) -> None:
+    """The strongest net for M6: a G68 span silently becoming drawn moves no coordinate either.
+
+    The subprogram case pins two facts at once — the call itself is one span, and the tail of
+    lost-position blocks after it is *one* span rather than one per line. Both are exact ranges, so
+    a change to either the refusal or the coalescing shows up here with a readable diff.
+    """
+    rotation, _ = simulate_text(fixture_text("coord_rotation_span.nc"), profile)
+    assert fingerprint(rotation)["spans"] == [[12, 14, "suppressed"]]
+    subprogram, _ = simulate_text(fixture_text("subprogram_call.nc"), profile)
+    assert fingerprint(subprogram)["spans"] == [
+        [13, 13, "suppressed"],
+        [14, 16, "suppressed"],
+    ]
+
+
 def test_bounds_are_recorded_per_axis_with_rotary_separate(profile) -> None:
     """Rotary in its own field: a bounding box mixing mm and degrees would be meaningless."""
     sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
