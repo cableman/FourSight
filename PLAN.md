@@ -1224,6 +1224,10 @@ Clicking is bound to mouse **release**, not press, because `GLViewWidget` orbits
 press would jump the editor on every orbit. A miss emits nothing, so a slightly-off click leaves the
 selection alone rather than clearing it.
 
+Release alone turned out not to be enough — an orbit or a pan also ends in a left release, and until
+T11.5 every one of them picked. The click/drag threshold in § Camera Controls is the other half of this
+rule, not a separate feature.
+
 #### Diagnostics panel (T3.4)
 
 **Verification is a second background stage.** It costs **5.93 s at 100k lines** with interpolated-point
@@ -1476,6 +1480,27 @@ silently substituted default, which would make every limit and rapid rate wrong.
 
 Simulation still runs on the GUI thread, so a 100k-line file freezes the window for ~4.6 s. T2.9 moves
 it off; the wait cursor is the interim signal that the application is working rather than hung.
+
+### Camera Controls
+
+Left-drag orbits, the wheel zooms, and **panning is on Shift+left-drag, right-drag and middle-drag**.
+pyqtgraph offers only the last of those and Ctrl+left; a middle button is what a trackpad does not have,
+so zooming in used to strand the user with the thing they had zoomed towards off-centre and unreachable.
+Ctrl+drag is left to pyqtgraph, so its own two pans keep working as documented.
+
+Every pan gesture, middle-drag included, goes through one implementation panning in the **camera plane**
+(`relative="view"`) rather than pyqtgraph's `view-upright`, which pans along the machine's XY plane and
+so foreshortens with the tilt — measured at 10.3 px of travel per 20 px of drag at the default 30°
+elevation. Cursor-locked is what a drag means, and a drag that moves the part less than the hand reads as
+the view resisting. Under perspective the lock is exact only in the plane through the look-at point;
+geometry further away moves slightly less, which is the projection being right.
+
+**One pixel threshold separates a click from a camera move**, and it is load-bearing in both directions.
+Below it the camera does not move at all — `GLViewWidget` orbits a *degree per pixel*, so a two-pixel
+tremor while clicking swings the view enough that the release misses the segment the user aimed at.
+Above it the release picks nothing, because otherwise every orbit ends by selecting whatever the camera
+move happened to leave under the cursor. The travel inside the threshold is **deferred, not discarded**,
+or the geometry trails the cursor by up to that much for the rest of the drag.
 
 ### Picking Strategy
 
