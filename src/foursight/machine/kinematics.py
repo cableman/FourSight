@@ -44,6 +44,23 @@ class KinematicsError(Exception):
     """
 
 
+def axis_columns(axis: str) -> tuple[int, tuple[int, int]]:
+    """``(axial column, (first, second) radial columns)`` for a rotary axis name.
+
+    The radial pair is in the **right-handed order `rotate_about_axis` mixes them**, so an angle read as
+    ``degrees(arctan2(p[second], p[first]))`` increases in the same direction A does.
+
+    That ordering is the entire reason this is not shared with
+    `verify.checks.geometry._AXIS_COLUMNS`, which lists the pair for ``y`` the other way round. That one
+    only ever takes a norm, where the order cannot matter; adopting it here would mirror every carved
+    feature about the rotary axis, in a picture that otherwise looks completely reasonable.
+    """
+    if axis not in _AXIS_INDEX:
+        raise KinematicsError(f"rotary_axis must be one of x, y, z; got {axis!r}")
+    index = _AXIS_INDEX[axis]
+    return index, ((index + 1) % 3, (index + 2) % 3)
+
+
 def rotate_about_axis(points: np.ndarray, axis: str, degrees: np.ndarray | float) -> np.ndarray:
     """Rotate ``(M, 3)`` points about a principal axis, with a **per-point** angle.
 

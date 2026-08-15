@@ -39,10 +39,16 @@ HIGHLIGHT_COLOR: Color = (0.35, 0.95, 1.0, 1.0)
 #: motion type nor the selection.
 MARKER_COLOR: Color = (1.0, 1.0, 1.0, 1.0)
 
+#: The carved solid. A desaturated warm grey, deliberately outside the toolpath palette: it is a
+#: *surface*, and giving it any of the motion colours would suggest it was one more kind of move. It is
+#: also the only shaded thing on screen, so the swatch names an approximation of its lit appearance.
+SOLID_COLOR: Color = (0.62, 0.60, 0.56, 1.0)
+
 #: Wording fixed here rather than at each call site, so the two view-state rows cannot drift apart from
 #: the phrasing the status bar already uses for the same things.
 SELECTION_LABEL = "Selected line"
 MARKER_LABEL = "Tool position"
+SOLID_LABEL = "Machined surface"
 
 
 class Swatch(StrEnum):
@@ -50,19 +56,30 @@ class Swatch(StrEnum):
 
     LINE = "line"
     POINT = "point"  # the playback marker really is a dot, and a line swatch would misdescribe it
+    SOLID = "solid"  # a filled block, because the solid is the one thing on screen with area
 
 
 @dataclass(frozen=True, slots=True)
 class LegendEntry:
-    """One row: a colour actually on screen, and what it means."""
+    """One row: a colour actually on screen, and what it means.
+
+    ``note`` carries what the *colour* cannot: the solid's row says it is a machined surface, but only a
+    note can say it was carved with one tool, or that unverified spans were left uncut. Empty for every
+    row whose meaning its label already exhausts.
+    """
 
     label: str
     color: Color
     swatch: Swatch
+    note: str = ""
 
 
 def legend_entries(
-    batches: Sequence[Batch], *, highlighted: bool = False, marker: bool = False
+    batches: Sequence[Batch],
+    *,
+    highlighted: bool = False,
+    marker: bool = False,
+    solid: "Sequence[str] | None" = None,
 ) -> tuple[LegendEntry, ...]:
     """The rows for what is currently drawn, or ``()`` when nothing is.
 
@@ -70,8 +87,16 @@ def legend_entries(
     unverified tiers — followed by view state. That grouping is the point: the first rows describe the
     *program*, the last describe what the viewer is doing to it, and a reader who has understood that
     split can ignore half the legend.
+
+    ``solid`` is `SolidField.notes` when a carved solid is on screen, and ``None`` when there is none —
+    **not** an empty sequence, which is the perfectly ordinary case of a solid with nothing to qualify.
+    Collapsing the two would either hide the row for a clean carve or invent one for no carve at all.
     """
     entries = [LegendEntry(_display(batch.label), batch.color, Swatch.LINE) for batch in batches]
+    if solid is not None:
+        # The notes are joined into one row rather than listed as several. They qualify a single thing on
+        # screen, and separate rows would read as separate colours to look for.
+        entries.append(LegendEntry(SOLID_LABEL, SOLID_COLOR, Swatch.SOLID, note="; ".join(solid)))
     if highlighted:
         entries.append(LegendEntry(SELECTION_LABEL, HIGHLIGHT_COLOR, Swatch.LINE))
     if marker:

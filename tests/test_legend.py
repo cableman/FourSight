@@ -25,6 +25,8 @@ from foursight.gui.legend import (
     MARKER_COLOR,
     MARKER_LABEL,
     SELECTION_LABEL,
+    SOLID_COLOR,
+    SOLID_LABEL,
     Swatch,
     hex_color,
     legend_entries,
@@ -263,3 +265,44 @@ def test_the_legend_is_a_widget_and_not_a_scene_item(viewport, profile) -> None:
     assert viewport.legend.parent() is viewport
     assert len(viewport.items) == GRID_ITEMS + len(viewport.batches)
     assert viewport.legend not in viewport.items
+
+
+# ------------------------------------------------------------------- the carved solid row (M12)
+
+
+def test_no_solid_row_when_there_is_no_solid():
+    """`None` means no solid; an empty sequence means a solid with nothing to qualify."""
+    entries = legend_entries(build_batches(store_of(Kind.FEED)), solid=None)
+    assert [entry.label for entry in entries] == ["Feed"]
+
+
+def test_a_clean_carve_still_gets_a_row():
+    """The commonest case has no caveats, and it must not therefore vanish from the key."""
+    entries = legend_entries(build_batches(store_of(Kind.FEED)), solid=())
+    assert entries[-1].label == SOLID_LABEL
+    assert entries[-1].note == ""
+
+
+def test_the_carve_notes_reach_the_row():
+    entries = legend_entries(
+        [], solid=("carved with one tool", "3 unverified segments were not cut")
+    )
+    assert entries[0].note == "carved with one tool; 3 unverified segments were not cut"
+
+
+def test_the_solid_uses_a_swatch_of_its_own():
+    """A line swatch would describe it as one more kind of move; it is the only thing with area."""
+    entries = legend_entries([], solid=())
+    assert entries[0].swatch is Swatch.SOLID
+    assert entries[0].color == SOLID_COLOR
+
+
+def test_the_solid_row_precedes_the_view_state_rows():
+    """Geometry first, then what the viewer is doing to it. The solid is geometry."""
+    entries = legend_entries([], solid=(), highlighted=True, marker=True)
+    assert [entry.label for entry in entries] == [SOLID_LABEL, SELECTION_LABEL, MARKER_LABEL]
+
+
+def test_the_solid_colour_is_not_a_toolpath_colour():
+    """A shared colour would make the surface read as a motion type."""
+    assert SOLID_COLOR not in set(TRUSTED_COLORS.values()) | set(UNTRUSTED_COLORS.values())

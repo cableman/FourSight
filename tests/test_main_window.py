@@ -1086,3 +1086,168 @@ def test_the_legend_action_is_in_the_view_menu_with_its_shortcut(window) -> None
     legend = next(a for a in view.menu().actions() if a.text() == "&Legend")
     assert legend is window.legend_action
     assert legend.shortcut().toString() == "Ctrl+L"
+
+
+# ------------------------------------------------------------------------- the solid view (M12)
+
+
+SOLID_PROGRAM = "G21 G90 G94\nG0 Z5\nG1 X20 Y40 Z-2 F600\nG1 X80 Y40\nG0 Z5\nM30\n"
+
+
+def carveable_profile(profile):
+    """``profile`` with a blank and a cutter, which the shipped default deliberately leaves unset."""
+    from dataclasses import replace
+
+    from foursight.machine.profile import StockBox, Tool
+
+    return replace(
+        profile,
+        stock=StockBox(min=(0.0, 0.0, -20.0), max=(100.0, 80.0, 0.0)),
+        tool=Tool(diameter=6.0),
+    )
+
+
+def wait_for_carve(window, timeout_ms: int = 20_000) -> None:
+    """Pump the event loop until the carve thread has delivered its result."""
+    from PySide6.QtCore import QDeadlineTimer, QEventLoop
+
+    deadline = QDeadlineTimer(timeout_ms)
+    while window._carver is not None and not deadline.hasExpired():
+        QApplication.processEvents(QEventLoop.AllEvents, 20)
+
+
+def test_the_solid_and_the_toolpath_are_separate_toggles(window) -> None:
+    """Neither may imply the other: lines over a solid is the useful combination for "which move?"."""
+    assert window.solid_action.shortcut().toString() == "Ctrl+D"
+    assert window.toolpath_action.shortcut().toString() == "Ctrl+T"
+    assert window.solid_action.isCheckable() and window.toolpath_action.isCheckable()
+
+
+def test_part_coordinates_still_owns_ctrl_p(window) -> None:
+    """The solid view is reached *from* that view; it does not take its shortcut."""
+    assert window.part_coordinates_action.shortcut().toString() == "Ctrl+P"
+
+
+def test_the_toolpath_starts_visible(window) -> None:
+    assert window.toolpath_action.isChecked()
+    assert window.viewport.toolpath_visible
+
+
+def test_hiding_the_toolpath_reaches_the_viewport(window, tmp_path) -> None:
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    window.toolpath_action.setChecked(False)
+    assert window.viewport.toolpath_visible is False
+
+
+def test_a_profile_without_a_tool_refuses_and_unchecks(window, tmp_path) -> None:
+    """Absence means unknown. A guessed cutter would carve a confident picture of the wrong part."""
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    assert window.profile.tool is None, "the shipped profile should not declare a cutter"
+
+    window.solid_action.setChecked(True)
+    assert window.solid_action.isChecked() is False
+    assert window.viewport.solid_field is None
+
+
+def test_carving_puts_a_solid_on_screen(window, tmp_path, profile) -> None:
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+
+    assert window.solid_action.isChecked()
+    assert window.viewport.solid_field is not None
+    assert window.viewport.solid_field.carved, "the program cuts a slot; the solid shows none"
+
+
+def test_switching_the_solid_off_takes_it_off_screen(window, tmp_path, profile) -> None:
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+
+    window.solid_action.setChecked(False)
+    assert window.viewport.solid_field is None
+
+
+def test_loading_another_program_resets_the_solid_toggle(window, tmp_path, profile) -> None:
+    """A menu still claiming a solid whose geometry has been dropped is a menu that lies."""
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+    assert window.solid_action.isChecked()
+
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    assert window.solid_action.isChecked() is False
+    assert window.viewport.solid_field is None
+
+
+def test_a_box_carve_forces_machine_coordinates(window, tmp_path, profile) -> None:
+    """The stock shape decides the frame; a box Z map is meaningless in part coordinates."""
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    window.part_coordinates_action.setChecked(True)
+
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+
+    assert window.part_coordinates_action.isChecked() is False, "the frame did not follow the stock"
+    assert window.viewport.solid_field is not None
+
+
+def test_a_cylinder_carve_forces_part_coordinates(window, tmp_path, profile) -> None:
+    """And the other direction: a radial map is only stationary in the part's own frame."""
+    from dataclasses import replace
+
+    from foursight.machine.profile import Kinematics, StockCylinder, Tool
+
+    window.profile = replace(
+        profile,
+        stock=StockCylinder(diameter=52.0, length=150.0, axis_min=0.0),
+        tool=Tool(diameter=6.0),
+        kinematics=Kinematics(
+            rotary_mount="table", rotary_axis="y", centerline_offset=(0.0, 0.0, -26.0)
+        ),
+    )
+    window.open_file_and_wait(
+        write_program(tmp_path, "G21 G90 G94\nG0 Z5\nG1 Y75 Z-2 F600\nG1 A360\nM30\n")
+    )
+
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+
+    assert window.part_coordinates_action.isChecked() is True
+    field = window.viewport.solid_field
+    assert field is not None and field.kind == "cylinder" and field.part_coordinates
+
+
+def test_changing_the_frame_by_hand_switches_the_solid_off(window, tmp_path, profile) -> None:
+    """Rather than redrawing it where the part is not. The status bar says which frame it needed."""
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(write_program(tmp_path, SOLID_PROGRAM))
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+    assert window.viewport.solid_field is not None
+
+    window.part_coordinates_action.setChecked(True)
+    wait_for_carve(window)
+    assert window.solid_action.isChecked() is False
+    assert window.viewport.solid_field is None
+
+
+def test_more_than_one_tool_becomes_a_note_on_the_solid(window, tmp_path, profile) -> None:
+    """The model has one cutter. A program with two is carved wrongly somewhere, and must say so."""
+    window.profile = carveable_profile(profile)
+    window.open_file_and_wait(
+        write_program(
+            tmp_path,
+            "G21 G90 G94\nT1 M6\nG1 X20 Y40 Z-2 F600\nG1 X80 Y40\nT4 M6\nG1 X80 Y50\nM30\n",
+        )
+    )
+    window.solid_action.setChecked(True)
+    wait_for_carve(window)
+
+    notes = window.viewport.solid_field.notes
+    assert any("T1" in note and "T4" in note for note in notes)
