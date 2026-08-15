@@ -16,12 +16,23 @@ Qt is imported at module scope, which is fine because this module lives in ``gui
 outside ``gui/`` imports it. ``gui.batching`` stays Qt-free so its tests need no display.
 """
 
+import html
+
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl import GLViewWidget
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QLabel, QVBoxLayout
 
 from foursight.gui.batching import Batch, bounds, build_batches
+from foursight.gui.legend import (
+    HIGHLIGHT_COLOR,
+    MARKER_COLOR,
+    LegendEntry,
+    Swatch,
+    hex_color,
+    legend_entries,
+)
 from foursight.gui.picking import ScreenProjection, pick, project_store
 from foursight.gui.playback import marker_point
 from foursight.gui.timeline import Timeline
@@ -30,19 +41,64 @@ from foursight.sim.simulator import Simulation
 
 # Every batch draws at width 1.0. Not a stylistic choice: see the module docstring.
 LINE_WIDTH = 1.0
-# The selection highlight. Bright and cool, so it cannot be mistaken for a rapid (red), a feed (green)
-# or an unverified span (amber) — the highlight is a *view* state, not a property of the toolpath.
-HIGHLIGHT_COLOR = (0.35, 0.95, 1.0, 1.0)
-# The playback tool position. White, so it is the brightest thing on screen and reads as neither a
-# motion type nor the selection — like the highlight, it is view state rather than geometry.
-MARKER_COLOR = (1.0, 1.0, 1.0, 1.0)
 # Marker diameter in *pixels*, via `pxMode`. Not millimetres: a world-sized marker vanishes when the
 # camera pulls back to fit a large part and swamps the toolpath when it zooms in.
 MARKER_SIZE_PX = 12.0
+# The legend sits over the toolpath, so it is translucent and dark: it must be readable against the
+# near-black background without hiding the geometry it is there to explain.
+LEGEND_STYLE = (
+    "background: rgba(20, 20, 20, 190); color: #d8d8d8; border-radius: 4px; padding: 6px 8px;"
+)
+LEGEND_MARGIN_PX = 10
+# Reused verbatim from `session` and `selection`, which say this about the same geometry. The colour
+# means nothing on its own — what makes an amber span actionable is knowing it is a centreline.
+LEGEND_TOOLTIP = (
+    "Unverified spans are drawn as the programmed centreline, which is not where the tool goes."
+)
 # Fallback camera distance for an empty or degenerate program, in mm.
 DEFAULT_DISTANCE_MM = 200.0
 # The view is fitted to this multiple of the geometry's extent, so the path is not flush to the edges.
 FIT_MARGIN = 1.6
+
+
+class LegendOverlay(QLabel):
+    """The colour key, drawn over the toolpath.
+
+    A single rich-text label rather than a grid of swatch widgets. There is no state and no layout to
+    get wrong: one `setText` replaces the whole key, so the legend cannot end up half-updated with a
+    row from the previous program still in it.
+
+    It is a plain child widget rather than anything drawn into the GL scene, which is what keeps it out
+    of the buffer budget and out of `viewport.items` — the item-count assertions that guard against
+    stale geometry stay meaningful.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet(LEGEND_STYLE)
+        self.setToolTip(LEGEND_TOOLTIP)
+        self.setTextFormat(Qt.RichText)
+        self.hide()
+
+    def set_entries(self, entries: tuple[LegendEntry, ...], *, visible: bool) -> None:
+        """Show ``entries``, or hide entirely when there are none or the user turned the legend off."""
+        self.setText("<br>".join(_legend_row(entry) for entry in entries))
+        # Hidden when empty even if the user asked for a legend: an empty box over an empty viewport
+        # says nothing, and a key with no entries reads as a rendering failure.
+        self.setVisible(visible and bool(entries))
+
+
+def _legend_row(entry: LegendEntry) -> str:
+    """One row of the key: a swatch in the entry's own colour, then its name.
+
+    The swatch glyph follows the swatch *kind*, so the tool position reads as a dot and the geometry
+    as lines — a legend whose marks do not resemble what they name has to be decoded twice.
+    """
+    glyph = "&#9679;" if entry.swatch is Swatch.POINT else "&#9473;&#9473;"
+    return (
+        f'<span style="color: {hex_color(entry.color)}">{glyph}</span>&nbsp;&nbsp;'
+        f"{html.escape(entry.label)}"
+    )
 
 
 class ToolpathViewport(GLViewWidget):
@@ -72,6 +128,19 @@ class ToolpathViewport(GLViewWidget):
         #: cannot disagree — each reading `store.lin` independently is how three of them end up in machine
         #: coordinates while one is in part coordinates.
         self.part_coordinates = False
+        #: Whether the user wants the key. Whether it is *shown* also depends on there being something
+        #: to name, which `_refresh_legend` decides — the two are not the same question.
+        self.legend_visible = True
+        self.legend = LegendOverlay(self)
+        # A layout on the GL widget parents the overlay and pins it to the corner across every resize,
+        # which is cheaper and harder to get wrong than a `resizeEvent` override that has to recompute
+        # a position. `GLViewWidget` has no layout of its own, so there is nothing to displace.
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            LEGEND_MARGIN_PX, LEGEND_MARGIN_PX, LEGEND_MARGIN_PX, LEGEND_MARGIN_PX
+        )
+        layout.addWidget(self.legend, alignment=Qt.AlignTop | Qt.AlignLeft)
+        layout.addStretch(1)
         self.setCameraPosition(distance=DEFAULT_DISTANCE_MM, elevation=30, azimuth=-60)
         self._add_grid()
 
@@ -112,6 +181,7 @@ class ToolpathViewport(GLViewWidget):
         self._projection = None
         self._rebuild_items()
         self.fit_to(store, use_part_coordinates=use_part_coordinates)
+        self._refresh_legend()
 
     def clear_toolpath(self) -> None:
         """Remove the toolpath, keeping the grid and camera."""
@@ -170,6 +240,7 @@ class ToolpathViewport(GLViewWidget):
         if vertices is None:
             if self._highlight is not None:
                 self._highlight.setVisible(False)
+            self._refresh_legend()
             return
 
         if self._highlight is None:
@@ -184,6 +255,7 @@ class ToolpathViewport(GLViewWidget):
         else:
             self._highlight.setData(pos=vertices)
         self._highlight.setVisible(True)
+        self._refresh_legend()
 
     def clear_highlight(self) -> None:
         self.set_highlight(SegmentStore.empty(), None)
@@ -213,6 +285,7 @@ class ToolpathViewport(GLViewWidget):
         if point is None:
             if self._marker is not None:
                 self._marker.setVisible(False)
+            self._refresh_legend()
             return
 
         vertices = point.reshape(1, 3).astype(np.float32, copy=False)
@@ -225,6 +298,28 @@ class ToolpathViewport(GLViewWidget):
         else:
             self._marker.setData(pos=vertices)
         self._marker.setVisible(True)
+        self._refresh_legend()
+
+    # ------------------------------------------------------------------ legend (T11.2)
+
+    def set_legend_visible(self, visible: bool) -> None:
+        """Show or hide the colour key."""
+        self.legend_visible = visible
+        self._refresh_legend()
+
+    def _refresh_legend(self) -> None:
+        """Rebuild the key from what is currently on screen.
+
+        Called explicitly from every method that changes what is drawn, rather than relying on
+        `set_store` reaching it through `clear_highlight`. A refresh that happens only as a side effect
+        of another call is one refactor away from silently not happening, and the symptom would be a
+        legend describing the *previous* program — which is worse than no legend.
+        """
+        marker_shown = self._marker is not None and self._marker.visible()
+        entries = legend_entries(
+            self.batches, highlighted=self.highlighted_segments > 0, marker=marker_shown
+        )
+        self.legend.set_entries(entries, visible=self.legend_visible)
 
     def clear_marker(self) -> None:
         """Hide the marker, and **never create one**.
@@ -236,6 +331,7 @@ class ToolpathViewport(GLViewWidget):
         """
         if self._marker is not None:
             self._marker.setVisible(False)
+        self._refresh_legend()
 
     @staticmethod
     def _highlight_vertices(

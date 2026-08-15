@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M10 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1593 tests**.
+**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1620 tests**.
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -12,7 +12,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1550) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1577) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -76,7 +76,7 @@ Dependency direction is `parser → machine → sim → verify → fix → gui`.
 - **`sim/`** — interpolates lines and arcs (G2/G3 in both IJK and R form) plus rotary blending into a `SegmentStore`; `timing.py` derives per-segment durations for the timeline.
 - **`verify/`** — `Rule` base class with a registry; one module per check category under `checks/`; emits `Diagnostic(severity, line, message, fix_ids)`.
 - **`fix/`** — each fix is a transform returning a text diff. Fixes never write the original file; they modify the editor buffer and the user saves explicitly.
-- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking, and `playback.py`, which owns the animation clock and the tool-marker interpolation so the transport widget stays checkable by eye. Both import no Qt.
+- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking, and `playback.py`, which owns the animation clock and the tool-marker interpolation so the transport widget stays checkable by eye, and `legend.py`, which turns what is on screen into named colour rows. None of them import Qt.
 - **`fileio/`** — deliberately not named `io/`, which shadows the stdlib module.
 
 ### Invariants
@@ -141,6 +141,13 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   `additive`. Copying the highlight's `setGLOptions("translucent")` because its docstring says "the
   disabled test" would silently bury the marker at exactly the moments it matters. The highlight itself
   gets away with it only because it is drawn at the same depth as the geometry it duplicates.
+- **The legend reads its labels and colours off the `Batch` objects, and never restates the palette.**
+  `build_batches` already emits `"feed (unverified)"` and the exact RGBA handed to GL; `legend.py`
+  capitalises the label for display and owns no second table. That is also why `HIGHLIGHT_COLOR` and
+  `MARKER_COLOR` live in `legend.py` with `viewport3d` importing them. A hard-coded row is a second copy
+  of the styling decision, and the two disagreeing produces a key that confidently mislabels the picture —
+  worse than no key. For the same reason it lists only what is drawn: no unverified row for a program
+  with no unverified span, because the row *appearing* is the information.
 - **The playback position is a float that the slider *displays*, never the other way round.** `TimelineBar`
   works in integer thousandths of the total — right for dropping a handle, useless for animating: one tick
   of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under

@@ -1036,3 +1036,53 @@ def test_scrubbing_still_moves_the_editor(window) -> None:
     window.editor.goto_line(1)
     window.timeline.slider.setValue(900)
     assert window.editor.current_line > 1
+
+
+# --------------------------------------------------------------------------- legend (T11.3)
+
+
+def test_the_legend_is_on_by_default(window) -> None:
+    """The viewport's distinctions are colour-only; the key is the second channel, so it starts on."""
+    assert window.legend_action.isCheckable() is True
+    assert window.legend_action.isChecked() is True
+    assert window.viewport.legend_visible is True
+
+
+def test_the_legend_names_the_colours_of_the_open_program(window) -> None:
+    window.open_file_and_wait(FIXTURES / "cutter_comp_span.nc")
+    text = window.viewport.legend.text()
+    assert "Feed" in text and "unverified" in text
+    assert window.viewport.legend.isHidden() is False
+
+
+def test_toggling_the_menu_action_hides_and_shows_the_legend(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+
+    window.legend_action.setChecked(False)
+    assert window.viewport.legend_visible is False
+    assert window.viewport.legend.isHidden() is True
+
+    window.legend_action.setChecked(True)
+    assert window.viewport.legend_visible is True
+    assert window.viewport.legend.isHidden() is False
+
+
+def test_the_legend_toggle_survives_a_reload(window, tmp_path, auto_accept) -> None:
+    """Every applied fix reloads the program. A key that switched itself back on each time would be
+    a preference the user cannot actually set."""
+    path = write_program(tmp_path, "G21 G90 G94\nG1 X10 Y10 F600\nG1 X20\n")
+    window.open_file_and_wait(path)
+    window.legend_action.setChecked(False)
+
+    assert window.run_fix("fix.append-program-end") is True
+    wait_for_load(window)
+
+    assert window.viewport.legend_visible is False
+    assert window.viewport.legend.isHidden() is True
+
+
+def test_the_legend_action_is_in_the_view_menu_with_its_shortcut(window) -> None:
+    view = next(a for a in window.menuBar().actions() if a.text() == "&View")
+    legend = next(a for a in view.menu().actions() if a.text() == "&Legend")
+    assert legend is window.legend_action
+    assert legend.shortcut().toString() == "Ctrl+L"

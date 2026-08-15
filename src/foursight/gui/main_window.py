@@ -199,6 +199,18 @@ class MainWindow(QMainWindow):
             self.timeline.toggle_playback,
         )
         view_menu.addSeparator()
+        # On by default. The viewport distinguishes everything it draws by colour alone — it has no
+        # second channel to give the geometry, unlike the diagnostics panel's symbols or the editor's
+        # wavy underline — so the key is the second channel, and red-against-green is exactly the
+        # distinction that collapses for the commonest colour blindness.
+        self.legend_action = QAction("&Legend", self)
+        self.legend_action.setCheckable(True)
+        self.legend_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.legend_action.setToolTip("Show what the toolpath colours mean")
+        self.legend_action.toggled.connect(self.viewport.set_legend_visible)
+        self.legend_action.setChecked(self.viewport.legend_visible)
+        view_menu.addAction(self.legend_action)
+
         self.part_coordinates_action = QAction("&Part coordinates", self)
         self.part_coordinates_action.setCheckable(True)
         self.part_coordinates_action.setShortcut(QKeySequence("Ctrl+P"))

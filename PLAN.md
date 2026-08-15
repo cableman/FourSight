@@ -95,6 +95,7 @@ FourSight/
 │   │   ├── picking.py      # click -> segment, matrix-keyed projection cache (NO Qt)
 │   │   ├── timeline.py     # time <-> segment from SegmentStore.duration (NO Qt)
 │   │   ├── playback.py     # wall clock -> program time, and -> a point on the path (NO Qt)
+│   │   ├── legend.py       # what is on screen -> named colour rows (NO Qt)
 │   │   ├── timeline_bar.py # the scrubber and transport widget
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
@@ -1315,6 +1316,42 @@ G4 contributes nothing because `Step.dwell` never reaches `store.duration`. A st
 would need an index-indexed position rather than a time-indexed one; the editor and click-to-pick remain
 the way to reach those moves.
 
+#### Legend (T11.1–T11.3)
+
+The viewport distinguishes everything it draws by **colour alone**, and not by preference: `GLLinePlotItem`
+has no dash or stipple parameter, and `glLineWidth` is inert on core forward-compatible profiles. That
+constraint is stated a few paragraphs up as *"colour carries every distinction"* — and it sits badly
+against the rule this codebase applies everywhere else. The diagnostics panel gives each severity a colour
+**and** a symbol; the editor underlines malformed input as well as colouring it. Both docstrings give the
+same reason: colour alone collapses the distinction for a colour-blind reader.
+
+The viewport cannot add a second visual channel to the geometry. **The legend is that channel** — it
+supplies the names. Rapid-red against feed-green is precisely the worst case for the commonest colour
+blindness, which is why the key is shown by default rather than hidden behind a preference.
+
+Two rules keep it from becoming another thing that can be wrong:
+
+- **It reads the palette off the batches rather than restating it.** Every row's label and colour come
+  from the `Batch` that was handed to GL — `build_batches` already emits `"feed (unverified)"` and friends,
+  and `tests/test_batching.py` has asserted that label since M2 under the name
+  *"…so a legend can name them"*. A second table of names here would be a second copy of the styling
+  decision, and the two disagreeing is a key that confidently mislabels the picture. For the same reason
+  `HIGHLIGHT_COLOR` and `MARKER_COLOR` moved into `legend.py` and `viewport3d` imports them, mirroring
+  `batching`'s ownership of the motion colours.
+- **It lists what is on screen, not what could be.** `build_batches` already skips any (kind, trust) pair
+  with no segments, so `viewport.batches` *is* the description of what is drawn. A program with no
+  cutter-compensated span gets no unverified row — and the row appearing is itself the information, which
+  a permanently-present greyed-out entry would destroy. Selection and tool-position rows come and go with
+  the highlight and the playback marker on the same principle.
+
+It is a plain `QLabel` child of the GL widget, positioned by a layout on the viewport rather than a
+`resizeEvent` override, and rendered as rich text so one `setText` replaces the whole key. Being a widget
+rather than a scene item keeps it out of `viewport.items` and out of the ≤ 10 buffer budget entirely.
+`_refresh_legend` is called explicitly from every method that changes what is drawn, rather than relying
+on `set_store` reaching it through `clear_highlight`: a refresh that only happens as a side effect of
+another call is one refactor away from silently not happening, and the symptom is a key describing the
+previous program.
+
 ### Editor ↔ Viewport Sync
 
 `SegmentStore.line` is what makes this cheap: every segment records its source line, so line → segments
@@ -1480,7 +1517,9 @@ enough for the manual script to cover — 32 of T2.6's 46 tests need no Qt at al
 - **Untrusted geometry gets its own batch, never a shared one.** A cutter-compensated span is drawn as
   the programmed centreline, which is *not where the tool goes*. Batching it in with ordinary feeds
   would present it as understood, so the tier is enforced in the partition rather than left to a
-  styling pass that a later change could drop. Rapids red, feeds green, both amber when untrusted.
+  styling pass that a later change could drop. Rapids red, feeds green, and **two distinct ambers when
+  untrusted** — orange for a rapid, yellow for a feed. This sentence used to say "both amber", which was
+  never what the code did; the T11 legend displays all four and would have shown the claim to be wrong.
 - **Colour carries every distinction; line width carries none.** pyqtgraph skips the `glLineWidth`
   call entirely on core forward-compatible profiles, so anything encoded in thickness silently
   vanishes there with no error. All batches draw at width 1.0.

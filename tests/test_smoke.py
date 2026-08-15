@@ -47,6 +47,7 @@ GUI_MODULES = (
     "foursight.gui.editor",
     "foursight.gui.timeline",
     "foursight.gui.playback",
+    "foursight.gui.legend",
     "foursight.gui.diagnostics_panel",
 )
 

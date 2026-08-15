@@ -1963,7 +1963,58 @@ deciding what geometry it belongs to.
 
 ---
 
-**Project status: M0–M10 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M11 — Colour legend
+
+Asked for directly: *"a legend, labels that can be toggled on/off to show what the colors in the view
+is."* The viewport drew six colours and named none of them; what each one meant lived only in
+`docs/manual_tests/`, which nobody reads while looking at a toolpath. See `PLAN.md` § Legend.
+
+The justification is stronger than "a viewer should have a key". The viewport's distinctions are
+**colour-only by necessity** — no dash, no stipple, no usable line width — while every other pane in this
+application deliberately carries a second channel because colour alone collapses for a colour-blind
+reader. The legend is the viewport's second channel, and rapid-red against feed-green is exactly the
+distinction at risk, which is why it defaults to on.
+
+- [x] **T11.1 — the legend model** — `gui/legend.py` — *done*
+      `LegendEntry`, `Swatch`, `legend_entries`, `hex_color`. Qt-free.
+      **Rows are read off the `Batch`, never restated.** `build_batches` has emitted `"feed
+      (unverified)"` since M2, under a test literally named *"…so a legend can name them"* — the legend
+      capitalises that string for display and owns no second table of names. `HIGHLIGHT_COLOR` and
+      `MARKER_COLOR` moved here so the key cannot name a colour the viewport is not drawing.
+      **It lists what is drawn, not what could be**: no unverified row for a program that has no
+      unverified span, because the row appearing is the information.
+      Files: `src/foursight/gui/legend.py`, `tests/test_legend.py`, `tests/test_smoke.py`
+
+- [x] **T11.2 — the overlay** — `gui/viewport3d.py` — *done*
+      A rich-text `QLabel` over the GL view: one `setText` replaces the whole key, so it cannot end up
+      half-updated with a row from the previous program. Positioned by a `QVBoxLayout` on the viewport
+      rather than a `resizeEvent` override — `GLViewWidget` has no layout of its own, so there is nothing
+      to displace and nothing to recompute on resize.
+      Being a **widget rather than a scene item** keeps it out of `viewport.items` and out of the ≤ 10
+      buffer budget; a test asserts that explicitly, because the item-count checks that guard against
+      stale geometry would otherwise quietly stop meaning anything.
+      `_refresh_legend` is called explicitly from `set_store`, `set_highlight`, `set_marker` and
+      `clear_marker` rather than inherited as a side effect of `clear_highlight`.
+      Files: `src/foursight/gui/viewport3d.py`, `tests/test_legend.py`
+
+- [x] **T11.3 — the toggle and the docs** — *done*
+      A checkable View action, `Ctrl+L`, checked at construction from `viewport.legend_visible` so the
+      menu cannot start out disagreeing with the viewport. It connects straight to the viewport; the
+      window keeps no legend state of its own.
+      Also **corrected PLAN.md's claim that untrusted rapids and feeds are "both amber"** — they are two
+      distinct ambers, orange and yellow, and always were. The legend displays all four colours, which is
+      what made the stale sentence visible.
+      Files: `src/foursight/gui/main_window.py`, `tests/test_main_window.py`, `PLAN.md`, `TASKS.md`,
+      `docs/manual_tests/m11.md`, `CLAUDE.md`
+
+**Deliberately not built.** Clicking a legend row to isolate or hide that batch — the obvious next
+request, and a real feature rather than a tweak: the viewport has no per-batch visibility today. No
+legend for the editor's syntax colours or the diagnostics tiers either; both already carry a second
+channel (a wavy underline, a symbol column), which is the thing the viewport lacks.
+
+---
+
+**Project status: M0–M11 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 
