@@ -1,0 +1,67 @@
+# Vectric Mach2/3 wrapped-rotary post, as emitted for the "bamse" job.
+#
+# The post's own header is the authority for all three kinematics values:
+#     ( X Values are wrapped around the Y axis )   -> rotary_axis = "y"
+#     ( X Values are output as A )                 -> A is the rotation
+#     ( Diameter = 52.000 mm )                     -> blank radius 26 mm
+#
+# Z is radial and measured from the SURFACE of the blank, so the axis of rotation sits 26 mm
+# below Z0 -> centerline_offset = [0, 0, -26]. Check this against how you zero Z on the machine:
+# if you zero on the AXIS instead of the surface, the offset is [0, 0, 0].
+
+[machine]
+name = "Rotary bar, 52 mm blank (Vectric wrapped)"
+units = "mm"
+
+[dialect]
+name = "mach3"
+# Mach3 XML has `DwellinMilli = 1` in both this machine's profiles: G4 P is milliseconds here. If the
+# Vectric post emits P in seconds, every dwell runs 1000x short.
+dwell_units = "milliseconds"
+
+[kinematics]
+rotary_mount = "table"
+rotary_axis = "y"
+centerline_offset = [0.0, 0.0, -26.0]
+
+[limits]
+max_feed = 3000.0
+max_spindle_rpm = 25000.0
+rotary_wrap_warn = 360.0
+
+[axes.y]
+min = 0.0
+max = 200.0
+max_rapid = 5000.0
+
+# The gouge bound. Z is radial from the blank surface and the axis of rotation is at -26, so a Z below
+# that has passed through the centre of the bar. -30 leaves room for a deliberate through-cut; anything
+# past it is `geometry.axis-travel-exceeded`. If the post ever confuses surface-referenced Z with
+# axis-referenced Z, the whole program shifts down by one radius and lands here.
+[axes.z]
+min = -30.0
+max = 60.0
+max_rapid = 3000.0
+
+[axes.a]
+type = "rotary"
+wrap = true
+max_rapid = 3600.0
+
+[tolerance]
+arc_radius_mismatch = 0.005
+arc_chord = 0.01
+rotary_chord = 0.01
+
+[safety]
+# Z0 is the blank surface, so a rapid at any negative Z is already inside the material. Zero is a real
+# threshold here rather than "unset" — the check runs.
+min_clearance_z = 0.0
+require_spindle_before_cut = true
+retract_before_toolchange = true
+
+[stock]
+shape = "cylinder"
+diameter = 52.0
+length = 150.0
+axis_min = 0.0
