@@ -75,6 +75,27 @@ LEGEND_MARGIN_PX = 10
 LEGEND_TOOLTIP = (
     "Unverified spans are drawn as the programmed centreline, which is not where the tool goes."
 )
+# How far the cursor may travel between press and release and still count as a *click*, in pixels
+# (Manhattan distance, which is what Qt's own drag-start heuristic uses). Above it the gesture was a
+# camera move and must not also select a segment — see `mouseReleaseEvent`.
+CLICK_SLOP_PX = 4.0
+# Held with the left button, this pans instead of orbiting. Shift rather than Ctrl: pyqtgraph already
+# binds Ctrl+left to a pan in the *camera* plane, which slides the floor grid out of the picture on a
+# tilted view, and Ctrl is the modifier every menu shortcut in `main_window` uses.
+PAN_MODIFIER = Qt.ShiftModifier
+# Every pan gesture pans in the plane of the camera, and every gesture uses the same frame — including
+# middle-drag, which pyqtgraph itself does in `view-upright`.
+#
+# `view` is the one that tracks the cursor exactly. Measured offscreen at elevation 30°, a 20 px drag
+# moves a world point 20 px on screen under `view`, and 20 px horizontally but only 10.3 px vertically
+# under `view-upright`, which pans along the machine's XY plane and so foreshortens with the tilt. A
+# drag that moves the part less than the hand is read as the view fighting back, and it gets worse the
+# flatter the view. Cursor-locked is also what "drag" means everywhere else, so it is worth the one
+# behaviour change to middle-drag rather than leaving two pans that feel different.
+#
+# Ctrl+drag is deliberately *not* rerouted: pyqtgraph binds Ctrl+left and Ctrl+middle to pans of its
+# own, and those keep working exactly as its documentation describes them.
+PAN_FRAME = "view"
 # Fallback camera distance for an empty or degenerate program, in mm.
 DEFAULT_DISTANCE_MM = 200.0
 # The view is fitted to this multiple of the geometry's extent, so the path is not flush to the edges.
@@ -124,9 +145,15 @@ def _legend_row(entry: LegendEntry) -> str:
 class ToolpathViewport(GLViewWidget):
     """Draws a ``Simulation`` as a small number of batched line items.
 
-    Orbit, pan and zoom come from ``GLViewWidget`` itself: left-drag orbits, middle-drag pans, wheel
-    zooms. Clicking emits `segment_picked` with a segment index (T3.3), using the CPU screen-space
-    strategy decided in T3.0 — Qt item picking is unavailable with 500k segments in a handful of buffers.
+    The camera is ``GLViewWidget``'s, with the **pan gestures widened**. Out of the box pyqtgraph pans
+    only on middle-drag or Ctrl+left-drag, and a middle button is exactly what a laptop trackpad — the
+    machine a lot of this gets used on — does not have, so zooming in left the user unable to reach the
+    part they had zoomed towards. `PAN_MODIFIER`+left-drag and right-drag now pan as well, and
+    middle-drag is rerouted through the same code so all three agree; left-drag still orbits and the
+    wheel still zooms.
+
+    Clicking emits `segment_picked` with a segment index (T3.3), using the CPU screen-space strategy
+    decided in T3.0 — Qt item picking is unavailable with 500k segments in a handful of buffers.
     """
 
     #: Emitted with the index of the segment under a click. Not emitted when the click hits nothing,
@@ -144,6 +171,9 @@ class ToolpathViewport(GLViewWidget):
         self.highlighted_segments = 0
         self._store: SegmentStore | None = None
         self._projection: ScreenProjection | None = None
+        #: Where the current mouse gesture started, or None between gestures. A click is a press and a
+        #: release in nearly the same place; anything further apart moved the camera instead.
+        self._press_pos = None
         #: Which coordinates are on screen. Owned here so batching, the highlight, picking and the camera
         #: cannot disagree — each reading `store.lin` independently is how three of them end up in machine
         #: coordinates while one is in part coordinates.
@@ -385,15 +415,75 @@ class ToolpathViewport(GLViewWidget):
 
     # ------------------------------------------------------------------ picking (T3.3)
 
-    def mouseReleaseEvent(self, event) -> None:
-        """A left click without a drag picks a segment.
+    def mousePressEvent(self, event) -> None:
+        """Remember where the gesture started, so release can tell a click from a drag."""
+        super().mousePressEvent(event)
+        self._press_pos = event.position()
 
-        Distinguished from an orbit by comparing against the press position: `GLViewWidget` uses
-        left-drag to orbit, so picking on *press* would fire on every orbit and jump the editor around
-        while the user is just looking at the part.
+    def mouseMoveEvent(self, event) -> None:
+        """Pan on the widened gestures; leave orbit, and pyqtgraph's own pans, to the base class.
+
+        The delta is taken and `mousePos` advanced here rather than after delegating, because
+        `GLViewWidget.mouseMoveEvent` consumes `mousePos` for the gesture it handles — letting it run
+        as well would apply the same drag twice.
         """
+        position = event.position()
+        if self._within_click_slop(position):
+            return
+        if not self._is_pan_drag(event):
+            super().mouseMoveEvent(event)
+            return
+        # A drag can begin without this widget having seen the press (a grab handed over mid-gesture),
+        # in which case the first delta is unknowable rather than zero.
+        previous = getattr(self, "mousePos", position)
+        self.mousePos = position
+        delta = position - previous
+        self.pan(delta.x(), delta.y(), 0, relative=PAN_FRAME)
+
+    def _within_click_slop(self, position) -> bool:
+        """Whether the gesture so far is still small enough to be a click.
+
+        Inside the slop the camera does not move **at all**. `GLViewWidget` orbits a *degree per pixel*,
+        so without this a two-pixel tremor while clicking swings the view several degrees — and then the
+        segment the user aimed at is no longer under the cursor when the release picks, which reads as
+        clicking simply not working.
+
+        `mousePos` is deliberately left at the press position while this returns True, so the delta is
+        not thrown away: the first move that escapes the slop applies the whole travel since the press
+        and the drag stays locked to the cursor from where it started.
+        """
+        press = self._press_pos
+        return press is not None and (position - press).manhattanLength() <= CLICK_SLOP_PX
+
+    @staticmethod
+    def _is_pan_drag(event) -> bool:
+        """Whether this drag is one of the pan gestures handled here.
+
+        Middle-drag is included even though `GLViewWidget` already pans on it, so that every pan uses
+        one frame — see `PAN_FRAME`. Anything with Ctrl held is excluded and falls through to
+        pyqtgraph's own Ctrl+left and Ctrl+middle pans.
+        """
+        if event.modifiers() & Qt.ControlModifier:
+            return False
+        buttons = event.buttons()
+        if buttons & (Qt.RightButton | Qt.MiddleButton):
+            return True
+        return bool(buttons & Qt.LeftButton) and bool(event.modifiers() & PAN_MODIFIER)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """A left click *without a drag* picks a segment.
+
+        Bound to release rather than press because left-drag orbits: picking on press would fire on
+        every orbit and jump the editor around while the user is just looking at the part. Release
+        alone is not enough, though — an orbit or a Shift-pan also ends in a left release, and picking
+        there scrolls the editor to whatever segment the camera move happened to leave under the
+        cursor. So the release must land within `CLICK_SLOP_PX` of the press to count as a click.
+        """
+        press, self._press_pos = self._press_pos, None
         super().mouseReleaseEvent(event)
-        if event.button() != Qt.LeftButton:
+        if event.button() != Qt.LeftButton or press is None:
+            return
+        if (event.position() - press).manhattanLength() > CLICK_SLOP_PX:
             return
         index = self.pick_at(event.position().x(), event.position().y())
         if index is not None:

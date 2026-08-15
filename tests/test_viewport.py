@@ -26,6 +26,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="the [gui] extra is not installed")
 pytest.importorskip("pyqtgraph", reason="the [gui] extra is not installed")
 
+from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from conftest import DEFAULT_PROFILE_PATH, fixture_text  # noqa: E402
@@ -597,3 +599,163 @@ def test_the_toolpath_does_not_hide_itself(viewport, profile) -> None:
     viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
     for item in viewport._items:
         assert gl_options(item)[GL.GL_DEPTH_TEST] is False
+
+
+# --------------------------------------------------------------------------- camera gestures
+#
+# The pan gestures are widened beyond pyqtgraph's middle-drag, because a middle button is exactly what
+# a trackpad does not have — so zooming in used to leave the user unable to reach the part they had
+# zoomed towards. What can go wrong here is not visible in a screenshot: a drag that also *picks* on
+# release scrolls the editor to whatever segment the camera move left under the cursor, and a pan that
+# runs both here and in `GLViewWidget` applies the same drag twice, moving at double speed.
+
+
+def press(viewport, pos, button, modifiers=Qt.NoModifier) -> None:
+    viewport.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, pos, button, button, modifiers))
+
+
+def drag(viewport, start, end, button, modifiers=Qt.NoModifier) -> None:
+    """One press–move–release gesture, as Qt would deliver it."""
+    press(viewport, start, button, modifiers)
+    viewport.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, end, Qt.NoButton, button, modifiers))
+    viewport.mouseReleaseEvent(
+        _mouse(QEvent.Type.MouseButtonRelease, end, button, Qt.NoButton, modifiers)
+    )
+
+
+def _mouse(kind, pos, button, buttons, modifiers):
+    point = QPointF(*pos)
+    return QMouseEvent(kind, point, point, button, buttons, modifiers)
+
+
+def camera(viewport) -> tuple:
+    """The orbit half of the camera: what a pan must leave alone."""
+    return (viewport.opts["azimuth"], viewport.opts["elevation"], viewport.opts["distance"])
+
+
+def centre(viewport) -> np.ndarray:
+    look_at = viewport.opts["center"]
+    return np.array([look_at.x(), look_at.y(), look_at.z()])
+
+
+def project(viewport, point: np.ndarray) -> np.ndarray:
+    """``point`` in widget pixels, through the same matrix the renderer and picking use."""
+    clip = viewport.pick_matrix() @ np.array([*point, 1.0])
+    ndc = clip[:3] / clip[3]
+    return np.array(
+        [(ndc[0] * 0.5 + 0.5) * viewport.width(), (1.0 - (ndc[1] * 0.5 + 0.5)) * viewport.height()]
+    )
+
+
+#: Every gesture that must pan, including middle-drag — which pyqtgraph already pans on, but in a
+#: different frame. They are rerouted through one implementation so all three feel identical.
+PAN_GESTURES = [
+    pytest.param(Qt.LeftButton, Qt.ShiftModifier, id="shift-left-drag"),
+    pytest.param(Qt.RightButton, Qt.NoModifier, id="right-drag"),
+    pytest.param(Qt.MiddleButton, Qt.NoModifier, id="middle-drag"),
+]
+
+
+@pytest.mark.parametrize(("button", "modifiers"), PAN_GESTURES)
+def test_a_pan_gesture_moves_the_look_at_point_without_orbiting(
+    viewport, profile, button, modifiers
+) -> None:
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    before, orbit = centre(viewport), camera(viewport)
+    drag(viewport, (200.0, 200.0), (260.0, 230.0), button, modifiers)
+    assert not np.allclose(centre(viewport), before), "the pan gesture did not move the camera"
+    assert camera(viewport) == orbit, "panning rotated or zoomed the view"
+
+
+@pytest.mark.parametrize(("button", "modifiers"), PAN_GESTURES)
+def test_the_geometry_follows_the_cursor_one_to_one(viewport, profile, button, modifiers) -> None:
+    """The property the user actually judges a drag by: the part sticks to the pointer.
+
+    Asserted by projecting a world point through the real camera rather than by reading
+    `opts["center"]`, because the sense and the scale of the pan are what is easy to get wrong — a sign
+    error drags the part the wrong way, and the wrong relative frame foreshortens the vertical to
+    roughly half at the default 30° elevation. Panning twice in one drag — once here and once in
+    `GLViewWidget` — would show up as 2× here.
+
+    The point measured is the **look-at point**, where the tracking is exact. Under perspective a point
+    further from the camera than the look-at plane moves slightly less (~7% for this fixture), which is
+    the projection being correct, not the pan being wrong.
+    """
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    target = centre(viewport)
+    before = project(viewport, target)
+    drag(viewport, (200.0, 200.0), (260.0, 230.0), button, modifiers)
+    moved = project(viewport, target) - before
+    assert moved == pytest.approx([60.0, 30.0], abs=0.5)
+
+
+def test_a_plain_left_drag_still_orbits(viewport, profile) -> None:
+    """The widened pans must not cost the gesture the viewport had all along."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    before = centre(viewport)
+    drag(viewport, (200.0, 200.0), (260.0, 230.0), Qt.LeftButton)
+    assert viewport.opts["azimuth"] != pytest.approx(-60.0)
+    assert np.allclose(centre(viewport), before), "orbiting moved the look-at point"
+
+
+def test_a_left_drag_does_not_also_pick(viewport, profile) -> None:
+    """An orbit or a pan ends in a left release, and release is what picking is bound to.
+
+    Without the click/drag distinction the editor jumps to whatever segment the camera move happened
+    to leave under the cursor — while the user was only looking at the part.
+    """
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    picked = []
+    viewport.segment_picked.connect(picked.append)
+    for modifiers in (Qt.NoModifier, Qt.ShiftModifier):
+        for target in _pickable_positions(viewport)[:4]:
+            drag(viewport, (target[0] - 40.0, target[1] - 40.0), target, Qt.LeftButton, modifiers)
+    assert picked == [], "a drag selected a segment"
+
+
+def test_a_tremor_while_clicking_does_not_move_the_camera(viewport, profile) -> None:
+    """`GLViewWidget` orbits a degree per pixel, so a two-pixel wobble is a visible swing."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    before, orbit = centre(viewport), camera(viewport)
+    drag(viewport, (200.0, 200.0), (201.0, 201.0), Qt.LeftButton)
+    assert camera(viewport) == orbit
+    assert np.allclose(centre(viewport), before)
+
+
+def test_a_drag_that_escapes_the_slop_loses_no_travel(viewport, profile) -> None:
+    """The dead zone must not become a permanent offset between the cursor and the part.
+
+    The travel inside the slop is deferred, not discarded — dropping it would leave the geometry
+    trailing the pointer by up to `CLICK_SLOP_PX` for the rest of the drag.
+    """
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    target = centre(viewport)
+    before = project(viewport, target)
+    press(viewport, (200.0, 200.0), Qt.RightButton)
+    for position in ((201.0, 200.0), (203.0, 200.0), (260.0, 200.0)):
+        viewport.mouseMoveEvent(
+            _mouse(QEvent.Type.MouseMove, position, Qt.NoButton, Qt.RightButton, Qt.NoModifier)
+        )
+    assert (project(viewport, target) - before) == pytest.approx([60.0, 0.0], abs=0.5)
+
+
+def test_a_click_that_barely_moves_still_picks(viewport, profile) -> None:
+    """The slop has to tolerate a hand, or clicking becomes unreliable rather than merely strict."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    picked = []
+    viewport.segment_picked.connect(picked.append)
+    target = _pickable_positions(viewport)[0]
+    drag(viewport, (target[0] - 1.0, target[1] - 1.0), target, Qt.LeftButton)
+    assert picked, "a click with a 2 px tremor selected nothing"
+
+
+def _pickable_positions(viewport) -> list[tuple[float, float]]:
+    """Widget positions with a segment under them, since the camera framing is not fixed here."""
+    found = [
+        (float(x), float(y))
+        for x in range(0, viewport.width(), 17)
+        for y in range(0, viewport.height(), 19)
+        if viewport.pick_at(float(x), float(y)) is not None
+    ]
+    assert found, "nothing was pickable anywhere in the viewport"
+    return found

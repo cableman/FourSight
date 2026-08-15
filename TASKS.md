@@ -2024,6 +2024,30 @@ distinction at risk, which is why it defaults to on.
       it is a property of the *batches*, and it now says so.
       Files: `src/foursight/gui/viewport3d.py`, `tests/test_viewport.py`
 
+- [x] **T11.5 — you could not drag the view once you had zoomed into it** — *done*
+      Reported as *"you can move around the model, but you cannot drag"*. Panning existed the whole
+      time — it was on **middle-drag and Ctrl+left-drag**, `GLViewWidget`'s bindings — and a middle
+      button is exactly what a trackpad does not have. Zooming in therefore stranded the user: the
+      thing they had zoomed towards was off-centre and unreachable.
+      **Shift+left-drag and right-drag now pan**, and left-drag still orbits. All three, plus
+      middle-drag, go through one implementation in `PAN_FRAME = "view"` — the camera plane — rather
+      than pyqtgraph's `view-upright`, which pans along the machine's XY plane and so foreshortens the
+      vertical to 10.3 px per 20 px of drag at the default 30° elevation. A drag that moves the part
+      less than the hand reads as the view resisting. Ctrl+drag is left alone, so pyqtgraph's own two
+      pans still behave as its documentation says.
+      **Two defects found while doing it**, both in the click/drag boundary rather than in the camera:
+      `mouseReleaseEvent`'s docstring claimed it distinguished a click from an orbit "by comparing
+      against the press position" and the code did no such thing — every orbit ended in a pick, jumping
+      the editor to whatever segment the camera move left under the cursor. And `GLViewWidget` orbits a
+      **degree per pixel**, so a two-pixel tremor while clicking swings the view far enough that the
+      release then misses the segment the user aimed at — clicking that intermittently does nothing.
+      One `CLICK_SLOP_PX` answers both: inside it the camera does not move and the release picks;
+      outside it the gesture is a camera move and picks nothing. The travel inside the slop is
+      **deferred, not discarded** — `mousePos` stays at the press point — or the geometry would trail
+      the cursor by up to the slop for the rest of the drag.
+      Files: `src/foursight/gui/viewport3d.py`, `tests/test_viewport.py`, `PLAN.md`,
+      `docs/manual_tests/m2.md`, `CLAUDE.md`
+
 **Deliberately not built.** Clicking a legend row to isolate or hide that batch — the obvious next
 request, and a real feature rather than a tweak: the viewport has no per-batch visibility today. No
 legend for the editor's syntax colours or the diagnostics tiers either; both already carry a second

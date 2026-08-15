@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1623 tests**.
+**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1634 tests**.
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -156,6 +156,17 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   of the styling decision, and the two disagreeing produces a key that confidently mislabels the picture —
   worse than no key. For the same reason it lists only what is drawn: no unverified row for a program
   with no unverified span, because the row *appearing* is the information.
+- **One pixel threshold separates a click from a camera move, and it works in both directions.** Picking
+  is bound to mouse *release*, and an orbit or a pan ends in a release too — so above `CLICK_SLOP_PX` the
+  release must pick **nothing**, or every orbit scrolls the editor to whatever segment the camera move
+  left under the cursor. Below it the camera must not move **at all**: `GLViewWidget` orbits a *degree per
+  pixel*, so a two-pixel tremor while clicking swings the view far enough that the release misses the
+  segment the user aimed at, and clicking reads as intermittently broken. The travel inside the slop is
+  deferred rather than discarded (`mousePos` stays at the press point) or the geometry trails the cursor
+  by up to that much for the rest of the drag. Panning is on Shift+left-drag, right-drag and middle-drag,
+  all three through one implementation in the camera plane — pyqtgraph's `view-upright` foreshortens the
+  vertical to about half at the default elevation, and a drag that moves the part less than the hand reads
+  as the view resisting.
 - **The playback position is a float that the slider *displays*, never the other way round.** `TimelineBar`
   works in integer thousandths of the total — right for dropping a handle, useless for animating: one tick
   of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under
