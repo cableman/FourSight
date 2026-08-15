@@ -2007,6 +2007,23 @@ distinction at risk, which is why it defaults to on.
       Files: `src/foursight/gui/main_window.py`, `tests/test_main_window.py`, `PLAN.md`, `TASKS.md`,
       `docs/manual_tests/m11.md`, `CLAUDE.md`
 
+- [x] **T11.4 — the bug the legend found: overlapping colours were being added** — *done*
+      Reported on the first run as *"yellow lines that are not in the legend"*, and the diagnosis was
+      exactly right — the legend can only name colours that are real.
+      `GLLinePlotItem` defaults to `glOptions="additive"` and `_rebuild_items` never overrode it, so
+      overlapping geometry **summed**: a red rapid over a green feed rendered `#ffff8c`. Shipping since
+      M2, and worst on wrapped rotary work, where the path crosses itself constantly.
+      No test of the data model could have found it — the batching was correct the entire time, and the
+      failure was one layer below it in GL state that nothing asserted on. `BATCH_GL_OPTIONS` turns
+      blending off; the new tests assert the GL state directly and record the arithmetic that produced
+      the yellow.
+      **Depth testing deliberately stays off**, which is a separate question from blending: a wireframe
+      preview should be visible through itself, and a disabled test writes no depth — which is the only
+      reason the selection highlight and the tool marker can draw over the segments they coincide with.
+      `set_highlight`'s docstring claimed "the depth test off" as if it were a property of the highlight;
+      it is a property of the *batches*, and it now says so.
+      Files: `src/foursight/gui/viewport3d.py`, `tests/test_viewport.py`
+
 **Deliberately not built.** Clicking a legend row to isolate or hide that batch — the obvious next
 request, and a real feature rather than a tweak: the viewport has no per-batch visibility today. No
 legend for the editor's syntax colours or the diagnostics tiers either; both already carry a second

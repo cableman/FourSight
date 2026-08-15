@@ -20,6 +20,7 @@ import html
 
 import numpy as np
 import pyqtgraph.opengl as gl
+from OpenGL import GL
 from pyqtgraph.opengl import GLViewWidget
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout
@@ -41,6 +42,25 @@ from foursight.sim.simulator import Simulation
 
 # Every batch draws at width 1.0. Not a stylistic choice: see the module docstring.
 LINE_WIDTH = 1.0
+# Toolpath batches draw with **blending off**, which is not pyqtgraph's default and has to be said.
+#
+# `GLLinePlotItem` defaults to `glOptions="additive"`, and additive blending *adds overlapping colours
+# together*. A red rapid (0.90, 0.25, 0.20) crossing a green feed (0.20, 0.85, 0.35) renders as
+# (1.0, 1.0, 0.55) — `#ffff8c`, a yellow that is in no palette and means nothing at all. On a wrapped
+# rotary program, where the path crosses itself constantly, most of the screen ends up that colour.
+# That is precisely the invariant PLAN.md § Batching Layer states — "colour carries every distinction" —
+# being broken by the renderer rather than by the batching, and it is unfalsifiable from the data model.
+#
+# Depth testing stays **off**, as it has been since M2. That is a separate question from blending: with
+# it off the whole path is visible through itself, which is what a wireframe preview is for, and it is
+# also what lets the selection highlight and the tool marker draw on top without z-fighting against the
+# geometry they coincide with. Every pixel now shows exactly one palette colour — the last batch drawn
+# there — rather than a sum of several.
+BATCH_GL_OPTIONS = {
+    GL.GL_DEPTH_TEST: False,
+    GL.GL_BLEND: False,
+    GL.GL_CULL_FACE: False,
+}
 # Marker diameter in *pixels*, via `pxMode`. Not millimetres: a world-sized marker vanishes when the
 # camera pulls back to fit a large part and swamps the toolpath when it zooms in.
 MARKER_SIZE_PX = 12.0
@@ -216,6 +236,7 @@ class ToolpathViewport(GLViewWidget):
                 width=LINE_WIDTH,
                 mode="lines",  # consecutive vertex pairs, so a batch need not be one polyline
                 antialias=False,  # a per-frame cost that buys little on a dense path
+                glOptions=BATCH_GL_OPTIONS,
             )
             self.addItem(item)
             self._items.append(item)
@@ -230,9 +251,14 @@ class ToolpathViewport(GLViewWidget):
         exactly one highlight item and its existence never depends on the data, so no stale item can
         survive a change. It also follows the text cursor, so it updates far more often than a load does.
 
-        Drawn with the **depth test off**, deliberately. A selected segment buried behind other geometry
-        would otherwise highlight invisibly, and the user would read that as "this line draws nothing" —
-        the opposite of what a selection is for.
+        It lands on top because **no toolpath batch ever writes depth** — `BATCH_GL_OPTIONS` disables
+        the depth test, and a disabled test writes nothing — so the depth buffer the highlight tests
+        against is empty and it draws over whatever is already there. Stated here because it is a
+        property of the *batches*, not of this item: turning depth testing on for the toolpath would
+        make a selection z-fight against the very segments it duplicates, and the symptom would be a
+        highlight that flickers or vanishes rather than an error. A selected segment buried behind
+        other geometry must stay visible, or the user reads it as "this line draws nothing" — the
+        opposite of what a selection is for.
         """
         vertices = self._highlight_vertices(store, mask, self.part_coordinates)
         self.highlighted_segments = 0 if vertices is None else vertices.shape[0] // 2

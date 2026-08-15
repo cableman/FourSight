@@ -29,11 +29,13 @@ pytest.importorskip("pyqtgraph", reason="the [gui] extra is not installed")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from conftest import DEFAULT_PROFILE_PATH, fixture_text  # noqa: E402
+from foursight.gui.batching import TRUSTED_COLORS  # noqa: E402
+from foursight.gui.legend import hex_color  # noqa: E402
 from foursight.gui.playback import marker_point  # noqa: E402
 from foursight.gui.timeline import build_timeline  # noqa: E402
 from foursight.gui.viewport3d import MARKER_COLOR, ToolpathViewport  # noqa: E402
 from foursight.machine.profile import load_profile  # noqa: E402
-from foursight.sim.segments import SegmentStore  # noqa: E402
+from foursight.sim.segments import Kind, SegmentStore  # noqa: E402
 from foursight.sim.simulator import simulate_text  # noqa: E402
 
 GRID_ITEMS = 1  # the floor grid, which every scene keeps
@@ -532,3 +534,66 @@ def test_the_marker_colour_differs_from_every_batch_colour_and_the_highlight(
     for batch in viewport.batches:
         assert batch.color != MARKER_COLOR
     assert HIGHLIGHT_COLOR != MARKER_COLOR
+
+
+# ------------------------------------------------------- blending (the M11 yellow-lines regression)
+
+
+def gl_options(item) -> dict:
+    """The GL state pyqtgraph will apply before drawing ``item``, resolved to a dict."""
+    from pyqtgraph.opengl.GLGraphicsItem import GLOptions
+
+    options = item.__dict__["_GLGraphicsItem__glOpts"]
+    return GLOptions[options] if isinstance(options, str) else options
+
+
+def test_toolpath_batches_never_blend(viewport, profile) -> None:
+    """The bug this is here for: a red rapid crossing a green feed rendered as **yellow**.
+
+    `GLLinePlotItem` defaults to `glOptions="additive"`, which *adds* overlapping colours — and
+    (0.90, 0.25, 0.20) + (0.20, 0.85, 0.35) saturates to (1.0, 1.0, 0.55), a yellow that is in no
+    palette and names nothing. It was reported as "yellow lines that are not in the legend", which is
+    exactly right: the legend can only name colours that are real. On a wrapped rotary program, where
+    the path crosses itself constantly, most of the screen was that colour.
+
+    It is also unfalsifiable from the data model — the batching was correct the whole time — so the
+    assertion has to be made against the GL state itself.
+    """
+    from OpenGL import GL
+
+    viewport.set_simulation(simulation(fixture_text("cutter_comp_span.nc"), profile))
+    assert len(viewport.batches) > 1, "a single batch cannot demonstrate blending between batches"
+    for item in viewport._items:
+        assert gl_options(item)[GL.GL_BLEND] is False, (
+            "a toolpath batch is blending with what is under it"
+        )
+
+
+def test_every_drawn_pixel_can_only_be_a_palette_colour(viewport, profile) -> None:
+    """The property the previous test protects, stated as arithmetic rather than as GL state.
+
+    With blending off, a pixel shows the last batch drawn there and nothing else, so every colour on
+    screen is one the legend can name. This asserts the sum that used to appear is not one of them.
+    """
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    palette = {batch.color for batch in viewport.batches}
+    rapid = TRUSTED_COLORS[Kind.RAPID]
+    feed = TRUSTED_COLORS[Kind.FEED]
+    channels = zip(rapid[:3], feed[:3], strict=True)
+    additive_sum = tuple(min(1.0, a + b) for a, b in channels) + (1.0,)
+    assert additive_sum not in palette, "the blend of two batches is itself a palette colour"
+    assert hex_color(additive_sum) == "#ffff8c", "the colour that was reported as unnamed yellow"
+
+
+def test_the_toolpath_does_not_hide_itself(viewport, profile) -> None:
+    """Depth testing stays off, as it has been since M2.
+
+    Separate from blending, and load-bearing in two directions: a wireframe preview is meant to be
+    visible through itself, and a disabled test writes no depth, which is the only reason the selection
+    highlight and the tool marker can draw on top of the segments they coincide with.
+    """
+    from OpenGL import GL
+
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    for item in viewport._items:
+        assert gl_options(item)[GL.GL_DEPTH_TEST] is False

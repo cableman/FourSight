@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1620 tests**.
+**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1623 tests**.
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -12,7 +12,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1577) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1580) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -134,13 +134,21 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   a vertical rule would both report that and exempt a `+Z` move from below the centreline, which drives
   through the middle of the stock. Monotonically outward, not merely ending further out — radial distance
   along a line is convex.
-- **`additive` is the pyqtgraph GL mode that disables the depth test, not `translucent`.** pyqtgraph's own
-  docs are explicit: *translucent — enables depth testing*; *additive — disables depth testing*. The
-  playback marker must show through geometry, because the tool is routinely inside the work and a marker
-  occluded by the stock reads as the program having finished — so it keeps `GLScatterPlotItem`'s default
-  `additive`. Copying the highlight's `setGLOptions("translucent")` because its docstring says "the
-  disabled test" would silently bury the marker at exactly the moments it matters. The highlight itself
-  gets away with it only because it is drawn at the same depth as the geometry it duplicates.
+- **Every pyqtgraph GL item defaults to `glOptions="additive"`, and additive blending *adds overlapping
+  colours together*.** This shipped as a real defect from M2 to M11: `_rebuild_items` never set
+  `glOptions`, so a red rapid `(0.90, 0.25, 0.20)` crossing a green feed `(0.20, 0.85, 0.35)` rendered as
+  `#ffff8c` — a yellow in no palette, naming nothing. On a wrapped-rotary program most of the screen was
+  that colour. It breaks *"colour carries every distinction"* in the renderer rather than in the batching,
+  where no data-model test can see it, and it was found only when a legend made it obvious that a colour
+  on screen had no name. **Toolpath batches use `BATCH_GL_OPTIONS`: blending off.** Assert GL state
+  directly (`tests/test_viewport.py::test_toolpath_batches_never_blend`); the batching can be perfect
+  while the picture is wrong.
+- **Depth testing is off for the toolpath, and that is what makes the overlays work.** A disabled test
+  writes no depth, so the selection highlight and the tool marker draw on top of the very segments they
+  coincide with instead of z-fighting them. `HIGHLIGHT_COLOR`'s `translucent` mode *enables* the depth
+  test (pyqtgraph's docs: *translucent — enables depth testing*; *additive — disables* it) and gets away
+  with it only because the batches leave the depth buffer empty. Turning depth testing on for the
+  toolpath is therefore not a local change — it would make selections flicker or vanish, with no error.
 - **The legend reads its labels and colours off the `Batch` objects, and never restates the palette.**
   `build_batches` already emits `"feed (unverified)"` and the exact RGBA handed to GL; `legend.py`
   capitalises the label for display and owns no second table. That is also why `HIGHLIGHT_COLOR` and

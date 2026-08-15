@@ -1344,6 +1344,17 @@ Two rules keep it from becoming another thing that can be wrong:
   a permanently-present greyed-out entry would destroy. Selection and tool-position rows come and go with
   the highlight and the playback marker on the same principle.
 
+**The legend earned its keep on the first run.** It immediately exposed a rendering defect that had been
+shipping since M2: `GLLinePlotItem` defaults to `glOptions="additive"`, `_rebuild_items` never overrode it,
+and additive blending *adds overlapping colours*. A red rapid crossing a green feed rendered `#ffff8c` —
+a yellow in no palette. It was reported as "yellow lines that are not in the legend", which was exactly
+the right diagnosis: the legend can only name colours that are real. Batching was correct throughout, so
+no test of the data model could have caught it; the assertion now lives against the GL state itself.
+Toolpath batches draw with **blending off** (`BATCH_GL_OPTIONS`), so every pixel is one palette colour —
+the last batch drawn there — rather than a sum. Depth testing stays **off**, which is a separate decision:
+a wireframe preview should be visible through itself, and a disabled test writes no depth, which is the
+only reason the highlight and the marker can draw over the segments they coincide with.
+
 It is a plain `QLabel` child of the GL widget, positioned by a layout on the viewport rather than a
 `resizeEvent` override, and rendered as rich text so one `setText` replaces the whole key. Being a widget
 rather than a scene item keeps it out of `viewport.items` and out of the ≤ 10 buffer budget entirely.
