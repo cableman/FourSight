@@ -29,7 +29,9 @@ pytest.importorskip("pyqtgraph", reason="the [gui] extra is not installed")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from conftest import DEFAULT_PROFILE_PATH, fixture_text  # noqa: E402
-from foursight.gui.viewport3d import ToolpathViewport  # noqa: E402
+from foursight.gui.playback import marker_point  # noqa: E402
+from foursight.gui.timeline import build_timeline  # noqa: E402
+from foursight.gui.viewport3d import MARKER_COLOR, ToolpathViewport  # noqa: E402
 from foursight.machine.profile import load_profile  # noqa: E402
 from foursight.sim.segments import SegmentStore  # noqa: E402
 from foursight.sim.simulator import simulate_text  # noqa: E402
@@ -293,10 +295,11 @@ def test_highlighting_does_not_mutate_the_store(viewport, profile) -> None:
 
 
 def test_the_highlight_stays_inside_the_plan_buffer_budget(viewport, profile) -> None:
-    """PLAN allows <= 10 buffers. Four batches plus one highlight is five."""
+    """PLAN allows <= 10 buffers. Four batches, one highlight and one playback marker is six."""
     sim = simulation(fixture_text("cutter_comp_span.nc"), profile)
     viewport.set_simulation(sim)
     viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
+    viewport.set_marker(sim.store, build_timeline(sim.store), 0.0)
     assert len(viewport.items) - GRID_ITEMS <= 10
 
 
@@ -409,3 +412,123 @@ def test_highlighting_part_coordinates_without_a_transform_is_refused(viewport, 
     viewport.part_coordinates = True  # as if a toggle had been applied without transforming
     with pytest.raises(ValueError, match="no display transform"):
         viewport.set_highlight(sim.store, sim.store.line == sim.store.line[0])
+
+
+# --------------------------------------------------------------------------- playback marker (T10.3)
+
+
+def test_a_marker_adds_exactly_one_item_and_reuses_it(viewport, profile) -> None:
+    """One long-lived item, like the highlight: it moves once a frame, so rebuilding is not an option."""
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    timeline = build_timeline(sim.store)
+    before = len(viewport.items)
+
+    viewport.set_marker(sim.store, timeline, 0.0)
+    assert len(viewport.items) == before + 1
+    first = viewport._marker
+
+    viewport.set_marker(sim.store, timeline, timeline.total / 2.0)
+    assert len(viewport.items) == before + 1
+    assert viewport._marker is first, "the marker was rebuilt rather than moved"
+
+
+def test_clearing_a_marker_that_was_never_drawn_adds_nothing(viewport, profile) -> None:
+    """`set_store` clears on every load, and the scene must stay grid-plus-batches until playback
+    actually starts — which is what the item-count regression tests above count on."""
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.clear_marker()
+    assert viewport._marker is None
+    assert len(viewport.items) == GRID_ITEMS + len(viewport.batches)
+
+
+def test_the_marker_is_drawn_where_the_interpolation_says(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    timeline = build_timeline(sim.store)
+    seconds = timeline.total / 3.0
+
+    viewport.set_marker(sim.store, timeline, seconds)
+    uploaded = np.asarray(viewport._marker.pos, dtype=np.float64)
+    assert uploaded.shape == (1, 3), "the marker is one point, not a polyline"
+    assert np.allclose(uploaded[0], marker_point(sim.store, timeline, seconds), atol=1e-3)
+
+
+def test_an_empty_program_hides_the_marker_rather_than_uploading_nothing(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.set_marker(sim.store, build_timeline(sim.store), 0.0)
+
+    empty = SegmentStore.empty()
+    viewport.set_marker(empty, build_timeline(empty), 0.0)
+    assert viewport._marker.visible() is False
+
+
+def test_loading_a_new_program_hides_the_marker(viewport, profile) -> None:
+    """A playback position indexes the *previous* program's timeline, so it cannot survive a load."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_marker(sim.store, build_timeline(sim.store), 1.0)
+    assert viewport._marker.visible() is True
+
+    viewport.set_simulation(simulation("G21 G94 G90\nG1 X10 Y10 F600\n", profile))
+    assert viewport._marker.visible() is False
+
+
+def test_the_marker_is_drawn_in_the_coordinates_on_screen(viewport, profile) -> None:
+    """A marker in machine coordinates over a part-coordinate toolpath floats beside the path."""
+    from foursight.machine.kinematics import apply_display_transform
+
+    sim = simulation("G21 G90 G94\nG0 Y25 Z0\nG1 X40 A180 F600\n", profile)
+    store = sim.store
+    apply_display_transform(store, profile.kinematics)
+    timeline = build_timeline(store)
+    seconds = timeline.total / 2.0
+
+    viewport.set_simulation(sim, use_part_coordinates=True)
+    viewport.set_marker(store, timeline, seconds)
+    uploaded = np.asarray(viewport._marker.pos, dtype=np.float64)[0]
+
+    expected_part = marker_point(store, timeline, seconds, part_coordinates=True)
+    expected_machine = marker_point(store, timeline, seconds)
+    assert not np.allclose(expected_part, expected_machine), (
+        "this program does not distinguish the two frames, so the test proves nothing"
+    )
+    assert np.allclose(uploaded, expected_part, atol=1e-3)
+
+
+def test_marking_part_coordinates_without_a_transform_is_refused(viewport, profile) -> None:
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.part_coordinates = True  # as if a toggle had been applied without transforming
+    with pytest.raises(ValueError, match="no display transform"):
+        viewport.set_marker(sim.store, build_timeline(sim.store), 0.0)
+
+
+def test_the_marker_is_not_hidden_behind_the_toolpath(viewport, profile) -> None:
+    """`additive` is the GL mode that turns the depth test *off* — `translucent` leaves it on. The
+    tool is often down inside the work, and a marker that disappears into the stock reads as the
+    program having finished rather than as a marker being occluded."""
+    from OpenGL import GL
+
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.set_marker(sim.store, build_timeline(sim.store), 0.0)
+
+    options = viewport._marker.__dict__["_GLGraphicsItem__glOpts"]
+    assert options[GL.GL_DEPTH_TEST] is False
+    assert viewport._marker.depthValue() > 1, "the marker must sort above the selection highlight"
+
+
+def test_the_marker_colour_differs_from_every_batch_colour_and_the_highlight(
+    viewport, profile
+) -> None:
+    """It is view state, not a motion type — it must not read as a rapid, a feed or a selection."""
+    from foursight.gui.viewport3d import HIGHLIGHT_COLOR
+
+    sim = simulation(fixture_text("cutter_comp_span.nc"), profile)
+    viewport.set_simulation(sim)
+    for batch in viewport.batches:
+        assert batch.color != MARKER_COLOR
+    assert HIGHLIGHT_COLOR != MARKER_COLOR

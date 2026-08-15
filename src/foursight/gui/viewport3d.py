@@ -23,6 +23,8 @@ from PySide6.QtCore import Qt, Signal
 
 from foursight.gui.batching import Batch, bounds, build_batches
 from foursight.gui.picking import ScreenProjection, pick, project_store
+from foursight.gui.playback import marker_point
+from foursight.gui.timeline import Timeline
 from foursight.sim.segments import SegmentStore
 from foursight.sim.simulator import Simulation
 
@@ -31,6 +33,12 @@ LINE_WIDTH = 1.0
 # The selection highlight. Bright and cool, so it cannot be mistaken for a rapid (red), a feed (green)
 # or an unverified span (amber) — the highlight is a *view* state, not a property of the toolpath.
 HIGHLIGHT_COLOR = (0.35, 0.95, 1.0, 1.0)
+# The playback tool position. White, so it is the brightest thing on screen and reads as neither a
+# motion type nor the selection — like the highlight, it is view state rather than geometry.
+MARKER_COLOR = (1.0, 1.0, 1.0, 1.0)
+# Marker diameter in *pixels*, via `pxMode`. Not millimetres: a world-sized marker vanishes when the
+# camera pulls back to fit a large part and swamps the toolpath when it zooms in.
+MARKER_SIZE_PX = 12.0
 # Fallback camera distance for an empty or degenerate program, in mm.
 DEFAULT_DISTANCE_MM = 200.0
 # The view is fitted to this multiple of the geometry's extent, so the path is not flush to the edges.
@@ -55,6 +63,7 @@ class ToolpathViewport(GLViewWidget):
         self._items: list[gl.GLLinePlotItem] = []
         self._grid: gl.GLGridItem | None = None
         self._highlight: gl.GLLinePlotItem | None = None
+        self._marker: gl.GLScatterPlotItem | None = None
         self.batches: list[Batch] = []
         self.highlighted_segments = 0
         self._store: SegmentStore | None = None
@@ -97,6 +106,8 @@ class ToolpathViewport(GLViewWidget):
         # changes — and a mask of the wrong length would either raise or, worse, silently highlight
         # arbitrary segments of the new program.
         self.clear_highlight()
+        # Same argument for the playback marker: it is a position in the *previous* program's timeline.
+        self.clear_marker()
         self._store = store
         self._projection = None
         self._rebuild_items()
@@ -176,6 +187,55 @@ class ToolpathViewport(GLViewWidget):
 
     def clear_highlight(self) -> None:
         self.set_highlight(SegmentStore.empty(), None)
+
+    # ------------------------------------------------------------------ playback marker (T10.3)
+
+    def set_marker(self, store: SegmentStore, timeline: Timeline, seconds: float) -> None:
+        """Draw the tool position at ``seconds``, or hide the marker when there is nothing to mark.
+
+        One long-lived item updated with `setData`, for the highlight's reasons: its existence never
+        depends on the data, so no stale item can survive a change, and it moves once a *frame* during
+        playback rather than once a load.
+
+        Two departures from the highlight, both deliberate.
+
+        It is a **point sprite** rather than a small cross of lines. `pxMode` sizes it in pixels
+        through pyqtgraph's own vertex shader, which works on the core profile where `glLineWidth` is
+        silently inert — the same constraint that makes colour carry all the meaning in `batching`.
+
+        It keeps ``GLScatterPlotItem``'s default **additive** GL options, and that is the load-bearing
+        detail: `additive` is the mode that turns the depth test *off*. `translucent` leaves it on
+        (the highlight gets away with it only because it is drawn at the same depth as the geometry it
+        duplicates). The marker sits on a path that may be deep inside the work, and a tool position
+        that disappears behind the stock reads as the program having finished.
+        """
+        point = marker_point(store, timeline, seconds, part_coordinates=self.part_coordinates)
+        if point is None:
+            if self._marker is not None:
+                self._marker.setVisible(False)
+            return
+
+        vertices = point.reshape(1, 3).astype(np.float32, copy=False)
+        if self._marker is None:
+            self._marker = gl.GLScatterPlotItem(
+                pos=vertices, color=MARKER_COLOR, size=MARKER_SIZE_PX, pxMode=True
+            )
+            self._marker.setDepthValue(2)  # drawn after the highlight's 1, so it stays on top
+            self.addItem(self._marker)
+        else:
+            self._marker.setData(pos=vertices)
+        self._marker.setVisible(True)
+
+    def clear_marker(self) -> None:
+        """Hide the marker, and **never create one**.
+
+        A viewport that has never played must hold exactly the grid plus its batches: the item-count
+        assertions that guard against stale geometry (`test_one_gl_item_is_created_per_batch` and the
+        vertex-sum beside it) count everything in the scene, so a marker constructed eagerly here
+        would turn those regression tests into a maintenance burden rather than a net.
+        """
+        if self._marker is not None:
+            self._marker.setVisible(False)
 
     @staticmethod
     def _highlight_vertices(

@@ -28,6 +28,7 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from conftest import DEFAULT_PROFILE_PATH, FIXTURES  # noqa: E402
+from foursight.gui.playback import marker_point  # noqa: E402
 from foursight.machine.profile import load_profile  # noqa: E402
 
 
@@ -923,3 +924,115 @@ def _settle(window, timeout_ms: int = 30_000) -> None:
     deadline = QDeadlineTimer(timeout_ms)
     while window._loader is not None and not deadline.hasExpired():
         QApplication.processEvents(QEventLoop.AllEvents, 20)
+
+
+# --------------------------------------------------------------------------- playback (T10.5)
+
+
+def test_playing_walks_the_editor_down_the_program(window) -> None:
+    """The point of putting a player in an editor: the code scrolls past as the tool advances."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(1)
+    window.timeline.toggle_playback()
+
+    lines = []
+    for _ in range(20):
+        window.timeline._tick(window.timeline.timeline.total / 20.0)
+        lines.append(window.editor.current_line)
+
+    assert lines == sorted(lines), "the editor jumped backwards during playback"
+    assert lines[-1] > lines[0], "the editor never followed the tool"
+    assert window.viewport._marker is not None
+    assert window.viewport._marker.visible() is True
+
+
+def test_playing_moves_the_marker_along_the_path(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.timeline.toggle_playback()
+
+    window.timeline._tick(1.0)
+    first = np.asarray(window.viewport._marker.pos, dtype=np.float64).copy()
+    window.timeline._tick(window.timeline.timeline.total / 4.0)
+    second = np.asarray(window.viewport._marker.pos, dtype=np.float64)
+
+    assert not np.allclose(first, second), "the marker did not move between frames"
+
+
+def test_a_frame_that_stays_on_one_line_does_not_recentre_the_editor(window) -> None:
+    """`goto_line` calls `centerCursor()`. Playback emits ~30 times a second, so doing it every frame
+    makes the editor twitch under a tool that is still working along one long move."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.timeline.toggle_playback()
+    window.timeline._tick(0.01)
+
+    line = window.editor.current_line
+    moves = []
+    window.editor.cursorPositionChanged.connect(lambda: moves.append(window.editor.current_line))
+    window.timeline._tick(0.0)
+    window.timeline._tick(0.0)
+
+    assert window.editor.current_line == line
+    assert moves == [], "the cursor was moved again for a line it was already on"
+
+
+def test_applying_a_fix_stops_playback_and_rewinds(window, tmp_path, auto_accept) -> None:
+    """Every fix reloads the program, and a player left running would animate a position in a
+    timeline that no longer describes what is on screen."""
+    path = write_program(tmp_path, "G21 G90 G94\nG1 X10 Y10 F600\nG1 X20\n")
+    window.open_file_and_wait(path)
+    window.timeline.toggle_playback()
+    window.timeline._tick(1.0)
+    assert window.timeline.seconds > 0.0
+
+    assert window.run_fix("fix.append-program-end") is True
+    wait_for_load(window)
+
+    assert window.timeline._timer.isActive() is False
+    assert window.timeline.playback.playing is False
+    assert window.timeline.seconds == 0.0
+    assert window.viewport._marker.visible() is False
+
+
+def test_switching_to_part_coordinates_keeps_a_paused_marker(window, tmp_path) -> None:
+    """A playing marker would heal on the next frame; a paused one would simply vanish.
+
+    Uses a wrapping move rather than a fixture: the two frames coincide wherever A is zero, so a test
+    on an unrotated position would pass without checking anything.
+    """
+    path = write_program(tmp_path, "G21 G90 G94\nG0 Y25 Z0\nG1 X40 A180 F600\nM30\n")
+    window.open_file_and_wait(path)
+    window.timeline.toggle_playback()
+    window.timeline._tick(window.timeline.timeline.total / 2.0)
+    window.timeline.toggle_playback()  # pause, leaving the marker where it is
+    machine = np.asarray(window.viewport._marker.pos, dtype=np.float64).copy()
+
+    window.part_coordinates_action.setChecked(True)
+    assert window.part_coordinates_action.isChecked(), "the transform was refused for this profile"
+    assert window.viewport._marker.visible() is True
+    part = np.asarray(window.viewport._marker.pos, dtype=np.float64)
+
+    store = window.program.simulation.store
+    expected = marker_point(
+        store, window.timeline.timeline, window.timeline.seconds, part_coordinates=True
+    )
+    assert np.allclose(part[0], expected, atol=1e-3)
+    assert not np.allclose(machine, part), "this program does not distinguish the two frames"
+
+
+def test_the_play_menu_action_drives_the_transport(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    action = next(a for a in window.menuBar().actions() if a.text() == "&View")
+    play = next(a for a in action.menu().actions() if a.text() == "&Play / pause")
+
+    play.trigger()
+    assert window.timeline.playback.playing is True
+    play.trigger()
+    assert window.timeline.playback.playing is False
+
+
+def test_scrubbing_still_moves_the_editor(window) -> None:
+    """The T3.5 behaviour the transport is built on top of, guarded against the goto_line throttle."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(1)
+    window.timeline.slider.setValue(900)
+    assert window.editor.current_line > 1

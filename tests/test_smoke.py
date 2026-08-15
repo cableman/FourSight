@@ -46,6 +46,7 @@ GUI_MODULES = (
     "foursight.gui.picking",
     "foursight.gui.editor",
     "foursight.gui.timeline",
+    "foursight.gui.playback",
     "foursight.gui.diagnostics_panel",
 )
 

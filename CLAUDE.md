@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M9 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1533 tests**.
+**M0–M10 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1593 tests**.
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -12,7 +12,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1490) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1550) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -76,7 +76,7 @@ Dependency direction is `parser → machine → sim → verify → fix → gui`.
 - **`sim/`** — interpolates lines and arcs (G2/G3 in both IJK and R form) plus rotary blending into a `SegmentStore`; `timing.py` derives per-segment durations for the timeline.
 - **`verify/`** — `Rule` base class with a registry; one module per check category under `checks/`; emits `Diagnostic(severity, line, message, fix_ids)`.
 - **`fix/`** — each fix is a transform returning a text diff. Fixes never write the original file; they modify the editor buffer and the user saves explicitly.
-- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking.
+- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking, and `playback.py`, which owns the animation clock and the tool-marker interpolation so the transport widget stays checkable by eye. Both import no Qt.
 - **`fileio/`** — deliberately not named `io/`, which shadows the stdlib module.
 
 ### Invariants
@@ -134,6 +134,18 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   a vertical rule would both report that and exempt a `+Z` move from below the centreline, which drives
   through the middle of the stock. Monotonically outward, not merely ending further out — radial distance
   along a line is convex.
+- **`additive` is the pyqtgraph GL mode that disables the depth test, not `translucent`.** pyqtgraph's own
+  docs are explicit: *translucent — enables depth testing*; *additive — disables depth testing*. The
+  playback marker must show through geometry, because the tool is routinely inside the work and a marker
+  occluded by the stock reads as the program having finished — so it keeps `GLScatterPlotItem`'s default
+  `additive`. Copying the highlight's `setGLOptions("translucent")` because its docstring says "the
+  disabled test" would silently bury the marker at exactly the moments it matters. The highlight itself
+  gets away with it only because it is drawn at the same depth as the geometry it duplicates.
+- **The playback position is a float that the slider *displays*, never the other way round.** `TimelineBar`
+  works in integer thousandths of the total — right for dropping a handle, useless for animating: one tick
+  of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under
+  `blockSignals`. And `advance` takes the wall step as an **argument** rather than reading a clock, which is
+  what lets every playback test run frame by frame without sleeping.
 - **All geometry is numpy float64; internal units are always mm.** Convert G20 (inch) input at parse time. But report diagnostics in the program's declared units — "X exceeds 400 mm" against an inch program isn't actionable.
 - **G-codes are strings (`'90.1'`), never floats.** A block carries multiple G- and M-words, so they live in `Command.gcodes` / `Command.mcodes` lists, not in the `words` dict.
 - **`slots=True` on every hot-path dataclass** — the 50k lines/sec parse target doesn't survive otherwise.

@@ -1877,7 +1877,93 @@ checks.
 
 ---
 
-**Project status: M0–M9 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M10 — Toolpath playback
+
+Asked for directly: *"running the simulation (animating the tool path) with play, pause, reset, drag
+forward and review."* It also settles an open question the docs had been carrying since M3:
+`docs/manual_tests/m3.md` listed "no playback" as deliberately absent with "(M4 decides whether it needs
+one)", and M4 — rotary kinematics — never revisited it. See `PLAN.md` § Playback.
+
+The scrubbing half already existed (T3.5). What was missing was a clock, a marker, and a transport.
+
+- [x] **T10.1 — the playback clock** — `gui/playback.py` — *done*
+      `Playback`: position, speed, playing, and `advance(dt_wall)`. Qt-free, and the wall step is an
+      **argument** rather than something it reads, which is what lets the tests drive playback frame by
+      frame without sleeping and lets the widget measure it with a monotonic `QElapsedTimer`.
+      **The zero-total refusal lives here**, not only in the button's enabled state: a program whose every
+      feed rate is unknown has geometry and no time, and `play()` on one is a no-op.
+      It **pauses itself at the end** rather than firing frames against a pinned position, and `play()`
+      there rewinds — a play button that does nothing visible reads as broken.
+      Files: `src/foursight/gui/playback.py`, `tests/test_playback.py`, `tests/test_smoke.py`
+
+- [x] **T10.2 — `marker_point`, and a readout that can show a moving position** — *done*
+      Interpolates *inside* the segment in progress rather than snapping to its endpoints. Safe because a
+      segment is already a straight chord by the time it reaches the store; interpolating anywhere else —
+      in `lin`, then rotating by the segment's start angle — would cut the corner of a wrapped path,
+      which is the endpoint-only mistake one level down.
+      Reads whichever array is on screen and **raises** rather than falling back, matching
+      `viewport3d._highlight_vertices`; and refuses a timeline whose length disagrees with the store, for
+      the same reason the highlight refuses a wrong-length mask.
+      `describe_position` gained a keyword-only `seconds`, because formatting the *end* of the segment in
+      progress would tick the clock forward in jumps of whatever the current move happens to take.
+      Files: `src/foursight/gui/playback.py`, `src/foursight/gui/timeline.py`, `tests/test_playback.py`
+
+- [x] **T10.3 — the tool marker** — `gui/viewport3d.py` — *done*
+      One long-lived `GLScatterPlotItem` updated with `setData`, following the highlight's precedent.
+      A **point sprite**, because `pxMode` sizes it in pixels through pyqtgraph's own vertex shader —
+      a cross of lines would need a millimetre size that vanishes at one zoom and swamps the part at
+      another, and `glLineWidth` is inert on core profiles regardless.
+      Keeps the default **`additive`** GL options, which is the mode that turns the depth test *off*.
+      `translucent` does not, whatever the highlight's docstring implies — pyqtgraph's own documentation
+      is explicit. The tool is often inside the work, and a marker occluded by the stock reads as the
+      program having finished.
+      **Constructed lazily and never by `clear_marker`**: the item-count assertions that guard against
+      stale geometry count everything in the scene.
+      Files: `src/foursight/gui/viewport3d.py`, `tests/test_viewport.py`
+
+- [x] **T10.4 — the transport** — `gui/timeline_bar.py` — *done*
+      Play/pause, reset, and a 1×/10×/100×/1000× selector, all enabled on exactly the condition that
+      already enables the slider. The `QTimer` lives here rather than in the window because the reset
+      choreography already does — every reload calls `set_simulation`, so no caller can forget to stop
+      playback.
+      **The slider became a view of the clock.** Thousandths are the right resolution for choosing a
+      position and far too coarse to animate.
+      **Playback suspends while the handle is held.** A stationary held handle emits no `valueChanged`,
+      so nothing would seek the clock back and at 1000× the position would run away underneath the
+      user's fingers; the elapsed time is consumed and discarded so releasing delivers no jump.
+      Releasing resumes — a drag mid-run is a seek, not a stop.
+      The speed selection **survives a reload**, since every applied fix reloads the program.
+      Files: `src/foursight/gui/timeline_bar.py`, `tests/test_playback.py`
+
+- [x] **T10.5 — wiring** — `gui/main_window.py` — *done*
+      `advanced` → the marker, `scrubbed` → the editor as before. Two signals because a segment index
+      cannot express where *inside* a move the tool is.
+      **`goto_line` is called only when the line changes.** It calls `centerCursor()`, and playback emits
+      ~30 times a second: recentring every frame makes the editor twitch under a tool still working along
+      one long move. Compared against `editor.current_line` rather than a remembered value, so a click in
+      the editor mid-playback cannot leave it stale.
+      Nothing new was needed for reset-on-reload: `set_simulation` stops the timer and `set_store` clears
+      the marker, which covers open, fix, undo and profile-apply because they all funnel through `_show`.
+      The part-coordinates toggle re-issues the marker, since a *paused* one would otherwise vanish.
+      **Ctrl+Space, not Space** — the editor owns Space.
+      Files: `src/foursight/gui/main_window.py`, `tests/test_main_window.py`
+
+- [x] **T10.6 — docs and the manual script** — *done*
+      `PLAN.md` § Playback; this section; `docs/manual_tests/m10.md`. Also fixed a stale duplication in
+      PLAN.md's repository layout, which listed `picking.py` and `timeline.py` twice — the second
+      `timeline.py` was annotated `# play/pause/scrub` and read like a reservation, but it was a leftover
+      from an earlier draft of the tree.
+
+**Deliberately not built.** A step-by-segment control. It is the honest complement to the limitation that
+zero-duration segments are unaddressable by time, but it needs an index-indexed position rather than a
+time-indexed one, and the editor and click-to-pick already reach those moves. **G4 still costs no playback
+time**: `Step.dwell` is computed and then dropped between `machine/` and `SegmentBuilder`, so it never
+reaches `store.duration`. Recorded rather than fixed, because putting a dwell into the timeline means
+deciding what geometry it belongs to.
+
+---
+
+**Project status: M0–M10 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 
