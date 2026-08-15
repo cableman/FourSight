@@ -89,14 +89,24 @@ def format_scrub_time(seconds: float) -> str:
     return f"{int(minutes)}:{remainder:04.1f}"
 
 
-def describe_position(timeline: Timeline, index: int | None, line_no: int | None) -> str:
-    """The scrubber's readout: where in time, where in the file, and whether the total is trustworthy."""
+def describe_position(
+    timeline: Timeline, index: int | None, line_no: int | None, *, seconds: float | None = None
+) -> str:
+    """The scrubber's readout: where in time, where in the file, and whether the total is trustworthy.
+
+    ``seconds`` is the *playing* position, and it is not the same number as the end of the segment in
+    progress. Without it the readout can only name segment boundaries, so a playing clock would tick
+    forward in uneven jumps of whatever the current move happens to take — a five-second rapid would
+    show five seconds passing at once. A scrubber that passes nothing still gets the old behaviour,
+    which is right for it: dropping the handle somewhere inside a move and reading back its end is how
+    a scrub position names itself.
+    """
     if timeline.segments == 0:
         return "No geometry"
     if index is None:
         return f"0:00.0 / {format_scrub_time(timeline.total)}"
 
-    position = format_scrub_time(timeline.time_at(index))
+    position = format_scrub_time(timeline.time_at(index) if seconds is None else seconds)
     total = format_scrub_time(timeline.total)
     text = f"{position} / {total}"
     if line_no is not None:

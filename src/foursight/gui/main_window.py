@@ -148,6 +148,10 @@ class MainWindow(QMainWindow):
         self.viewport.segment_picked.connect(self._on_segment_picked)
         self.diagnostics.line_activated.connect(self._on_diagnostic_activated)
         self.timeline.scrubbed.connect(self._on_scrubbed)
+        # Two signals from the same bar: `scrubbed` names a segment and drives the editor, `advanced`
+        # carries the sub-segment position and drives the tool marker. A segment index cannot express
+        # where inside a move the tool is, which is the whole difference between scrubbing and playing.
+        self.timeline.advanced.connect(self._on_advanced)
 
         self._build_menus()
         self.statusBar().showMessage("Open a G-code file to begin  (Ctrl+O)")
@@ -185,6 +189,15 @@ class MainWindow(QMainWindow):
 
         view_menu = self.menuBar().addMenu("&View")
         self._add(view_menu, "&Fit to program", QKeySequence("Ctrl+0"), self.fit_view)
+        # Ctrl+Space, not Space. The editor is a text pane that has the focus most of the time, and a
+        # bare Space would have to stop inserting spaces for a play button to claim it. A focused
+        # transport button still responds to Space on its own, which is where the habit is harmless.
+        self._add(
+            view_menu,
+            "&Play / pause",
+            QKeySequence("Ctrl+Space"),
+            self.timeline.toggle_playback,
+        )
         view_menu.addSeparator()
         self.part_coordinates_action = QAction("&Part coordinates", self)
         self.part_coordinates_action.setCheckable(True)
@@ -625,6 +638,10 @@ class MainWindow(QMainWindow):
         # be redrawn in the new frame.
         if self.selection is not None:
             self.viewport.set_highlight(store, self.selection.mask)
+        # And the marker, for the same reason. A *playing* marker would heal itself on the next frame;
+        # a paused one would simply vanish, which reads as the toggle having cleared the position.
+        if self.timeline.timeline is not None:
+            self.viewport.set_marker(store, self.timeline.timeline, self.timeline.seconds)
         mode = "part" if enabled else "machine"
         self.statusBar().showMessage(f"Showing {mode} coordinates")
 
@@ -643,9 +660,20 @@ class MainWindow(QMainWindow):
         if not 0 <= index < len(store):
             return
         line_no = int(store.line[index])
-        self.editor.goto_line(line_no)
+        # Only when the line actually changes. `goto_line` calls `centerCursor()`, and playback emits
+        # this ~30 times a second: recentring every frame makes the editor twitch under a tool that is
+        # still working its way along one long move. Compared against the editor's own cursor rather
+        # than a remembered value, so a click in the editor mid-playback cannot leave it stale.
+        if line_no != self.editor.current_line:
+            self.editor.goto_line(line_no)
         # Fed back so the readout can name the line. Safe from a loop: `show_line` only sets a label.
         self.timeline.show_line(line_no)
+
+    def _on_advanced(self, seconds: float) -> None:
+        """Move the tool marker to the playback position (T10.5)."""
+        if self.program is None or self.timeline.timeline is None:
+            return
+        self.viewport.set_marker(self.program.simulation.store, self.timeline.timeline, seconds)
 
     # ------------------------------------------------------------------ viewport -> editor (T3.3)
 

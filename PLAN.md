@@ -94,14 +94,13 @@ FourSight/
 │   │   ├── selection.py    # line -> segments, and why there are none (NO Qt)
 │   │   ├── picking.py      # click -> segment, matrix-keyed projection cache (NO Qt)
 │   │   ├── timeline.py     # time <-> segment from SegmentStore.duration (NO Qt)
-│   │   ├── timeline_bar.py # the scrubber widget
+│   │   ├── playback.py     # wall clock -> program time, and -> a point on the path (NO Qt)
+│   │   ├── timeline_bar.py # the scrubber and transport widget
 │   │   ├── session.py      # path -> commands -> geometry + what to disclose (NO Qt)
 │   │   ├── background.py   # QThread that loads off the GUI thread; cancellable
 │   │   ├── batching.py     # SegmentStore -> GL vertex batches (NO Qt; see Batching layer)
 │   │   ├── viewport3d.py    # GL view and camera; thin, because batching.py holds the logic
-│   │   ├── picking.py       # segment ↔ screen hit-testing (see Picking)
 │   │   ├── editor.py        # code pane, line highlighting
-│   │   ├── timeline.py      # play/pause/scrub
 │   │   ├── profile_dialog.py# the machine-profile form, generated from profile_schema
 │   │   └── diagnostics_panel.py
 │   ├── fileio/              # NOT `io/` — that shadows the stdlib module
@@ -1262,6 +1261,59 @@ that plainly cannot move.
 A known and inherent limitation: **zero-duration segments are not addressable by time.** A dwell or a
 stationary block occupies one instant, so several segments share a cumulative time and no scrub position
 distinguishes them. The editor and click-to-pick reach those, which is part of why all three exist.
+
+#### Playback (T10.1–T10.5)
+
+M3 deferred the play button explicitly — `docs/manual_tests/m3.md` said "M4 decides whether it needs one"
+and M4 never did. It does: scrubbing answers "what happens at this moment", and only playback answers
+"does this program *look* right as it runs", which is the question a preview exists for.
+
+**The clock is a float; the slider is a view of it.** Thousandths are ample for dropping a handle and far
+too coarse to animate — one tick of an hour-long program is 3.6 seconds, so a marker driven from
+`slider.value()` would jump between stills. `playback.Playback.seconds` is authoritative and the slider
+follows it, written under `blockSignals` so a programmatic move never looks like a drag.
+
+**Wall time is not program time.** Playback advances `speed` program-seconds per wall-second, selected
+from 1×/10×/100×/1000×, and the readout keeps saying program time. `advance` takes the elapsed wall time
+as an *argument* rather than reading a clock, which is what lets the tests drive it frame by frame
+without sleeping; the widget measures it with `QElapsedTimer` so timer jitter never accumulates as drift.
+The speed selection survives a reload on purpose — every applied fix reloads the program, and a
+multiplier that snapped back to 1× each time would make an inspection at 100× unusable.
+
+**What is animated is a marker, not the path.** The toolpath stays drawn in full. A travelled-versus-
+remaining distinction would need either a per-vertex colour buffer (16 MB at 500k, rejected under
+Performance Requirements) or a full-size overlay re-uploaded per frame, and neither buys anything the
+marker plus the line highlight does not. The current line highlights through the **editor cursor**, the
+same path the scrubber already uses, so playback added no highlight machinery either.
+
+Three details that look arbitrary and are not:
+
+- The marker is a **point sprite** (`GLScatterPlotItem`, `pxMode`), sized in pixels by pyqtgraph's own
+  vertex shader. A cross of lines would have to be sized in millimetres — invisible when the camera fits
+  a large part, swamping the path when it zooms in — and `glLineWidth` is inert on core profiles anyway.
+- It keeps `GLScatterPlotItem`'s default **`additive`** GL options, because that is the mode that turns
+  the depth test *off*. `translucent` does not (pyqtgraph's own documentation: "translucent — Enables
+  depth testing"; "additive — Disables depth testing"). The tool is often down inside the work, and a
+  marker occluded by the stock reads as the program having finished.
+- Playback **suspends while the slider handle is held**. A stationary held handle emits no `valueChanged`,
+  so nothing would seek the clock back; at 1000× the position would run away underneath the user's
+  fingers while the handle was yanked after it. The elapsed time is consumed and discarded each frame, so
+  releasing does not deliver the whole drag in one jump. Releasing resumes: a drag mid-run is a seek, not
+  a stop.
+
+The honesty constraints carry over unchanged. Playback is **disabled on exactly the condition that
+disables the slider** — a zero total, not merely absent geometry — and the refusal lives in `Playback.play`
+rather than only in the button's enabled state. The "total is short" caveat stays in the moving readout.
+Playback **pauses itself at the end** rather than firing frames against a pinned position, and pressing
+play there rewinds, because a play button that does nothing visible reads as broken.
+
+The keyboard shortcut is **Ctrl+Space, not Space**: the editor is a text pane that holds the focus most of
+the time, and Space must keep inserting spaces. A focused transport button still answers Space on its own.
+
+Zero-duration segments remain unaddressable, and playback inherits that — it skips dwells instantly, and
+G4 contributes nothing because `Step.dwell` never reaches `store.duration`. A step-by-segment control
+would need an index-indexed position rather than a time-indexed one; the editor and click-to-pick remain
+the way to reach those moves.
 
 ### Editor ↔ Viewport Sync
 
