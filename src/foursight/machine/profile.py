@@ -69,6 +69,7 @@ _SECTIONS = frozenset(
         "kinematics",
         "safety",
         "stock",
+        "tool",
         "dialect",
     }
 )
@@ -77,6 +78,7 @@ _KEYS: dict[str, frozenset[str]] = {
     "dialect": frozenset({"name", "arc_centre", "dwell_units"}),
     "limits": frozenset({"max_feed", "max_spindle_rpm", "max_plunge_feed", "rotary_wrap_warn"}),
     "stock": frozenset({"shape", "min", "max", "diameter", "length", "axis_min"}),
+    "tool": frozenset({"diameter", "shape"}),
     "tolerance": frozenset({"arc_radius_mismatch", "arc_chord", "rotary_chord"}),
     "kinematics": frozenset({"rotary_mount", "rotary_axis", "centerline_offset", "pivot_to_tip"}),
     "safety": frozenset(
@@ -206,6 +208,39 @@ class StockCylinder:
 StockEnvelope = StockBox | StockCylinder
 
 
+#: The cutter shapes the solid view can carve with. A shape it cannot model is refused rather than
+#: approximated by a flat end: a bull-nose carved as flat leaves square corners the part will not have,
+#: and the picture gives no hint that the shape was substituted.
+TOOL_SHAPES = ("flat", "ball")
+
+
+@dataclass(slots=True, frozen=True)
+class Tool:
+    """The single cutter the solid view carves with. **Not a tool table.**
+
+    There is no tool table anywhere in v1 — `ModalState.tool` is a T *number* and nothing resolves it to
+    geometry — so this is one cutter for the whole program, and a program that changes tools is carved
+    wrongly wherever the other tool cut. That is reported by the view rather than hidden, which is the
+    only honest way to offer the feature at all before a tool library exists.
+
+    It describes the cutter's *bottom* and nothing else, because a heightfield only ever asks how deep
+    the tool reaches at a given distance from its axis — `sim.solid.bottom_offset` is that function.
+    Shank and holder are not modelled and would not change a heightfield if they were.
+
+    Deliberately **not** used by any verifier. Every existing rule reads the programmed centreline, and
+    giving the cutter a width would change what several of them mean — `geometry.axis-travel-exceeded`
+    against a tool edge rather than the spindle centre is a different check, not a better one. This is a
+    display input, and keeping it out of `verify/` is what stops it becoming one by accident.
+    """
+
+    diameter: float
+    shape: str = "flat"
+
+    @property
+    def radius(self) -> float:
+        return self.diameter / 2.0
+
+
 @dataclass(slots=True, frozen=True)
 class DialectSettings:
     """Which controller this profile describes, plus the settings a program cannot state.
@@ -251,6 +286,10 @@ class MachineProfile:
     # None means "no stock declared", which disables the interference check rather than assuming a
     # box. A guessed envelope would report confidently on a solid that is not on the table.
     stock: StockEnvelope | None = None
+    # None means "no cutter declared", which disables the solid view rather than carving with a
+    # plausible-looking default. A guessed 6 mm end mill would produce a shaded, authoritative-looking
+    # part that is the wrong shape everywhere, which is the one output this project refuses to make.
+    tool: Tool | None = None
     dialect: DialectSettings = field(default_factory=DialectSettings)
     # Reported rather than raised, so a newer profile still loads — but the CLI must surface these:
     # `max_fed = 3000` is a typo that would otherwise silently disable the feed check.
@@ -327,6 +366,7 @@ def _build(data: dict, *, path: Path | None) -> MachineProfile:
         kinematics=kinematics,
         safety=_safety(_section(data, "safety", unknown), scale),
         stock=_stock(_section(data, "stock", unknown), scale, present="stock" in data),
+        tool=_tool(_section(data, "tool", unknown), scale, present="tool" in data),
         dialect=_dialect(_section(data, "dialect", unknown)),
         unknown_keys=tuple(unknown),
         path=path,
@@ -449,6 +489,33 @@ def _stock_cylinder(section: dict, scale: float) -> StockCylinder:
     return StockCylinder(
         diameter=values["diameter"], length=values["length"], axis_min=values["axis_min"]
     )
+
+
+def _tool(section: dict, scale: float, *, present: bool) -> Tool | None:
+    """Build `[tool]`, refusing a section that cannot describe a cutter.
+
+    ``present`` distinguishes an absent section from an empty one for the same reason `[stock]` does:
+    no `[tool]` at all means "no cutter declared" and disables the solid view, while an empty `[tool]`
+    header was written deliberately and would silently do nothing.
+
+    A zero or negative diameter is refused rather than clamped. It describes no cutter, and carving with
+    it would leave the stock untouched — a solid that looks like an uncut blank, which reads as "the
+    program removes no material" rather than as "the profile is wrong".
+    """
+    if not present:
+        return None
+    if "diameter" not in section:
+        raise ProfileError(
+            "[tool] needs diameter. There is no tool table to fall back on, and a guessed cutter "
+            "would carve a confident picture of the wrong part"
+        )
+    diameter = _number(section["diameter"]) * scale
+    if diameter <= 0.0:
+        raise ProfileError(f"[tool].diameter must be greater than zero, got {diameter:g}")
+    shape = str(section.get("shape", "flat")).lower()
+    if shape not in TOOL_SHAPES:
+        raise ProfileError(f"[tool].shape must be one of {', '.join(TOOL_SHAPES)}, got {shape!r}")
+    return Tool(diameter=diameter, shape=shape)
 
 
 def _tolerances(section: dict, scale: float) -> Tolerances:

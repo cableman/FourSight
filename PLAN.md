@@ -20,10 +20,16 @@ The dialect is **selectable** — `[dialect].name` in the machine profile, or `-
 
 ## Non-Goals (v1)
 
-- Material removal simulation (voxel/dexel cutting) — deferred, see Future. A **fixed stock
-  envelope** is in scope as of M7, and the two are not the same thing: knowing *where the stock sits*
-  is a six-number bounding box, while knowing *what is left of it* needs the whole removal model. The
-  cheap half catches the crash that actually happens — a rapid traversing the part at cutting depth.
+- Material removal simulation (voxel/dexel cutting) **for verification** — deferred, see Future. A
+  **fixed stock envelope** is in scope as of M7, and the two are not the same thing: knowing *where the
+  stock sits* is a six-number bounding box, while knowing *what is left of it* needs the whole removal
+  model. The cheap half catches the crash that actually happens — a rapid traversing the part at
+  cutting depth.
+  **Amended in M12:** a *display-only* heightfield carve now exists, so the viewport can show the end
+  result — see § Solid view. It changes nothing above. No verifier reads `[tool]` or the carved field,
+  `geometry.rapid-into-stock` remains a warning for exactly the reasons it always was, and the carve
+  cannot represent an undercut, more than one cutter, or a span we did not interpret. It is a picture
+  with its own limits stated on it, not a model anything is checked against.
 - 5-axis kinematics
 - Post-processor generation or CAM features
 - Controller-specific macro languages (Fanuc Macro B, LinuxCNC O-words) beyond basic tolerance/skip
@@ -1367,6 +1373,90 @@ on `set_store` reaching it through `clear_highlight`: a refresh that only happen
 another call is one refactor away from silently not happening, and the symptom is a key describing the
 previous program.
 
+#### Solid view (T12.1–T12.8)
+
+Asked for directly: *"add option to view object as solid … to easier be able to see end result."* A
+wireframe says where the tool went; judging whether that produces the part you meant means imagining
+what is left. M12 carves it instead.
+
+**This contradicts § Non-Goals as written, and the entry has been amended rather than ignored.** What
+landed is a *display* heightfield, narrowed until it fits the rule that governs everything else here.
+Dexel removal **for verification** — the thing that would let `geometry.rapid-into-stock` become an
+error, and would catch a cutting move crossing material no earlier pass removed — is still out, and
+nothing in `verify/` reads `[tool]`. Every rule judges the programmed centreline; giving the cutter a
+width would silently change what several of them mean, and a travel limit measured against a tool edge
+rather than the spindle centre is a different check, not a better one.
+
+**A shaded solid looks far more authoritative than a line, so the narrowing has to be visible.** The
+model cannot represent an undercut — a heightfield stores one number per cell, so a T-slot cutter or a
+boring bar reaching under a lip renders as though the material above it were gone. It carves with **one
+cutter**, because there is no tool table in v1. It does not carve **untrusted** spans, since a
+cutter-compensated span is the programmed centreline and not where the tool goes — so the solid shows
+*more* material than reality, which is the recoverable direction. Each of those becomes a note on the
+legend's solid row, sourced from `SolidField.notes`, not a footnote somewhere else.
+
+**Two passes, not a swept volume.** Touching every cell within the tool radius of every segment is
+`O(segments × kernel)` — 450M cell updates at 500k segments — and it is the wrong algorithm, not a slow
+one. For a flat end mill `height(x,y) = min over path points within r of p_z`, which is a **grayscale
+erosion of the tool-axis height map by a disc of radius r**. So `sim/solid.py` rasterises axis positions
+(cost proportional to *path length*) and erodes once (cost proportional to *grid size*, independent of
+program size). A ball nose is the same erosion against a non-flat structuring element. Measured: 61 ms
+for a 200-pass raster, 0.95 s at 40k cutting segments, on the M0 baseline machine.
+
+**Resolution is derived, because the kernel grows with the square of the radius in cells.** Cell size is
+the coarser of "part over `TARGET_CELLS`" and "tool radius over `MAX_RADIUS_CELLS`", bounding the disc at
+about 450 offsets whatever is configured. A 90 mm face mill on a 100 mm part coarsens the grid instead of
+hanging the application.
+
+**Two frames, for the reason `[stock]` has two shapes.** A box is a top-down Z map in machine
+coordinates, and is **refused** once a table-mounted program moves A — a fixed box has stopped saying
+where the material is, exactly as `geometry.rapid-into-stock` already refuses it. A cylinder is a radial
+map over (angle, axial) in **part** coordinates, which is stationary under rotation because a concentric
+cylinder maps onto itself. The stock shape therefore *decides* the frame, and switching the solid on
+flips `Part coordinates` to match rather than drawing a surface where the part is not. The seam of the
+angular axis wraps in both the carve and the mesh; leaving it open puts an uncut stripe exactly one tool
+radius wide down the part, which reads as a feature of the program.
+
+**Two independent toggles**, `View → Solid view` (Ctrl+D) and `View → Toolpath` (Ctrl+T). Ctrl+P stays
+`Part coordinates`. Lines over a solid is the useful combination for asking *which move left that mark*,
+and lines alone is what the application has always been, so neither toggle may imply the other.
+
+**The mesh is closed, and this is not decoration.** A bare carved surface seen edge-on is a skin floating
+in space, which reads as a rendering failure rather than as a machined face — so a box grows four walls
+and a floor, a cylinder grows an end cap at each end. Normals are computed by central differences over
+the *positions* and explicitly oriented outward, rather than left to `MeshData.vertexNormals()`: that
+would recompute them from faces in Python at 500k triangles, and a normal pointing inward is lit from
+inside and looks like a hole. GL cost is 6–14 MB, recorded rather than budgeted, and it is optional
+geometry the user asked for.
+
+**Two rendering decisions that only a real GL context could have found.** Both were caught by launching
+the application and looking at it, and both are invisible to every offscreen test in the suite:
+
+- **The lighting is baked into vertex colours, and `shader=None`.** pyqtgraph's `shaded` program lights
+  from `normalize(vec3(1, -1, -1))` in **eye** space and clamps `dot < 0` to zero, so any face turned
+  toward the camera renders at ambient. The machined surface *is* that face — the first working build
+  drew the top of the part as the darkest thing on screen, with the walls bright around it. `solid_mesh`
+  now shades against a **world**-space `LIGHT_DIRECTION` from above, so the cut face is brightest and the
+  lit side stays put while you orbit. It uses a **wrap-around** term (`n·L` mapped from `[-1, 1]` onto
+  `[AMBIENT, 1]`) rather than clamped Lambert, because clamping sends every face turned away to the same
+  value and a pocket's two shaded walls then come out identical, leaving the recess visible only as an
+  outline. Not physical, and not trying to be: this is a drawing of a part.
+- **The floor grid is hidden whenever a solid is on screen.** `GLGridItem` is a plane at **Z = 0**, and a
+  stock top at Z = 0 is the ordinary convention — so the grid lies exactly in the blank's top face. Inside
+  a pocket it is genuinely nearer the camera than the machined floor and is drawn over it; on an uncut
+  face the two are coincident and z-fight. Either way it lands on top of the one surface this view exists
+  to show. A wireframe path floating in space needs a ground reference; a solid **is** one, so nothing is
+  lost. (There is a depth buffer, 24-bit, and it works — this is geometry, not a missing depth test.)
+
+**One depth-testing hazard, and it was a real latent bug.** `set_highlight` used
+`setGLOptions("translucent")`, which *enables* the depth test, and the docstring recorded that this was
+safe only because no toolpath batch ever writes depth. The solid does write depth, so a selection inside
+the material would have been swallowed by the very solid it cuts — and a selection that silently vanishes
+is the opposite of what a selection is for. The highlight now states `OVERLAY_GL_OPTIONS`
+(depth test off, blending off) explicitly, so it no longer depends on what else is in the scene.
+`HIGHLIGHT_COLOR` is opaque, so behaviour without a solid on screen is unchanged. The marker was already
+right: `additive` disables the depth test, which is why a tool position deep in the work stays visible.
+
 ### Editor ↔ Viewport Sync
 
 `SegmentStore.line` is what makes this cheap: every segment records its source line, so line → segments
@@ -1784,10 +1874,15 @@ ignore = ["E501"]  # line length handled by formatter
 
 ## Future (post-v1)
 
-- Stock **removal** simulation (dexel-based, likely C extension or OpenCAMLib). The fixed envelope
-  landed in M7 and grew a cylinder in M9; what remains is tracking what is left of it, which is what
-  would let `geometry.rapid-into-stock` become an error instead of a warning and would catch the case it
-  cannot see today: a *cutting* move crossing material no earlier pass removed.
+- Stock **removal** simulation for *verification* (dexel-based, likely C extension or OpenCAMLib). The
+  fixed envelope landed in M7 and grew a cylinder in M9, and M12 added a display heightfield carve; what
+  remains is a removal model a **rule** can stand behind, which is what would let
+  `geometry.rapid-into-stock` become an error instead of a warning and would catch the case it cannot see
+  today: a *cutting* move crossing material no earlier pass removed. M12's carve is explicitly not that —
+  it cannot represent an undercut, it has one cutter, and it skips spans we did not interpret, so a
+  diagnostic derived from it would be confidently wrong in exactly the cases that matter.
+- Undercuts and multiple tools in the solid view, both of which need the tool library below. A
+  heightfield stores one number per cell; a dexel or voxel model is what lifts that.
 - Further stock shapes. A box and a cylinder cover prismatic and rotary work; a hexagonal bar or a
   pre-formed casting would each need their own solid, and only the cylinder has the rotation invariance
   that makes it exact under a turning table.

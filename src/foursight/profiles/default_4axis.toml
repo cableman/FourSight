@@ -138,6 +138,31 @@ retract_before_toolchange = true
 # ignored — one that looks configured and does nothing is the worst of the three outcomes.
 #
 # The box example below is switchable as it stands; for a cylinder, replace its two corner lines.
+#
+# [tool] is the cutter the SOLID VIEW carves the blank with, and nothing else. No verifier reads it:
+# every rule judges the programmed centreline, and giving the cutter a width would quietly change what
+# several of them mean — a travel limit measured against a tool edge rather than the spindle centre is a
+# different check, not a better one.
+#
+# Left unset for the same reason [stock] is: a shipped profile cannot know what is in the spindle. Unset
+# means the solid view is unavailable and says why, rather than carving with a guessed 6 mm end mill and
+# producing a shaded, authoritative-looking part of entirely the wrong shape.
+#
+# THERE IS NO TOOL TABLE. It is one cutter for the whole program — T words are numbers that nothing
+# resolves to geometry — so a program that changes tools is carved wrongly wherever the other tool cut.
+# The solid view reports that rather than hiding it.
+#
+# Only the cutter's bottom matters to a heightfield. A "flat" tool reaches its tip depth everywhere
+# inside the radius; a "ball" tool reaches radius - sqrt(radius^2 - d^2) above the tip, d from the axis.
+#
+# BOTH SWITCHABLE BLOCKS BELOW ARE DELIBERATELY BARE, and every word explaining them is up here. The GUI
+# profile editor switches a whole section on by uncommenting its header and every `key = value` line
+# under it, and "under it" runs to the next section header — so a prose line shaped like an assignment,
+# sitting between a header and the next one, would be uncommented into a file that is not valid TOML.
+# Keep explanations above this point.
 # [stock]
 # min = [0.0, 0.0, -20.0]
 # max = [100.0, 80.0, 0.0]
+# [tool]
+# diameter = 6.0
+# shape = "flat"

@@ -36,9 +36,11 @@ from foursight.gui.legend import (
 )
 from foursight.gui.picking import ScreenProjection, pick, project_store
 from foursight.gui.playback import marker_point
+from foursight.gui.solid_mesh import build_mesh
 from foursight.gui.timeline import Timeline
 from foursight.sim.segments import SegmentStore
 from foursight.sim.simulator import Simulation
+from foursight.sim.solid import SolidField
 
 # Every batch draws at width 1.0. Not a stylistic choice: see the module docstring.
 LINE_WIDTH = 1.0
@@ -61,6 +63,36 @@ BATCH_GL_OPTIONS = {
     GL.GL_BLEND: False,
     GL.GL_CULL_FACE: False,
 }
+# The selection highlight and, since M12, the tool marker's peer: opaque, and **never depth-tested**.
+#
+# This used to be `setGLOptions("translucent")`, which was safe only for as long as nothing in the scene
+# wrote depth — pyqtgraph's `translucent` *enables* the depth test, and the batches above leave the
+# buffer empty, so the highlight landed on top by default. The solid view broke that assumption: a mesh
+# writes depth, and a selected segment inside the material would then be occluded by the very solid it
+# cuts. The symptom is a selection that silently vanishes, which is exactly what a selection must never
+# do. Stating the state explicitly makes the highlight independent of what else is drawn.
+#
+# `HIGHLIGHT_COLOR` is opaque, so `translucent` was buying nothing else; behaviour without a solid on
+# screen is unchanged.
+OVERLAY_GL_OPTIONS = {
+    GL.GL_DEPTH_TEST: False,
+    GL.GL_BLEND: False,
+    GL.GL_CULL_FACE: False,
+}
+# The carved solid. Depth testing **on**, which is the opposite of everything else here and is the point:
+# a heightfield is a surface with a front and a back, and without a depth test the far wall of a pocket
+# draws over the near one and the shading reads as noise.
+#
+# Face culling stays off. The mesh carries explicit outward normals, so lighting does not depend on
+# winding, and a closed solid seen from inside a deep pocket is more useful than one that disappears.
+SOLID_GL_OPTIONS = {
+    GL.GL_DEPTH_TEST: True,
+    GL.GL_BLEND: False,
+    GL.GL_CULL_FACE: False,
+}
+# Drawn before everything else, so the lines and overlays — none of which test depth — land on top of it
+# rather than being sorted against it.
+SOLID_DEPTH_VALUE = -1
 # Marker diameter in *pixels*, via `pxMode`. Not millimetres: a world-sized marker vanishes when the
 # camera pulls back to fit a large part and swamps the toolpath when it zooms in.
 MARKER_SIZE_PX = 12.0
@@ -129,17 +161,33 @@ class LegendOverlay(QLabel):
         self.setVisible(visible and bool(entries))
 
 
-def _legend_row(entry: LegendEntry) -> str:
-    """One row of the key: a swatch in the entry's own colour, then its name.
+#: Swatch glyph per kind. A legend whose marks do not resemble what they name has to be decoded twice,
+#: so the tool position reads as a dot, geometry as lines, and the solid as a filled block.
+_SWATCH_GLYPHS = {
+    Swatch.POINT: "&#9679;",
+    Swatch.SOLID: "&#9608;&#9608;",
+    Swatch.LINE: "&#9473;&#9473;",
+}
 
-    The swatch glyph follows the swatch *kind*, so the tool position reads as a dot and the geometry
-    as lines — a legend whose marks do not resemble what they name has to be decoded twice.
+
+def _legend_row(entry: LegendEntry) -> str:
+    """One row of the key: a swatch in the entry's own colour, then its name and any caveat.
+
+    A note is dimmed and set below its row rather than beside it. It is a sentence, not a label, and
+    putting it inline would push the swatch column out of alignment for every other row — but it must
+    stay *in* the legend, because a caveat the user has to find elsewhere is one they will not read.
     """
-    glyph = "&#9679;" if entry.swatch is Swatch.POINT else "&#9473;&#9473;"
-    return (
+    glyph = _SWATCH_GLYPHS.get(entry.swatch, _SWATCH_GLYPHS[Swatch.LINE])
+    row = (
         f'<span style="color: {hex_color(entry.color)}">{glyph}</span>&nbsp;&nbsp;'
         f"{html.escape(entry.label)}"
     )
+    if entry.note:
+        row += (
+            f'<br><span style="color: #a0a0a0; font-size: 90%">'
+            f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{html.escape(entry.note)}</span>"
+        )
+    return row
 
 
 class ToolpathViewport(GLViewWidget):
@@ -167,6 +215,12 @@ class ToolpathViewport(GLViewWidget):
         self._grid: gl.GLGridItem | None = None
         self._highlight: gl.GLLinePlotItem | None = None
         self._marker: gl.GLScatterPlotItem | None = None
+        self._solid: gl.GLMeshItem | None = None
+        #: The carved field currently on screen, or None. Held so the legend can read its caveats and
+        #: `set_store` can drop a solid that belonged to the previous program.
+        self.solid_field: SolidField | None = None
+        #: Whether the user wants the lines. Independent of the solid: either, both or neither may be on.
+        self.toolpath_visible = True
         self.batches: list[Batch] = []
         self.highlighted_segments = 0
         self._store: SegmentStore | None = None
@@ -227,6 +281,11 @@ class ToolpathViewport(GLViewWidget):
         self.clear_highlight()
         # Same argument for the playback marker: it is a position in the *previous* program's timeline.
         self.clear_marker()
+        # And for the solid, which is the strongest case of the three: a carved surface from the previous
+        # program looks exactly as authoritative as one from this program, and nothing about the picture
+        # would say which it is. It is also frame-bound — a cylinder carve is part coordinates — so it
+        # cannot survive a switch that changes what is drawn.
+        self.clear_solid()
         self._store = store
         self._projection = None
         self._rebuild_items()
@@ -268,8 +327,99 @@ class ToolpathViewport(GLViewWidget):
                 antialias=False,  # a per-frame cost that buys little on a dense path
                 glOptions=BATCH_GL_OPTIONS,
             )
+            # A rebuild must not un-hide the toolpath. Loading a second program while the lines are
+            # switched off would otherwise bring them back with the menu still saying they are hidden.
+            item.setVisible(self.toolpath_visible)
             self.addItem(item)
             self._items.append(item)
+
+    def set_toolpath_visible(self, visible: bool) -> None:
+        """Show or hide the line batches, leaving everything else alone.
+
+        A visibility flag rather than a rebuild: the batches are unchanged, and dropping the GL items
+        would mean re-uploading several megabytes every time the user toggled. Picking deliberately keeps
+        working against hidden geometry — the selection highlight ignores depth and stays visible over
+        the solid, so clicking a feature on the carved surface still finds the line that cut it, which is
+        most of the reason to have the solid and the editor side by side.
+        """
+        self.toolpath_visible = visible
+        for item in self._items:
+            item.setVisible(visible)
+        # The legend names what is on screen, so hiding the lines has to take their rows with it.
+        self._refresh_legend()
+
+    # ------------------------------------------------------------------ carved solid (T12.5)
+
+    def set_solid(self, field: SolidField) -> None:
+        """Draw ``field`` as a shaded solid, replacing any solid already on screen.
+
+        Rebuilt wholesale rather than updated through `setData`, for `_rebuild_items`' reason: the vertex
+        *count* changes with the grid, and pyqtgraph's mesh item caches derived arrays keyed on the mesh
+        data it was given. A partially updated mesh would draw a surface that is half of one program and
+        half of another, and that is not a shape anything would flag.
+
+        A field whose frame does not match what the viewport is displaying is refused rather than drawn:
+        a cylinder carve lives in part coordinates, and putting it on screen beside a machine-coordinate
+        toolpath would place the part somewhere the path never goes.
+        """
+        if field.part_coordinates != self.part_coordinates:
+            raise ValueError(
+                f"the solid was carved in {'part' if field.part_coordinates else 'machine'} coordinates "
+                f"but the viewport is showing "
+                f"{'part' if self.part_coordinates else 'machine'} coordinates"
+            )
+        mesh = build_mesh(field)
+        if mesh is None:
+            self.clear_solid()
+            return
+
+        self._remove_solid()
+        self._solid = gl.GLMeshItem(
+            vertexes=mesh.vertices,
+            faces=mesh.faces,
+            vertexColors=mesh.colors,
+            # `shader=None` because the lighting is already in the colours. pyqtgraph's `shaded` lights
+            # from eye space and leaves any face turned toward the camera at ambient — which is the
+            # machined surface, the one face this whole view exists to show. See `solid_mesh`.
+            shader=None,
+            # Nothing downstream reads normals now, and computing them here would be `MeshData` doing in
+            # Python what `solid_mesh` already did in numpy.
+            computeNormals=False,
+            smooth=True,
+            glOptions=SOLID_GL_OPTIONS,
+        )
+        self._solid.setDepthValue(SOLID_DEPTH_VALUE)
+        self.addItem(self._solid)
+        self.solid_field = field
+        self._show_grid(False)
+        self._refresh_legend()
+
+    def clear_solid(self) -> None:
+        """Remove the solid, if there is one. Safe to call when there is not."""
+        self._remove_solid()
+        self.solid_field = None
+        self._show_grid(True)
+        self._refresh_legend()
+
+    def _show_grid(self, visible: bool) -> None:
+        """The floor grid is hidden whenever a solid is on screen.
+
+        Not a style preference. The grid is a **plane at Z = 0**, and a stock top at Z = 0 is the ordinary
+        convention — `bamse-rotary.toml` says so in as many words — so the grid lies exactly in the
+        blank's top face and slices through the part everywhere the program cut below it. Inside a pocket
+        the grid is genuinely in front of the machined floor and is drawn over it; on an uncut face the two
+        are coincident and z-fight. Either way it lands on top of the one surface this view exists to show.
+
+        A wireframe path floating in space needs a ground reference. A solid *is* one — it has a visible
+        underside and a silhouette — so nothing is lost by taking the grid away while it is up.
+        """
+        if self._grid is not None:
+            self._grid.setVisible(visible)
+
+    def _remove_solid(self) -> None:
+        if self._solid is not None:
+            self.removeItem(self._solid)
+            self._solid = None
 
     # ------------------------------------------------------------------ selection highlight
 
@@ -281,14 +431,13 @@ class ToolpathViewport(GLViewWidget):
         exactly one highlight item and its existence never depends on the data, so no stale item can
         survive a change. It also follows the text cursor, so it updates far more often than a load does.
 
-        It lands on top because **no toolpath batch ever writes depth** — `BATCH_GL_OPTIONS` disables
-        the depth test, and a disabled test writes nothing — so the depth buffer the highlight tests
-        against is empty and it draws over whatever is already there. Stated here because it is a
-        property of the *batches*, not of this item: turning depth testing on for the toolpath would
-        make a selection z-fight against the very segments it duplicates, and the symptom would be a
-        highlight that flickers or vanishes rather than an error. A selected segment buried behind
-        other geometry must stay visible, or the user reads it as "this line draws nothing" — the
-        opposite of what a selection is for.
+        It lands on top because it does not test depth at all — `OVERLAY_GL_OPTIONS`. Until M12 that was
+        instead a consequence of nothing else writing depth: the batches disable the test, a disabled
+        test writes nothing, so `"translucent"` here tested against an empty buffer and always won. The
+        solid view ended that, because a mesh does write depth, and a selection inside the material would
+        have been swallowed by the solid it cuts. A selected segment buried behind other geometry must
+        stay visible, or the user reads it as "this line draws nothing" — the opposite of what a
+        selection is for — and the failure would appear as nothing at all rather than as an error.
         """
         vertices = self._highlight_vertices(store, mask, self.part_coordinates)
         self.highlighted_segments = 0 if vertices is None else vertices.shape[0] // 2
@@ -301,11 +450,15 @@ class ToolpathViewport(GLViewWidget):
 
         if self._highlight is None:
             self._highlight = gl.GLLinePlotItem(
-                pos=vertices, color=HIGHLIGHT_COLOR, width=LINE_WIDTH, mode="lines", antialias=False
+                pos=vertices,
+                color=HIGHLIGHT_COLOR,
+                width=LINE_WIDTH,
+                mode="lines",
+                antialias=False,
+                # Depth testing off explicitly, rather than borrowing an empty depth buffer — see
+                # `OVERLAY_GL_OPTIONS`. With a solid on screen the buffer is no longer empty.
+                glOptions=OVERLAY_GL_OPTIONS,
             )
-            # `translucent` sorts without writing depth; combined with the disabled test the highlight
-            # always lands on top of the geometry it belongs to.
-            self._highlight.setGLOptions("translucent")
             self._highlight.setDepthValue(1)
             self.addItem(self._highlight)
         else:
@@ -373,7 +526,13 @@ class ToolpathViewport(GLViewWidget):
         """
         marker_shown = self._marker is not None and self._marker.visible()
         entries = legend_entries(
-            self.batches, highlighted=self.highlighted_segments > 0, marker=marker_shown
+            # Hidden lines get no rows. The legend names what is *on screen*, and a key listing colours
+            # the user has just switched off is the same failure as one listing colours a program does
+            # not contain — it teaches the reader that the legend is not to be trusted.
+            self.batches if self.toolpath_visible else (),
+            highlighted=self.highlighted_segments > 0,
+            marker=marker_shown,
+            solid=None if self.solid_field is None else self.solid_field.notes,
         )
         self.legend.set_entries(entries, visible=self.legend_visible)
 

@@ -16,6 +16,7 @@ camera, which covers the batch-to-item wiring and the camera fit. Pixels are the
 """
 
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -759,3 +760,195 @@ def _pickable_positions(viewport) -> list[tuple[float, float]]:
     ]
     assert found, "nothing was pickable anywhere in the viewport"
     return found
+
+
+# ------------------------------------------------------------------------ the carved solid (M12)
+
+
+def carved_box(profile):
+    """A carved field for the shipped profile's documented blank, with a slot cut across it."""
+    from foursight.machine.profile import StockBox, Tool
+    from foursight.sim.solid import carve
+
+    with_stock = replace(
+        profile,
+        stock=StockBox(min=(0.0, 0.0, -20.0), max=(100.0, 80.0, 0.0)),
+        tool=Tool(diameter=6.0),
+    )
+    sim = simulation("G21 G94 G90\nG1 X20 Y40 Z-2 F600\nG1 X80 Y40\n", with_stock)
+    return carve(sim.store, with_stock), sim
+
+
+def test_a_solid_adds_exactly_one_item_to_the_scene(viewport, profile) -> None:
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    before = len(viewport.items)
+    viewport.set_solid(field)
+    assert len(viewport.items) == before + 1
+    assert viewport.solid_field is field
+
+
+def test_carving_twice_leaves_one_solid(viewport, profile) -> None:
+    """The stale-item failure `_rebuild_items` guards against, in its mesh form.
+
+    A second mesh left in the scene would draw the *previous* carve on top of this one, and two carved
+    surfaces of the same part differ only where the program changed — precisely where you are looking.
+    """
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_solid(field)
+    after_first = len(viewport.items)
+    viewport.set_solid(field)
+    assert len(viewport.items) == after_first
+
+
+def test_clearing_the_solid_leaves_the_toolpath_alone(viewport, profile) -> None:
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    batches = len(viewport.batches)
+    viewport.set_solid(field)
+    viewport.clear_solid()
+    assert viewport.solid_field is None
+    assert len(viewport.items) == GRID_ITEMS + batches
+
+
+def test_loading_another_program_drops_the_solid(viewport, profile) -> None:
+    """A surface carved from the previous program looks exactly as authoritative as one from this."""
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_solid(field)
+    viewport.set_simulation(simulation("G21 G94 G90\nG1 X10 Y10 F600\n", profile))
+    assert viewport.solid_field is None
+    assert len(viewport.items) == GRID_ITEMS + len(viewport.batches)
+
+
+def test_a_solid_from_the_other_frame_is_refused(viewport, profile) -> None:
+    """A cylinder carve lives in part coordinates; drawn beside a machine-coordinate path it is a lie."""
+    from dataclasses import replace as replace_field
+
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    with pytest.raises(ValueError, match="coordinates"):
+        viewport.set_solid(replace_field(field, part_coordinates=True))
+
+
+def test_the_solid_draws_first_and_is_the_only_thing_that_tests_depth(viewport, profile) -> None:
+    """The whole overlay scheme rests on this split, and neither half is visible from the data model.
+
+    The solid must test depth or the far wall of a pocket draws over the near one. Nothing else may,
+    or the selection highlight and the tool marker are swallowed by the very solid they sit inside.
+    """
+    from OpenGL import GL
+
+    from foursight.gui.viewport3d import SOLID_DEPTH_VALUE
+
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_highlight(sim.store, np.ones(len(sim.store), dtype=bool))
+    viewport.set_solid(field)
+
+    solid = viewport._solid
+    assert gl_options(solid)[GL.GL_DEPTH_TEST] is True
+    assert solid.depthValue() == SOLID_DEPTH_VALUE
+
+    for item in viewport.items:
+        if item is solid or getattr(item, "pos", None) is None:
+            continue
+        assert gl_options(item).get(GL.GL_DEPTH_TEST) is not True, (
+            "a line item that tests depth will be hidden by the solid"
+        )
+
+
+def test_the_highlight_never_tests_depth(viewport, profile) -> None:
+    """It used to rely on nothing else writing depth. The solid ended that; see OVERLAY_GL_OPTIONS."""
+    from OpenGL import GL
+
+    sim = simulation(fixture_text("baseline_4axis.nc"), profile)
+    viewport.set_simulation(sim)
+    viewport.set_highlight(sim.store, np.ones(len(sim.store), dtype=bool))
+    assert gl_options(viewport._highlight)[GL.GL_DEPTH_TEST] is False
+
+
+# ------------------------------------------------------------------ toolpath visibility (M12)
+
+
+def test_hiding_the_toolpath_keeps_the_items_but_not_their_visibility(viewport, profile) -> None:
+    """Visibility, not a rebuild: toggling must not re-upload several megabytes of geometry."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    count = len(viewport.items)
+
+    viewport.set_toolpath_visible(False)
+    assert len(viewport.items) == count
+    assert all(
+        not item.visible() for item in viewport.items if getattr(item, "pos", None) is not None
+    )
+
+    viewport.set_toolpath_visible(True)
+    assert all(item.visible() for item in viewport.items if getattr(item, "pos", None) is not None)
+
+
+def test_a_reload_does_not_bring_a_hidden_toolpath_back(viewport, profile) -> None:
+    """The menu would still say hidden while the lines were on screen."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    viewport.set_toolpath_visible(False)
+    viewport.set_simulation(simulation(fixture_text("cutter_comp_span.nc"), profile))
+    assert not any(item.visible() for item in viewport._items)
+
+
+def test_hidden_lines_get_no_legend_rows(viewport, profile) -> None:
+    """The legend names what is on screen. Rows for colours the user just switched off are a lie."""
+    viewport.set_simulation(simulation(fixture_text("baseline_4axis.nc"), profile))
+    assert viewport.legend.text()
+    viewport.set_toolpath_visible(False)
+    assert not viewport.legend.text()
+
+
+def test_the_solid_gets_a_legend_row_of_its_own(viewport, profile) -> None:
+    from foursight.gui.legend import SOLID_LABEL
+
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_solid(field)
+    assert SOLID_LABEL in viewport.legend.text()
+    viewport.clear_solid()
+    assert SOLID_LABEL not in viewport.legend.text()
+
+
+def test_the_floor_grid_is_hidden_while_a_solid_is_shown(viewport, profile) -> None:
+    """The grid is a plane at Z=0 and a stock top at Z=0 is the ordinary convention, so it slices
+    through the part — drawn over the machined floor of every pocket and z-fighting every uncut face.
+    Seen only by looking at it; no assertion on the data model could have found this.
+    """
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    assert viewport._grid.visible()
+
+    viewport.set_solid(field)
+    assert not viewport._grid.visible()
+
+    viewport.clear_solid()
+    assert viewport._grid.visible(), "the grid did not come back when the solid went away"
+
+
+def test_loading_another_program_restores_the_grid(viewport, profile) -> None:
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_solid(field)
+    viewport.set_simulation(simulation("G21 G94 G90\nG1 X10 Y10 F600\n", profile))
+    assert viewport._grid.visible()
+
+
+def test_the_solid_carries_its_own_lighting(viewport, profile) -> None:
+    """`shader=None` because the colours are pre-lit. pyqtgraph's `shaded` lights from **eye** space and
+    leaves any face turned toward the camera at ambient — which is the machined surface itself.
+    """
+    field, sim = carved_box(profile)
+    viewport.set_simulation(sim)
+    viewport.set_solid(field)
+    # `shader()` resolves None through pyqtgraph's registry to a pass-through program, so the stored
+    # option is what records the intent.
+    assert viewport._solid.opts["shader"] is None
+    assert viewport._solid.shader().name is None, (
+        "a named shader would re-light the pre-lit colours"
+    )
+    assert viewport._solid.opts["meshdata"].vertexColors() is not None

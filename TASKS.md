@@ -2055,7 +2055,87 @@ channel (a wavy underline, a symbol column), which is the thing the viewport lac
 
 ---
 
-**Project status: M0–M11 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M12 — Solid view
+
+Asked for directly: *"add option to view object as solid … to easier be able to see end result."* The
+viewport drew where the tool *went*; judging whether that yields the intended part meant imagining what
+was left. See `PLAN.md` § Solid view for the full design and every trade below.
+
+**This milestone contradicts `PLAN.md` § Non-Goals as it stood, and the entry was amended rather than
+quietly overrun.** What landed is a display heightfield. Dexel removal *for verification* is still out,
+and no verifier reads `[tool]` or the carved field — every rule still judges the programmed centreline.
+
+- [x] **T12.1 — `[tool]` in the machine profile.** `Tool(diameter, shape)` with `shape` one of
+      `flat`/`ball`, `"tool"` in `_SECTIONS`/`_KEYS`, and a `TOOL` group in `profile_schema.py` so the
+      Ctrl+M editor generates the form rather than needing widget code. **Absence means unknown**: no
+      `[tool]` disables the solid view and says why, and a non-positive diameter is refused rather than
+      clamped. `toggle=True` like `[stock]`, because the section is meaningless half-specified.
+      **One trap, found by the suite.** `profile_doc._set_section_active` uncomments a section's header
+      and every `key = value` line *down to the next header*. The new `[tool]` prose contained lines
+      shaped like `shape = "flat"   reaches …`, which sat inside `[stock]`'s span and were uncommented
+      into a file that is not valid TOML. Both switchable blocks in `default_4axis.toml` are now bare,
+      with every word of explanation above them and a comment in the file saying why.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/machine/profile_schema.py`,
+      `src/foursight/profiles/default_4axis.toml`, `profiles/bamse-rotary.toml`
+- [x] **T12.2 — `sim/solid.py`, the box carve.** Rasterise tool-axis positions, then grayscale-erode by
+      the cutter's bottom. Two passes because the direct sweep is `O(segments × kernel)` and is the wrong
+      algorithm; the erosion is `O(grid × kernel)` and independent of program size. Grid resolution is
+      derived so the kernel stays bounded at ~450 offsets whatever tool is configured. Rapids never cut,
+      untrusted spans never cut, and a box is refused once a table-mounted program moves A.
+      Files: `src/foursight/sim/solid.py`, `tests/test_solid.py`
+- [x] **T12.3 — the cylinder carve.** A radial map over (angle, axial) in **part** coordinates, exact
+      under rotation because a concentric cylinder maps onto itself — the M9 fact, reused. Needs
+      `lin_part`, and refuses without it. The angular seam wraps, and the test for it is a single plunge
+      rather than a revolution: a revolution carves every cell directly and would pass with the seam
+      left open. Verified by mutation.
+      Files: `src/foursight/sim/solid.py`, `src/foursight/machine/kinematics.py` (`axis_columns`),
+      `tests/test_solid.py`
+- [x] **T12.4 — `gui/solid_mesh.py`.** Triangulation, closing walls and caps, and analytic outward
+      normals. Qt-free like `batching.py`, for the same reason: the part that can be wrong is testable
+      without a GL context.
+      Files: `src/foursight/gui/solid_mesh.py`, `tests/test_solid_mesh.py`
+- [x] **T12.5 — the viewport mesh item, and a latent depth bug it exposed.** `set_solid`/`clear_solid`
+      and `set_toolpath_visible`. `set_highlight` used `setGLOptions("translucent")`, which *enables*
+      the depth test and was safe only while nothing wrote depth; the solid does, so a selection inside
+      the material would have been swallowed silently. It now states `OVERLAY_GL_OPTIONS` explicitly.
+      Files: `src/foursight/gui/viewport3d.py`, `tests/test_viewport.py`
+- [x] **T12.5a — two things only a real GL context showed.** Both found by launching the application
+      against the X display and looking at the pixels, and both invisible to the offscreen suite.
+      **The shading was inverted.** pyqtgraph's `shaded` program lights from eye space and clamps
+      `dot < 0` to zero, so the face turned toward the camera renders at ambient — and that face is the
+      machined surface. The part's top came out as the darkest thing on screen. Lighting is now baked
+      into vertex colours against a **world**-space light, with `shader=None`, using a wrap-around term
+      rather than clamped Lambert so a pocket's two shaded walls are not identical.
+      **The floor grid sliced through the part.** `GLGridItem` is a plane at Z = 0 and a stock top at
+      Z = 0 is the convention, so it drew over every pocket floor and z-fought every uncut face. It is
+      hidden while a solid is on screen. The depth buffer is real and works; this was geometry.
+      Files: `src/foursight/gui/solid_mesh.py`, `src/foursight/gui/viewport3d.py`,
+      `tests/test_solid_mesh.py`, `tests/test_viewport.py`
+- [x] **T12.6 — the legend's solid row.** Read off `SolidField.notes`, so every caveat the carve carries
+      is in the key rather than in a document nobody has open. Hidden lines lose their rows too.
+      Files: `src/foursight/gui/legend.py`, `src/foursight/gui/viewport3d.py`, `tests/test_legend.py`
+- [x] **T12.7 — `SolidCarver` and the two View actions.** The carve runs off the GUI thread, `Ctrl+D`
+      toggles the solid and `Ctrl+T` the toolpath, and **Ctrl+P is untouched**. The stock shape decides
+      the frame, so switching the solid on flips `Part coordinates` to match; changing the frame by hand
+      under a live solid switches the solid off and says which frame it needed.
+      Files: `src/foursight/gui/background.py`, `src/foursight/gui/main_window.py`,
+      `tests/test_main_window.py`
+- [x] **T12.8 — documentation.** `PLAN.md` § Solid view plus the amended Non-Goals and Future entries;
+      this section; `docs/manual_tests/m12.md`.
+
+**Measured**, on the M0 baseline machine: a 200-pass raster over a 100×80 blank carves in 61 ms and
+meshes in 20 ms; 40k cutting segments carve in 0.95 s; a 60-revolution wrapped rotary program carves in
+89 ms. GL cost 6.3 MB (box) to 13.8 MB (cylinder), recorded rather than budgeted — it is optional
+geometry, and the ≤ 55 MB figure in `PLAN.md` § Performance is about the toolpath.
+
+**Deliberately not built.** Undercuts and multiple tools, both of which need a tool library and a dexel
+or voxel model rather than a heightfield. No diagnostic derived from the carve — see the amended
+Non-Goals entry. No caching of a carve across a toggle: it is fast enough that holding one invites the
+stale-geometry failure the viewport spends most of its code avoiding.
+
+---
+
+**Project status: M0–M12 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

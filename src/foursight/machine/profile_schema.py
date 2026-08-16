@@ -370,6 +370,43 @@ STOCK = Group(
     ),
 )
 
+TOOL = Group(
+    "tool",
+    "Tool",
+    (
+        Field(
+            "tool",
+            "diameter",
+            "Diameter",
+            Kind.LENGTH,
+            optional=False,
+            help=(
+                "The cutter the solid view carves with. There is no tool table — this is ONE tool for "
+                "the whole program, so a program that changes tools is carved wrongly wherever the "
+                "other tool cut, and the view says so."
+            ),
+        ),
+        Field(
+            "tool",
+            "shape",
+            "Shape",
+            Kind.CHOICE,
+            optional=False,
+            choices=("flat", "ball"),
+            default="flat",
+            help=(
+                "Only the cutter's bottom matters to a heightfield. A shape that is neither is refused "
+                "rather than carved as flat, which would leave square corners the part will not have."
+            ),
+        ),
+    ),
+    toggle=True,
+    help=(
+        "Used only to draw the solid view. No verifier reads it: every rule judges the programmed "
+        "centreline, and giving the cutter a width would quietly change what several of them mean."
+    ),
+)
+
 OFFSETS = Group(
     "offsets",
     "Work offsets",
@@ -399,6 +436,7 @@ GROUPS: tuple[Group, ...] = (
     KINEMATICS,
     SAFETY,
     STOCK,
+    TOOL,
 )
 
 

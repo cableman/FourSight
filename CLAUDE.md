@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M11 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1634 tests**.
+**M0–M12 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1713 tests**
+(1669 passed + 1 skipped without `test_dialect.py`, 43 in it).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -12,7 +13,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1580) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1669) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -73,10 +74,10 @@ Dependency direction is `parser → machine → sim → verify → fix → gui`.
 
 - **`parser/`** — custom tokenizer and parser (deliberately *not* pygcode, because modal-state control must be owned by us). Resolves modal groups so each `Command` carries a frozen `modal_snapshot`.
 - **`machine/`** — `MachineState` (live position and modal groups during simulation), `MachineProfile` loaded from TOML, and `kinematics.py` for rotary transforms.
-- **`sim/`** — interpolates lines and arcs (G2/G3 in both IJK and R form) plus rotary blending into a `SegmentStore`; `timing.py` derives per-segment durations for the timeline.
+- **`sim/`** — interpolates lines and arcs (G2/G3 in both IJK and R form) plus rotary blending into a `SegmentStore`; `timing.py` derives per-segment durations for the timeline; `solid.py` carves the `[stock]` blank into a display heightfield for the M12 solid view.
 - **`verify/`** — `Rule` base class with a registry; one module per check category under `checks/`; emits `Diagnostic(severity, line, message, fix_ids)`.
 - **`fix/`** — each fix is a transform returning a text diff. Fixes never write the original file; they modify the editor buffer and the user saves explicitly.
-- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking, and `playback.py`, which owns the animation clock and the tool-marker interpolation so the transport widget stays checkable by eye, and `legend.py`, which turns what is on screen into named colour rows. None of them import Qt.
+- **`gui/`** — thin Qt/PySide6 layer so logic stays testable. Includes `picking.py`, because batched rendering rules out Qt item picking, and `playback.py`, which owns the animation clock and the tool-marker interpolation so the transport widget stays checkable by eye, and `legend.py`, which turns what is on screen into named colour rows, and `solid_mesh.py`, which turns a carved `SolidField` into closed, outward-facing triangles. None of them import Qt.
 - **`fileio/`** — deliberately not named `io/`, which shadows the stdlib module.
 
 ### Invariants
@@ -143,12 +144,58 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   on screen had no name. **Toolpath batches use `BATCH_GL_OPTIONS`: blending off.** Assert GL state
   directly (`tests/test_viewport.py::test_toolpath_batches_never_blend`); the batching can be perfect
   while the picture is wrong.
-- **Depth testing is off for the toolpath, and that is what makes the overlays work.** A disabled test
-  writes no depth, so the selection highlight and the tool marker draw on top of the very segments they
-  coincide with instead of z-fighting them. `HIGHLIGHT_COLOR`'s `translucent` mode *enables* the depth
-  test (pyqtgraph's docs: *translucent — enables depth testing*; *additive — disables* it) and gets away
-  with it only because the batches leave the depth buffer empty. Turning depth testing on for the
-  toolpath is therefore not a local change — it would make selections flicker or vanish, with no error.
+- **Depth testing is off for the toolpath, and the overlays no longer *rely* on that.** A disabled test
+  writes no depth, so the batches leave the depth buffer empty and the selection highlight and tool
+  marker draw on top of the very segments they coincide with instead of z-fighting them. Until M12 the
+  highlight used `translucent`, which *enables* the depth test (pyqtgraph's docs: *translucent — enables
+  depth testing*; *additive — disables* it) and got away with it only because nothing wrote depth. **The
+  solid view writes depth**, so that assumption died: a selection inside the material would have been
+  swallowed by the solid it cuts, silently. The highlight now states `OVERLAY_GL_OPTIONS` — depth test
+  off, blending off — explicitly, and depends on nothing else in the scene. The marker was always safe:
+  `additive` disables the test. Turning depth testing **on** for the toolpath is still not a local
+  change; it would make selections flicker or vanish, with no error.
+- **The solid view is a *display* heightfield, and `verify/` must never read it or `[tool]`.** M12
+  amended PLAN.md § Non-Goals rather than overrunning it: dexel removal *for verification* is still out.
+  Every rule judges the programmed centreline, and giving the cutter a width would silently change what
+  several of them mean — `geometry.axis-travel-exceeded` against a tool edge rather than the spindle
+  centre is a different check, not a better one. A diagnostic derived from the carve would also be
+  confidently wrong in exactly the cases that matter, because the model **cannot represent an undercut**
+  (one number per cell), carves with **one cutter** (there is no tool table), and **does not carve
+  untrusted spans** (a cutter-compensated span is the centreline, not where the tool goes — so the solid
+  shows *more* material than reality, the recoverable direction). Each of those is a `SolidField.notes`
+  entry that reaches the legend's solid row. A shaded solid looks far more authoritative than a line
+  does; the narrowing has to stay visible on the picture, not live in a document nobody has open.
+- **The stock shape decides the solid's frame, not the user.** A box is a top-down Z map in machine
+  coordinates and is **refused** once a table-mounted program moves A, exactly as
+  `geometry.rapid-into-stock` refuses it. A cylinder is a radial map over (angle, axial) in **part**
+  coordinates, which is stationary under rotation for the M9 invariance reason. So `Ctrl+D` flips
+  `Ctrl+P` to match, and changing the frame by hand under a live solid switches the solid off. Drawing a
+  carve in the other frame is not a rougher picture — it is a picture of somewhere the part is not.
+- **The solid is pre-lit in world space, and the floor grid hides while it is up.** Both were found by
+  launching the application and looking, and no offscreen test can see either. pyqtgraph's `shaded`
+  program lights from **eye** space and clamps `dot < 0` to zero, so a face turned *toward* the camera
+  renders at ambient — and that face is the machined surface, which came out as the darkest thing on
+  screen. `solid_mesh.shade` bakes a **world**-space light into vertex colours and the item uses
+  `shader=None`; a named shader would re-light them. It uses a **wrap-around** term rather than clamped
+  Lambert, because clamping gives every away-facing wall the same value and a pocket then reads only as
+  an outline. Separately, `GLGridItem` is a plane at **Z = 0** and a stock top at Z = 0 is the ordinary
+  convention, so the grid lies in the blank's top face — drawn over every pocket floor and z-fighting
+  every uncut one. `_show_grid(False)` while a solid is on screen. The depth buffer is real (24-bit) and
+  works; this is geometry, not a missing depth test.
+- **The carve is two passes, and the erosion is the algorithm.** `height = min over path points within r`
+  *is* a grayscale erosion of the tool-axis height map by the cutter's bottom, so `sim/solid.py`
+  rasterises axis positions (cost ∝ path length) and erodes once (cost ∝ grid size, independent of
+  program size). Rewriting it as a per-segment sweep is `O(segments × kernel)` — 450M cell updates at
+  500k segments — and is the wrong algorithm, not a slow one. Grid resolution is **derived**, as the
+  coarser of `extent / TARGET_CELLS` and `radius / MAX_RADIUS_CELLS`, because the kernel grows with the
+  square of the radius *in cells*; fixing the cell size lets a large cutter build a 125,000-offset kernel
+  and hang. Both the carve and the mesh **wrap the angular seam**; either one left open leaves a defect
+  exactly one tool radius wide at exactly one angle, which reads as a feature of the user's program.
+- **`default_4axis.toml`'s switchable blocks must stay bare.** `profile_doc._set_section_active`
+  uncomments a section's header and every `key = value` line **down to the next header**, so a prose line
+  shaped like an assignment sitting inside a toggle section's span is uncommented into a file that is not
+  valid TOML. This is not hypothetical — `[tool]`'s documentation said `shape = "flat"   reaches …` and
+  broke five tests. Explanations go above both blocks; the blocks themselves are header plus keys.
 - **The legend reads its labels and colours off the `Batch` objects, and never restates the palette.**
   `build_batches` already emits `"feed (unverified)"` and the exact RGBA handed to GL; `legend.py`
   capitalises the label for display and owns no second table. That is also why `HIGHLIGHT_COLOR` and

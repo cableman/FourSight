@@ -133,6 +133,57 @@ class ProgramLoader(QThread):
         self.progressed.emit(done, total, SIMULATING)
 
 
+class SolidCarver(QThread):
+    """Carves the stock into a `SolidField` off the GUI thread.
+
+    Same reason `ProgramLoader` exists. The erosion pass is proportional to grid size rather than program
+    size, so it does not blow up the way parsing does — but at 512 cells square with a ~450-offset kernel
+    it is still a second or so of solid numpy, and a second of a frozen window reads as a crash.
+
+    Emits exactly one terminal signal, `carved` or `failed`, so the caller re-enables its action in one
+    place. There is no `cancelled`: the carve has no progress ticks to notice a request at, and it
+    finishes soon enough that the honest answer is to let it. A *superseded* carve is dropped by the
+    receiver instead — see `MainWindow._on_carved`.
+    """
+
+    carved = Signal(object)  # SolidField
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        store,
+        profile: MachineProfile,
+        *,
+        untrusted=None,
+        tool_numbers: tuple[int, ...] = (),
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._store = store
+        self._profile = profile
+        self._untrusted = untrusted
+        self._tool_numbers = tool_numbers
+
+    def run(self) -> None:  # pragma: no cover - exercised via `start()` in the GUI
+        from foursight.machine.kinematics import KinematicsError
+        from foursight.sim.solid import SolidError, carve
+
+        try:
+            field = carve(
+                self._store,
+                self._profile,
+                untrusted=self._untrusted,
+                tool_numbers=self._tool_numbers,
+            )
+        except (SolidError, KinematicsError, ValueError) as error:
+            # The same narrow set the loader catches, for the same reason: a `MemoryError` or a
+            # `TypeError` is a bug in us, and reporting it as though the user's profile were at fault
+            # sends them to edit a file that is fine.
+            self.failed.emit(str(error))
+        else:
+            self.carved.emit(field)
+
+
 class BufferLoader(ProgramLoader):
     """The same staged load, over **edited text** rather than a file.
 

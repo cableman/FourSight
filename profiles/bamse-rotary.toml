@@ -65,3 +65,10 @@ shape = "cylinder"
 diameter = 52.0
 length = 150.0
 axis_min = 0.0
+
+# Drives the solid view only; no verifier reads it. One cutter for the whole program — there is no tool
+# table — so a program that changes tools is carved wrongly wherever the other tool cut, and the view
+# says so rather than hiding it.
+[tool]
+diameter = 6.0
+shape = "flat"

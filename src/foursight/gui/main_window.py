@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from foursight.fix.engine import FixContext, FixHistory, apply_fix, get_fix, load_builtin_fixes
-from foursight.gui.background import BufferLoader, ProgramLoader
+from foursight.gui.background import BufferLoader, ProgramLoader, SolidCarver
 from foursight.gui.diagnostics_panel import DiagnosticsPanel
 from foursight.gui.diff_dialog import DiffDialog, RefusalDialog
 from foursight.gui.editor import CodeEditor
@@ -46,11 +46,26 @@ from foursight.gui.session import OpenedProgram
 from foursight.gui.timeline_bar import TimelineBar
 from foursight.gui.viewport3d import ToolpathViewport
 from foursight.machine.kinematics import KinematicsError, apply_display_transform
-from foursight.machine.profile import MachineProfile, default_profile_path
+from foursight.machine.profile import MachineProfile, StockCylinder, default_profile_path
 from foursight.machine.profile_doc import ProfileDocument
 
 GCODE_FILTER = "G-code (*.nc *.ngc *.gcode *.tap *.cnc);;All files (*)"
 _BANNER_STYLE = "background: #7a2a12; color: #ffe9c9; padding: 5px 9px; font-weight: 600;"
+
+
+def _tool_numbers(commands) -> tuple[int, ...]:
+    """Every distinct T word in the program, in the order they first appear.
+
+    The solid carve has exactly one cutter, so more than one of these is a caveat it has to state. Read
+    from the *commands* rather than from the store, which carries no tool information at all — a segment
+    knows its source line and its motion type, and deliberately nothing about what was in the spindle.
+    """
+    seen: dict[int, None] = {}
+    for command in commands:
+        value = command.words.get("T")
+        if value is not None:
+            seen.setdefault(int(value), None)
+    return tuple(seen)
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +92,13 @@ class MainWindow(QMainWindow):
         self._loading_path: Path | None = None
         self.selection: LineSelection | None = None
         self.fix_history = FixHistory()
+        #: The carve currently in flight, or None. Compared by identity when a result arrives, so a
+        #: superseded carve — the user switched frames, loaded another file, or turned the solid off —
+        #: lands nowhere instead of drawing the previous program's surface.
+        self._carver: SolidCarver | None = None
+        #: True only while `_on_solid_toggled` is flipping `Part coordinates` itself, so the frame
+        #: toggle's own re-carve does not race the one that is about to follow it.
+        self._switching_frame_for_solid = False
 
         self.setWindowTitle("FourSight")
         self.resize(1280, 800)
@@ -220,6 +242,32 @@ class MainWindow(QMainWindow):
         )
         self.part_coordinates_action.toggled.connect(self._on_part_coordinates_toggled)
         view_menu.addAction(self.part_coordinates_action)
+
+        view_menu.addSeparator()
+        # Ctrl+D, not Ctrl+S (taken by nothing yet but reserved by every habit) and emphatically not
+        # Ctrl+P, which has meant "part coordinates" since T4.5. The two are related — a cylinder carve
+        # *is* part coordinates — but they are separate questions and a user who has learned one
+        # shortcut should not find it doing the other.
+        self.solid_action = QAction("&Solid view", self)
+        self.solid_action.setCheckable(True)
+        self.solid_action.setShortcut(QKeySequence("Ctrl+D"))
+        self.solid_action.setToolTip(
+            "Carve the [stock] blank with the [tool] cutter and show the result as a shaded solid. "
+            "A heightfield, so it cannot show undercuts, and it carves with one tool"
+        )
+        self.solid_action.toggled.connect(self._on_solid_toggled)
+        view_menu.addAction(self.solid_action)
+
+        # Independent of the solid, deliberately. Lines over a solid are the useful combination for
+        # asking "which move left that mark", and lines alone is what the application has always been —
+        # so neither toggle may imply the other.
+        self.toolpath_action = QAction("&Toolpath", self)
+        self.toolpath_action.setCheckable(True)
+        self.toolpath_action.setShortcut(QKeySequence("Ctrl+T"))
+        self.toolpath_action.setToolTip("Show the coloured toolpath lines")
+        self.toolpath_action.toggled.connect(self.viewport.set_toolpath_visible)
+        self.toolpath_action.setChecked(self.viewport.toolpath_visible)
+        view_menu.addAction(self.toolpath_action)
 
     def _add(self, menu, text: str, shortcut, slot) -> QAction:
         action = QAction(text, self)
@@ -389,6 +437,11 @@ class MainWindow(QMainWindow):
         # The transform belongs to the previous store, so the toggle resets rather than silently
         # displaying the new program untransformed while the menu still shows it checked.
         self.part_coordinates_action.setChecked(False)
+        # And the solid, for the stronger version of the same argument: a surface carved from the
+        # previous program looks exactly as authoritative as one carved from this one. `set_simulation`
+        # below drops the geometry; this drops the claim in the menu that it is still there.
+        self._carver = None
+        self.solid_action.setChecked(False)
         # "Checking…" rather than an empty list: an empty diagnostics panel reads as "no problems found",
         # which is a claim we have not made yet at this point.
         self.diagnostics.set_pending()
@@ -434,6 +487,12 @@ class MainWindow(QMainWindow):
             loader, self._loader = self._loader, None
             loader.cancel()
             loader.wait(5000)
+        if self._carver is not None:
+            # No `cancel` to call: the carve is a handful of vectorised passes with no progress ticks to
+            # notice a request at. Waiting is the whole mechanism, and it is short — the erosion is
+            # bounded by grid size, not by program size.
+            carver, self._carver = self._carver, None
+            carver.wait(5000)
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ editor -> viewport (T3.2)
@@ -656,6 +715,121 @@ class MainWindow(QMainWindow):
             self.viewport.set_marker(store, self.timeline.timeline, self.timeline.seconds)
         mode = "part" if enabled else "machine"
         self.statusBar().showMessage(f"Showing {mode} coordinates")
+        # `set_simulation` above dropped the solid, because a carved surface is frame-bound and one from
+        # the other frame would sit where the part is not. Re-carve in the new frame if the solid is on —
+        # unless we are already inside `_on_solid_toggled`, which switched the frame itself and will
+        # start the carve as its own next step.
+        if self.solid_action.isChecked() and not self._switching_frame_for_solid:
+            self._start_carve()
+
+    # ------------------------------------------------------------------ solid view (T12.7)
+
+    def _solid_needs_part_coordinates(self) -> bool | None:
+        """Which frame this profile's stock must be carved in, or None when it cannot be carved.
+
+        The stock shape decides, not the user: a cylinder is carved as a radial map in part coordinates
+        because that is the frame it is rotation-invariant in, and a box is a top-down Z map in machine
+        coordinates. A solid drawn in the other frame is not a rougher picture, it is a picture of
+        somewhere the part is not.
+        """
+        if self.profile.stock is None or self.profile.tool is None:
+            return None
+        return isinstance(self.profile.stock, StockCylinder)
+
+    def _on_solid_toggled(self, enabled: bool) -> None:
+        """Carve and show the solid, or take it off screen.
+
+        Switching it on may flip `Part coordinates` — see `_solid_needs_part_coordinates`. That is
+        deliberate and visible: the checkbox moves, so the frame change is something the user can see
+        happen rather than something they have to infer from the picture.
+        """
+        if not enabled:
+            self.viewport.clear_solid()
+            # Forgetting the carver is what makes a superseded result droppable: `_on_carved` compares
+            # identity, so a carve still running when the user switches off simply lands nowhere.
+            self._carver = None
+            return
+
+        if self.program is None:
+            self.solid_action.setChecked(False)
+            return
+
+        required = self._solid_needs_part_coordinates()
+        if required is None:
+            self._refuse_solid(
+                "The machine profile needs both a [stock] blank and a [tool] cutter to carve a solid. "
+                "Neither is guessed: a solid carved from an invented blank or an invented cutter is a "
+                "confident picture of the wrong part.\n\nAdd them under File → Machine profile."
+            )
+            return
+
+        if self.part_coordinates_action.isChecked() != required:
+            self._switching_frame_for_solid = True
+            try:
+                self.part_coordinates_action.setChecked(required)
+            finally:
+                self._switching_frame_for_solid = False
+            if self.part_coordinates_action.isChecked() != required:
+                # The part-coordinates toggle refused and reverted itself — a head mount with no
+                # `pivot_to_tip`, say. It has already said why; adding a second dialog would not help.
+                self.solid_action.setChecked(False)
+                return
+
+        self._start_carve()
+
+    def _start_carve(self) -> None:
+        """Kick off a carve on a background thread, replacing any carve already running."""
+        if self.program is None:
+            return
+        required = self._solid_needs_part_coordinates()
+        if required is None or self.viewport.part_coordinates != required:
+            # Reached when the user changed the frame by hand under a live solid. Switching the solid off
+            # beats redrawing it somewhere it does not belong, and the message says which it was.
+            frame = "part" if required else "machine"
+            self.viewport.clear_solid()
+            self.solid_action.setChecked(False)
+            self.statusBar().showMessage(f"Solid view switched off: it needs {frame} coordinates")
+            return
+
+        simulation = self.program.simulation
+        carver = SolidCarver(
+            simulation.store,
+            self.profile,
+            untrusted=simulation.unverified_mask(),
+            tool_numbers=_tool_numbers(self.program.commands),
+            parent=self,
+        )
+        carver.carved.connect(lambda field, source=carver: self._on_carved(field, source))
+        carver.failed.connect(lambda message, source=carver: self._on_carve_failed(message, source))
+        self._carver = carver
+        self.statusBar().showMessage("Carving the solid…")
+        carver.start()
+
+    def _on_carved(self, field, source) -> None:
+        """Put a finished carve on screen, unless it has been superseded."""
+        if self._carver is not source or not self.solid_action.isChecked():
+            return
+        self._carver = None
+        try:
+            self.viewport.set_solid(field)
+        except ValueError as error:
+            # The frame moved under the carve while it was running. Refusing beats drawing it.
+            self._refuse_solid(str(error))
+            return
+        removed = "nothing was removed" if not field.carved else "showing the machined result"
+        self.statusBar().showMessage(f"Solid view: {removed}")
+
+    def _on_carve_failed(self, message: str, source) -> None:
+        if self._carver is not source:
+            return
+        self._carver = None
+        self._refuse_solid(message)
+
+    def _refuse_solid(self, message: str) -> None:
+        """Report why there is no solid and put the menu back where the picture is."""
+        self.viewport.clear_solid()
+        self.solid_action.setChecked(False)
+        QMessageBox.warning(self, "Cannot show the solid", message)
 
     # ------------------------------------------------------------------ timeline (T3.5)
 
