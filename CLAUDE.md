@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M12 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1713 tests**
-(1669 passed + 1 skipped without `test_dialect.py`, 43 in it).
+**M0–M13 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1730 tests**
+(1686 passed + 1 skipped without `test_dialect.py`, 43 in it).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -219,6 +219,18 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under
   `blockSignals`. And `advance` takes the wall step as an **argument** rather than reading a clock, which is
   what lets every playback test run frame by frame without sleeping.
+- **Exactly one rule judges the control rather than the program, and it must stay a warning.**
+  `process.rotary-rapid-before-plunge` (M13) reports a `G0` whose duration is set by the rotary axis
+  followed straight away by a plunge. The commanded path is *safe* — Z is at clearance for the whole
+  rapid, every limit holds, the viewport draws it correctly — and a machine still cut a groove around
+  the bar, because constant-velocity blending (Mach3 CV, `G64`) starts the descent before the rotation
+  finishes. Nothing else in `verify/` can see that, which is why the exception exists; whether a control
+  blends is not in the G-code, which is why it can never be an error and why it has no fix. Its
+  "rotary-dominated" test is a ratio of **times** from each axis's `max_rapid`, never of degrees: a
+  degree threshold fires on a fast A axis and stays silent on a slow one, which is backwards, and
+  comparing degrees to millimetres is the cross-unit expression the rotary column exists to prevent.
+  `_descends_alone` is shared with `plunge-feed-too-high` so the two cannot drift apart about what a
+  plunge is.
 - **All geometry is numpy float64; internal units are always mm.** Convert G20 (inch) input at parse time. But report diagnostics in the program's declared units — "X exceeds 400 mm" against an inch program isn't actionable.
 - **G-codes are strings (`'90.1'`), never floats.** A block carries multiple G- and M-words, so they live in `Command.gcodes` / `Command.mcodes` lists, not in the `words` dict.
 - **`slots=True` on every hot-path dataclass** — the 50k lines/sec parse target doesn't survive otherwise.

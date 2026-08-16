@@ -660,9 +660,9 @@ An unrecognized code that never touches position stays a warning. An unrecognize
 
 ### Process checks (T1.8)
 
-`verify/checks/process.py`, 15 rules covering PLAN.md's Process group, plus the G93-without-F check
-the checklist mandates, the `G4 P` dwell-units warning added in M6 and the plunge-feed check added in
-M7. Position tracking lives in `machine/state.py` — a minimal, **endpoint-only**
+`verify/checks/process.py`, 16 rules covering PLAN.md's Process group, plus the G93-without-F check
+the checklist mandates, the `G4 P` dwell-units warning added in M6, the plunge-feed check added in
+M7 and the CV-blending warning added in M13. Position tracking lives in `machine/state.py` — a minimal, **endpoint-only**
 walker built here for the same reason profile loading moved into M1: the verifier cannot run without
 it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated points.
 
@@ -681,6 +681,50 @@ it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated 
   the program. `feed-too-high` and `spindle-too-high` report per offending word, since each is a
   separate programming decision to change.
 - Coolant state is tracked inside its rule rather than added to `ModalState`; nothing else needs it.
+- **One rule here judges the control rather than the program.** `process.rotary-rapid-before-plunge`
+  (M13) reports a hazard the commanded geometry does not contain — see § CV blending below — which is
+  why its message names a control setting as the remedy instead of a profile key.
+
+#### CV blending and the rotary reposition (M13)
+
+**`process.rotary-rapid-before-plunge`** — a `G0` whose duration is set by the rotary axis, with a
+plunge on the next moving block. Found by cutting a wrapped-rotary job on a real Mach3 machine: the
+part came back with a groove cut around it that appears nowhere in the program and nowhere in the
+preview.
+
+The programmed path is safe. Z is at clearance for the whole rapid, every travel limit holds, and the
+viewport draws it correctly — which is exactly the problem. Under constant-velocity blending (Mach3
+CV, LinuxCNC `G64`) the control rounds the corner between the two blocks and begins the descent before
+the rotation has finished, and the tool cuts a circumferential arc that ends where the plunge lands.
+The programmer's first evidence is the workpiece.
+
+This is the only rule in `verify/` that reports something the file does not say, and it is admitted for
+one reason: nothing else can see it. It is placed carefully to stay honest —
+
+- **"Rotary-dominated" is a ratio of times, never of degrees.** A coordinated rapid takes as long as
+  its slowest axis, so the question is whether A *is* that axis: 488° at 3600 deg/min is 8.1 s against
+  110 mm at 5000 mm/min, which is 1.3 s. Comparing degrees against millimetres is the meaningless
+  cross-unit expression the rotary column exists to prevent, and a degree threshold would fire on a
+  fast rotary axis and stay silent on a slow one — backwards.
+- **A plunge means the same thing as in `plunge-feed-too-high`**: G1, Z alone, ending below
+  `safety.min_clearance_z` in machine coordinates. A `G0` descent is left to
+  `process.rapid-below-clearance` rather than reported twice, and a ramp is not a plunge here either.
+- **An intervening M-code or `G4` means no finding.** Both flush the look-ahead, and a dwell is
+  precisely the remedy the message recommends; telling a program that already has one that it is at
+  risk would be false.
+- **Every occurrence is reported**, against this module's usual "report once, at the first offending
+  line". That convention fits facts about the *program* — one missing G21, one misconfigured plunge
+  rate — where the second finding tells the user nothing. Each finding here is a different place on
+  the workpiece, at a different angle and a different position along the bar, and the user has to go
+  and look at each one. The first version of this rule summarised the rest into a count and was
+  changed on the first real program it ran against: it reported the smallest of three corners and
+  left the two 488° ones for the reader to infer.
+- **An unestablished A is not judged**, unlike `geometry.rotary-wrap`, which assumes 0 and says so.
+  That rule would otherwise skip the first move of a wrapping program, which is often its largest.
+  Here the trade runs the other way: this rule already reports a hazard that is not in the commanded
+  geometry, and resting that on an assumed position would stack a second guess under the first.
+- **A warning, and it can never be more.** Whether the control blends is not knowable from the
+  G-code. The rule says the corner is there; the machine decides what to do with it.
 
 ### Geometry checks (T1.9)
 
@@ -867,6 +911,10 @@ Severity per the taxonomy above.
 - [ ] W: Rapid below `min_clearance_z`
 - [x] W: Straight-down G1 plunge above `limits.max_plunge_feed` — `process.plunge-feed-too-high` (M7).
   Z-only moves only: a block with XY motion is a ramp, and ramping in at the contouring feed is normal.
+- [x] W: Rotary-dominated rapid immediately before a plunge — `process.rotary-rapid-before-plunge`
+  (M13). The one rule here about the *control* rather than the program: the path as written is safe,
+  but a control blending the corner starts the plunge before the rotation finishes and cuts a groove
+  around the part. Reported per occurrence — each is a different place on the part to go and inspect.
 - [ ] W: G91 active at program end
 - [ ] W: Program lacks M2/M30
 - [x] W: `G4 P` over 60 s under a seconds dialect (likely ms/s confusion) — `process.dwell-units-suspect`
@@ -1047,7 +1095,8 @@ The shape that makes the M7 check work for the 4-axis programs it was written fo
   42,858 commands (12.4 µs/command).** Measured breakdown: **72% of that (380 ms) is seven rules
   each independently re-walking the command list** to rebuild positions — `arc-r-invalid`,
   `arc-radius-mismatch`, `axis-travel-exceeded`, `rotary-travel-exceeded`, `rotary-wrap`,
-  `rapid-below-clearance`, `toolchange-without-retract`. Computing the walk once and sharing it
+  `rapid-below-clearance`, `toolchange-without-retract`. M13's `rotary-rapid-before-plunge` is an
+  eighth, added after this measurement and not included in it. Computing the walk once and sharing it
   through `Program` would cut verification to roughly 200 ms. Deliberately **not** done in M1: no
   requirement is being missed, and it changes the rule contract. Revisit if the M2 gate
   (100k lines parsed and rendered in 5 s) turns out tight, since verification would take ~1.1 s of

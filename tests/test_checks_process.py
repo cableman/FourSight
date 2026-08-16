@@ -474,3 +474,158 @@ def test_nothing_is_rescaled_on_the_strength_of_the_warning(profile) -> None:
     state = MachineState(profile)
     steps = [state.apply(command) for command in parse(PREAMBLE + "G4 P5000\n").commands]
     assert steps[-1].dwell == 5000.0
+
+
+# ------------------------------------------- rotary-dominated rapid before a plunge (CV blending)
+
+RULE = "process.rotary-rapid-before-plunge"
+
+# The wrapped-rotary shape this rule exists for: a `G0` that unwinds A by hundreds of degrees while
+# the linear axes move a short distance, and a plunge on the very next block. Under the shipped
+# profile the 400 deg takes 6.7 s at 3600 deg/min against 0.12 s for the 10 mm of X.
+GOUGE = "G0 A0 X0 Z10\nG0 A400 X10\nG1 Z-5 F100\n"
+
+# The same three rates the shipped profile has, isolated so a test can vary one of them. `[safety]`
+# is its own line pair so the no-clearance variant can delete the section outright: the loader is
+# entitled to refuse a present-but-empty table.
+CV_PROFILE = """
+[machine]
+units = "mm"
+[axes.x]
+max_rapid = 5000.0
+[axes.z]
+max_rapid = 3000.0
+[axes.a]
+type = "rotary"
+wrap = true
+max_rapid = 3600.0
+[safety]
+min_clearance_z = 5.0
+"""
+
+
+def _cv(body: str, profile):
+    return of(diagnose("G21 G90 G17 G94 G54\nS8000 M3\n" + body + "M30\n", profile), RULE)
+
+
+def test_a_rotary_dominated_rapid_before_a_plunge_is_reported(profile) -> None:
+    found = _cv(GOUGE, profile)
+    assert len(found) == 1
+    assert found[0].severity is Severity.WARNING
+    assert found[0].line == 4, "anchored at the rapid, which is the block that must not blend"
+    assert "line 5" in found[0].message, "and naming the plunge that follows it"
+    assert "400 deg" in found[0].message
+
+
+def test_the_message_names_the_remedy(profile) -> None:
+    """The fix is a control setting, not a change to the file: the message has to say so."""
+    message = _cv(GOUGE, profile)[0].message
+    assert "G61" in message
+    assert "dwell" in message
+
+
+def test_a_linear_dominated_rapid_is_not_reported(profile) -> None:
+    """The same two blocks, with A turning too little to set the rapid's duration.
+
+    5 deg is 0.083 s at 3600 deg/min against 3.6 s for the 300 mm of X, so the rapid is a linear
+    move that happens to nudge A — there is no long rotation for the plunge to blend into.
+    """
+    assert _cv("G0 A0 X0 Z10\nG0 A5 X300\nG1 Z-5 F100\n", profile) == []
+
+
+def test_dominance_is_measured_in_seconds_not_degrees() -> None:
+    """A degree threshold would fire on a fast rotary axis and stay silent on a slow one.
+
+    These two profiles differ only in `axes.a.max_rapid`, and the same 400 deg rapid is dominant
+    under one and not the other. Comparing degrees against millimetres could not tell them apart —
+    and is the meaningless cross-unit comparison the rotary column exists to prevent.
+    """
+    slow = load_profile_text(CV_PROFILE)
+    fast = load_profile_text(CV_PROFILE.replace("max_rapid = 3600.0", "max_rapid = 400000.0"))
+    assert _cv(GOUGE, slow), "6.7 s of rotation against 0.12 s of X"
+    assert _cv(GOUGE, fast) == [], "0.06 s of rotation against 0.12 s of X"
+
+
+def test_a_rapid_with_no_rotary_motion_is_not_reported(profile) -> None:
+    assert _cv("G0 A0 X0 Z10\nG0 X10 Y10\nG1 Z-5 F100\n", profile) == []
+
+
+def test_a_feed_move_before_the_plunge_is_not_reported(profile) -> None:
+    """A G1 rotation is already at cutting speed; this rule is about the rapid-to-feed corner."""
+    assert _cv("G0 A0 X0 Z10\nG1 A400 X10 F600\nG1 Z-5 F100\n", profile) == []
+
+
+def test_a_ramp_after_the_rapid_is_not_reported(profile) -> None:
+    """ "Plunge" means the same thing here as in `process.plunge-feed-too-high`: Z alone."""
+    assert _cv("G0 A0 X0 Z10\nG0 A400 X10\nG1 X20 Z-5 F100\n", profile) == []
+
+
+def test_a_rapid_descent_after_the_rapid_is_not_reported(profile) -> None:
+    """That is `process.rapid-below-clearance`'s finding; reporting it again would double it."""
+    assert _cv("G0 A0 X0 Z10\nG0 A400 X10\nG0 Z-5\n", profile) == []
+
+
+def test_a_plunge_that_stays_above_the_clearance_plane_is_not_reported(profile) -> None:
+    """Blending into a descent that never reaches the material cuts nothing."""
+    assert _cv("G0 A0 X0 Z20\nG0 A400 X10\nG1 Z10 F100\n", profile) == []
+
+
+def test_the_plunge_need_not_be_the_very_next_block(profile) -> None:
+    """A comment or a block with no axis words does not interrupt the control's look-ahead."""
+    assert len(_cv("G0 A0 X0 Z10\nG0 A400 X10\n(reposition done)\nG1 Z-5 F100\n", profile)) == 1
+
+
+def test_an_intervening_dwell_means_no_finding(profile) -> None:
+    """G4 is the remedy the message recommends; a program that has one is not at risk."""
+    assert _cv("G0 A0 X0 Z10\nG0 A400 X10\nG4 P1\nG1 Z-5 F100\n", profile) == []
+
+
+def test_an_intervening_m_code_means_no_finding(profile) -> None:
+    """An M-code flushes the look-ahead, so the two motions cannot be run together."""
+    assert _cv("G0 A0 X0 Z10\nG0 A400 X10\nM8\nG1 Z-5 F100\n", profile) == []
+
+
+def test_every_occurrence_is_reported(profile) -> None:
+    """Each finding is a different place on the workpiece, so each has to be named.
+
+    This is the exception to the module's "report once, at the first offending line": that rule fits
+    facts about the *program*, where the second finding adds nothing. Here the user has to go and
+    inspect the part at each angle, and a count would leave the later gouges unfound.
+    """
+    # Targets, not deltas: 0 -> 400 -> 1300 -> 900 turns 400, then 900, then 400 degrees.
+    body = "G0 A0 X0 Z10\n" + "".join(
+        f"G0 A{target} X10\nG1 Z-5 F100\nG0 Z10\n" for target in (400, 1300, 900)
+    )
+    found = _cv(body, profile)
+    assert [d.line for d in found] == [4, 7, 10]
+    assert "400 deg" in found[0].message
+    assert "900 deg" in found[1].message, "the delta, not the A target"
+    assert "400 deg" in found[2].message
+
+
+def test_an_unconfigured_clearance_plane_disables_the_check() -> None:
+    """No clearance, no way to say the plunge entered material — the module's standing convention."""
+    bare = load_profile_text(CV_PROFILE.replace("[safety]\nmin_clearance_z = 5.0\n", ""))
+    assert _cv(GOUGE, bare) == []
+
+
+def test_an_unconfigured_rotary_rapid_rate_disables_the_check() -> None:
+    """The rule cannot time the rotation, and no rate is invented to let it guess."""
+    no_rate = load_profile_text(CV_PROFILE.replace("max_rapid = 3600.0", ""))
+    assert _cv(GOUGE, no_rate) == []
+
+
+def test_an_unestablished_rotary_position_is_not_judged(profile) -> None:
+    """No position, no claim — this module's convention, not `geometry.rotary-wrap`'s.
+
+    That rule assumes A started at 0 and says so, because refusing would skip the first block of a
+    wrapping program. Here the trade runs the other way: this rule already reports a hazard that is
+    not in the commanded geometry, and resting that on an assumed position too would stack a second
+    guess under the first.
+    """
+    assert _cv("G0 X0 Z10\nG0 A400 X10\nG1 Z-5 F100\n", profile) == []
+
+
+def test_the_baseline_program_is_not_reported(profile) -> None:
+    """Its only rotary moves are G1, so there is no rapid-to-plunge corner to blend."""
+    assert not of(diagnose(fixture_text("baseline_4axis.nc"), profile), RULE)

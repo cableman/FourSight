@@ -2135,7 +2135,37 @@ stale-geometry failure the viewport spends most of its code avoiding.
 
 ---
 
-**Project status: M0–M12 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M13 — The CV blending warning
+
+Prompted by a cut part, not by a plan. A wrapped-rotary job previewed cleanly, checked clean, and came
+off the machine with a groove cut around the bar that appears nowhere in the program. The cause is the
+control, not the file: a `G0` unwinding A by 488° followed immediately by a plunge, blended by Mach3's
+constant-velocity mode so the descent starts before the rotation finishes. See `PLAN.md` § CV blending
+and the rotary reposition.
+
+- [x] **T13.1 — `process.rotary-rapid-before-plunge`.** A rapid whose duration is set by the rotary
+      axis, with a plunge on the next moving block. Dominance is a ratio of **times**, from each axis's
+      `max_rapid` — degrees against millimetres is the cross-unit comparison the rotary column exists to
+      prevent, and a degree threshold would fire on a fast A axis and stay silent on a slow one. An
+      intervening M-code or `G4` means no finding: both flush the look-ahead, and a dwell is the remedy
+      the message recommends. **Reported per occurrence**, against this module's usual report-once
+      convention: that convention fits facts about the program, and each of these is a different place
+      on the part to go and inspect. The first version did report once with a count, and the first real
+      program it ran against showed why that is wrong — it named the smallest of three corners and left
+      the two 488° repositions to be inferred. `_descends_alone` is shared with
+      `plunge-feed-too-high` so the two rules cannot drift apart about what a plunge is.
+      **The first rule in `verify/` that reports a hazard the commanded geometry does not contain** —
+      admitted because nothing else can see it, and kept a warning because whether the control blends is
+      not knowable from the G-code.
+      Files: `src/foursight/verify/checks/process.py`, `tests/test_checks_process.py`
+
+**Deliberately not built.** No fix. The remedy is `G61` or a dwell, and both are decisions about how to
+run the job on a particular control — a transform that rewrote the user's file on the strength of a
+guess about their CV settings is exactly the confidently-wrong output the project refuses.
+
+---
+
+**Project status: M0–M13 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

@@ -10,14 +10,29 @@ PLAN.md § Verifier Rules, the Process group. Two conventions run through the mo
 
 Messages render values in the program's *declared* units: "F exceeds 3000 mm/min" against an inch
 program is not actionable.
+
+One rule here breaks the module's usual frame. `process.rotary-rapid-before-plunge` reports a hazard
+the **commanded** geometry does not contain: a rotary-dominated rapid followed straight away by a
+plunge is safe as written and is drawn correctly, but a control blending the two blocks starts the
+descent before the rotation finishes. Everything else in `verify/` judges the program; that one judges
+what the machine will make of it, which is why its message names the remedy (G61, or a dwell) rather
+than a profile key to change.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
+from foursight.machine.profile import MachineProfile
 from foursight.machine.state import Position, machine_value, walk
 from foursight.parser.dialect import DwellUnits
-from foursight.parser.model import Command
-from foursight.verify.report import Diagnostic, Severity, format_feed, format_length
+from foursight.parser.model import AXIS_LETTERS, Command
+from foursight.verify.report import (
+    Diagnostic,
+    Severity,
+    format_angle,
+    format_feed,
+    format_length,
+)
 from foursight.verify.rules import Program, Rule, register_rule
 
 CUTTING_MOTIONS = frozenset({"1", "2", "3"})
@@ -432,12 +447,22 @@ def _plunge_feed(command: Command, before: Position, after: Position) -> float |
     modal = command.modal_snapshot
     if modal.feed_mode != UNITS_PER_MINUTE or modal.feed is None:
         return None
-    if before.z is None or after.z is None or after.z >= before.z:
-        return None
-    if any(before.get(letter) != after.get(letter) for letter in ("X", "Y", "A")):
+    if not _descends_alone(before, after):
         return None
     # The *active* feed, not this block's own F word: a plunge usually inherits the rate set earlier.
     return float(modal.feed)
+
+
+def _descends_alone(before: Position, after: Position) -> bool:
+    """True when Z strictly decreases and X, Y and A all hold station.
+
+    Shared with `process.rotary-rapid-before-plunge`, which needs the same notion of "a plunge" for a
+    different reason. One definition, because the two rules disagreeing about what a plunge is would
+    make one of them quietly stop firing on the blocks the other reports.
+    """
+    if before.z is None or after.z is None or after.z >= before.z:
+        return False
+    return all(before.get(letter) == after.get(letter) for letter in ("X", "Y", "A"))
 
 
 #: G4 dwell, and the threshold above which a P value looks like milliseconds rather than seconds.
@@ -494,3 +519,172 @@ class DwellUnitsSuspect(Rule):
             ),
             offset=first.ref.start,
         )
+
+
+#: Rapid motion, and the axes a coordinated rapid times separately. A rapid ignores `F` and runs each
+#: axis at its own `max_rapid`, so the block takes as long as its slowest participant needs — the same
+#: rule `sim/timing._rapid_seconds` applies, restated here for one block at a time rather than borrowed,
+#: because this rule needs the *per-axis* times side by side and that function returns only the maximum.
+RAPID_MOTION = "0"
+ROTARY_AXIS = "A"
+LINEAR_AXES = ("X", "Y", "Z")
+SECONDS_PER_MINUTE = 60.0
+
+
+@dataclass(slots=True, frozen=True)
+class _RotaryRapid:
+    """A rapid whose duration is set by the rotary axis rather than by any linear one."""
+
+    travel: float  # degrees
+    rotary_seconds: float
+    linear_seconds: float
+
+
+@register_rule
+class RotaryRapidBeforePlunge(Rule):
+    """A rotary-dominated rapid immediately followed by a plunge: the corner a CV control rounds off.
+
+    Wrapped-rotary posts reposition between passes with a single `G0` that unwinds A by hundreds of
+    degrees while the linear axes travel a comparatively short distance, then plunge on the very next
+    block. The *programmed* path is safe — Z stays clear for the whole rapid, which is why every
+    geometric rule here passes it and why the viewport draws it correctly. The machine is where it goes
+    wrong: under constant-velocity blending (Mach3 CV, LinuxCNC `G64`) the control rounds the corner
+    between the two blocks and starts the descent before the rotation has finished, cutting a
+    circumferential groove that ends where the plunge finally lands.
+
+    **This is a warning about the control, not about the file**, and it is the one rule in this module
+    that reports a hazard the commanded geometry does not contain. It earns its place because the
+    failure is invisible everywhere else: no travel limit is exceeded, no rapid is below clearance, and
+    the preview is right. The first evidence is a gouge in the workpiece.
+
+    **"Rotary-dominated" is measured in seconds, not degrees.** A coordinated rapid takes as long as its
+    slowest axis, so the question is whether A is that axis — 488° at 3600 deg/min is 8.1 s against
+    110 mm at 5000 mm/min, which is 1.3 s, and only the ratio of *times* says the rapid is essentially a
+    pure rotation. Comparing degrees against millimetres would be the meaningless cross-unit norm the
+    rotary column exists to prevent, and a degree threshold would fire on a fast rotary axis and stay
+    silent on a slow one, which is backwards.
+
+    **An intervening M-code or `G4` means no finding.** Both flush a control's look-ahead, and a dwell
+    between the two blocks is precisely the remedy the message recommends — so a program that already
+    has one is not at risk and must not be told that it is.
+
+    **Every occurrence is reported**, unlike most of this module. The usual "report once, at the first
+    offending line" applies to facts about the *program* — one missing G21, one misconfigured plunge
+    rate — where the second finding tells the user nothing new. Here each finding is a different place
+    on the workpiece, at a different angle and a different Y, and the user has to go and look at each
+    one. Summarising them into a count and hiding the rest is how the second gouge goes unfound.
+    """
+
+    rule_id = "process.rotary-rapid-before-plunge"
+    description = "Rotary-dominated rapid immediately before a plunge (CV blending gouges)"
+    severity = Severity.WARNING
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        profile = program.profile
+        clearance = profile.safety.min_clearance_z
+        if clearance is None:
+            # No clearance plane configured, so there is no way to say the plunge entered material.
+            return
+        steps = list(walk(program.commands))
+        for index, (command, before, after) in enumerate(steps):
+            rapid = _rotary_dominated_rapid(command, before, after, profile)
+            if rapid is None:
+                continue
+            following = _next_moving_block(steps, index + 1)
+            if following is None:
+                continue
+            plunge, plunge_before, plunge_after = following
+            depth = _plunge_depth(plunge, plunge_before, plunge_after, clearance, profile)
+            if depth is None:
+                continue
+            units = plunge.modal_snapshot.units
+            yield Diagnostic(
+                rule_id=self.rule_id,
+                severity=Severity.WARNING,
+                line=command.ref.line_no,
+                message=(
+                    f"rapid turns A {format_angle(rapid.travel)}, which takes "
+                    f"{rapid.rotary_seconds:.1f} s at axes.a.max_rapid against "
+                    f"{rapid.linear_seconds:.1f} s of linear travel, and line {plunge.ref.line_no} "
+                    f"plunges to Z {format_length(depth, units)} immediately after. A control "
+                    f"blending the corner (Mach3 CV, or G64) starts the plunge before the rotation "
+                    f"finishes and cuts a groove around the part: use exact stop (G61) for this "
+                    f"program, or put a dwell between the two blocks"
+                ),
+                offset=command.ref.start,
+            )
+
+
+def _rotary_dominated_rapid(
+    command: Command, before: Position, after: Position, profile: MachineProfile
+) -> _RotaryRapid | None:
+    """This rapid's rotary travel and timing, when A is the axis that sets its duration.
+
+    An unconfigured `axes.a.max_rapid` disables the rule rather than defaulting a rate, matching this
+    module's convention: a missing limit is not a bound to invent.
+    """
+    if command.motion != RAPID_MOTION or not command.words:
+        return None
+    if before.a is None or after.a is None:
+        return None
+    travel = abs(after.a - before.a)
+    rotary_seconds = _axis_seconds(travel, profile, ROTARY_AXIS)
+    if rotary_seconds is None or rotary_seconds <= 0.0:
+        return None
+    linear_seconds = 0.0
+    for letter in LINEAR_AXES:
+        start, end = before.get(letter), after.get(letter)
+        if start is None or end is None:
+            continue
+        seconds = _axis_seconds(abs(end - start), profile, letter)
+        if seconds is not None:
+            linear_seconds = max(linear_seconds, seconds)
+    if rotary_seconds <= linear_seconds:
+        return None
+    return _RotaryRapid(travel=travel, rotary_seconds=rotary_seconds, linear_seconds=linear_seconds)
+
+
+def _axis_seconds(distance: float, profile: MachineProfile, letter: str) -> float | None:
+    """How long one axis needs for `distance` at its rapid rate. `None` when the rate is unknown."""
+    axis = profile.axes.get(letter)
+    if axis is None or axis.max_rapid is None or axis.max_rapid <= 0.0:
+        return None
+    return distance / axis.max_rapid * SECONDS_PER_MINUTE
+
+
+def _next_moving_block(
+    steps: list[tuple[Command, Position, Position]], start: int
+) -> tuple[Command, Position, Position] | None:
+    """The next block that actually moves, or `None` if something between it and `start` would not blend.
+
+    An M-code or a `G4` dwell flushes the control's look-ahead, so the two motions cannot be run
+    together and there is nothing to report.
+    """
+    for command, before, after in steps[start:]:
+        if command.mcodes or DWELL in command.gcodes:
+            return None
+        if AXIS_LETTERS & set(command.words):
+            return command, before, after
+    return None
+
+
+def _plunge_depth(
+    command: Command,
+    before: Position,
+    after: Position,
+    clearance: float,
+    profile: MachineProfile,
+) -> float | None:
+    """The machine Z this block plunges to, when it plunges below `clearance`, else `None`.
+
+    A `G0` descent is excluded: that is `process.rapid-below-clearance`'s finding, and a rule that
+    reported it again would double every one of them.
+    """
+    if command.motion != LINEAR_MOTION or not command.words:
+        return None
+    if not _descends_alone(before, after):
+        return None
+    z, _ = machine_value(after.z, "Z", command, profile)
+    if z is None or z >= clearance:
+        return None
+    return z
