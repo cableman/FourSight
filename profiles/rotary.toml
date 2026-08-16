@@ -27,7 +27,7 @@ centerline_offset = [0.0, 0.0, -26.0]
 [limits]
 max_feed = 3000.0
 max_spindle_rpm = 25000.0
-rotary_wrap_warn = 360.0
+rotary_wrap_warn = 3600.0
 
 [axes.y]
 min = 0.0
@@ -62,8 +62,8 @@ retract_before_toolchange = true
 
 [stock]
 shape = "cylinder"
-diameter = 52.0
-length = 150.0
+diameter = 42.8
+length = 130.0
 axis_min = 0.0
 
 # Drives the solid view only; no verifier reads it. One cutter for the whole program — there is no tool
