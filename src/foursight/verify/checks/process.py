@@ -11,12 +11,20 @@ PLAN.md § Verifier Rules, the Process group. Two conventions run through the mo
 Messages render values in the program's *declared* units: "F exceeds 3000 mm/min" against an inch
 program is not actionable.
 
-One rule here breaks the module's usual frame. `process.rotary-rapid-before-plunge` reports a hazard
-the **commanded** geometry does not contain: a rotary-dominated rapid followed straight away by a
-plunge is safe as written and is drawn correctly, but a control blending the two blocks starts the
-descent before the rotation finishes. Everything else in `verify/` judges the program; that one judges
-what the machine will make of it, which is why its message names the remedy (G61, or a dwell) rather
-than a profile key to change.
+Two rules here break the module's usual frame by reporting a hazard the **commanded** geometry does not
+contain. Everything else in `verify/` judges the program; these two judge what the machine will make of
+it, which is why their messages name a control setting rather than a line to rewrite.
+
+- `process.rotary-rapid-before-plunge` — a rotary-dominated rapid followed straight away by a plunge is
+  safe as written and is drawn correctly, but a control blending the two blocks (Mach3 CV, `G64`) starts
+  the descent before the rotation finishes.
+- `process.rotary-rapid-short-rotates` — a rapid over a half turn on a control that takes the short way
+  round stops a full turn from the commanded angle, and the next cutting block makes up the difference.
+
+They look alike and their remedies do not overlap at all. The first is a *timing* fault and a dwell or
+`G61` fixes it; the second leaves the axis **physically in the wrong place**, where no dwell helps. Both
+fire on the same blocks of a wrapped-rotary post's profile resets, so a reader who conflates them will
+apply the wrong fix and see half the gouge remain.
 """
 
 from collections.abc import Iterable
@@ -683,6 +691,212 @@ def _plunge_depth(
     if command.motion != LINEAR_MOTION or not command.words:
         return None
     if not _descends_alone(before, after):
+        return None
+    z, _ = machine_value(after.z, "Z", command, profile)
+    if z is None or z >= clearance:
+        return None
+    return z
+
+
+#: Half and whole turns. A `G0` commanding a short-rotating axis further than `HALF_TURN` is where the
+#: control's choice stops agreeing with the commanded angle. `_ANGLE_EPSILON` only guards the exact
+#: half-turn comparison against decimal noise in the parsed word; it is not a tolerance to tune.
+HALF_TURN = 180.0
+FULL_TURN = 360.0
+_ANGLE_EPSILON = 1e-9
+
+
+@register_rule
+class RotaryRapidShortRotates(Rule):
+    """A `G0` over a half turn on a control that takes the short way round: it lands somewhere else.
+
+    Mach3's "Ang Short Rot on G0" (`<ShortRot>1<`) and its equivalents make a rapid reach the commanded
+    angle by the shorter of the two directions. Below a half turn that is the same place the program
+    asked for. Above it, the control goes the other way and **stops a full turn from the commanded
+    angle** — and reports that as its position. The next block that commands an absolute angle for the
+    axis is not short-rotated, so it makes up the whole turn; if that block is cutting, it cuts a
+    complete circle around the part.
+
+    Observed on a Vectric wrapped-rotary program whose passes sit at A0, A-90, A-180 and A-270. Every
+    rapid *within* a pass turns exactly 90 deg, so the control's choice agrees and nothing drifts. The
+    profile-reset rapid — `G00 A0.000` from A-270, a 270 deg move — is the only one over a half turn: it
+    stopped at A-360, and the following `G1 A0.000 Z-12.000` then unwound a full revolution while
+    descending, cutting a ring around the blank at the pass start.
+
+    **This is the second rule that judges the control rather than the program**, and it is the reason
+    `axes.a.short_rotate` exists: the setting appears nowhere in the G-code, so only the profile can
+    say the control does this. It differs from its sibling
+    `process.rotary-rapid-before-plunge` in the one way that matters for the fix — **nothing flushes
+    it.** A dwell or an M-code between the blocks defeats CV blending and does absolutely nothing here,
+    because the axis is *physically in the wrong place*, not merely early. `G61` does not help either.
+    The remedies are to clear the setting, or to keep the axis monotonic so no rapid exceeds a half turn.
+
+    **It stays a warning.** It fires three times on ordinary, correct Vectric post output, so promoting
+    it to `error` would make `foursight check` exit 1 on programs the user cannot reasonably be asked to
+    hand-edit — the `geometry.rapid-into-stock` argument exactly. It is also the *control* that is
+    misconfigured here, not the file.
+
+    **The last finding has no following block, and it is not the least important one.** A program that
+    ends on a short-rotated rapid leaves the axis a full turn from the angle the DRO shows, so the *next*
+    run starts out of phase and gouges near its beginning instead of its middle. Dropping that case for
+    lack of a consequence to name would hide the one occurrence that repeats.
+
+    **An exact half turn is a tie**, resolved by a rule inside the control that is not in the G-code —
+    both directions are 180 deg and they land a full turn apart. A two-pass wrapped program resetting
+    `A0` from `A-180` is exactly that, so it is reported rather than assumed safe, and the message says
+    the landing may be either.
+    """
+
+    rule_id = "process.rotary-rapid-short-rotates"
+    description = "Rapid over a half turn where the control short-rotates: lands a full turn out"
+    severity = Severity.WARNING
+
+    def check(self, program: Program) -> Iterable[Diagnostic]:
+        profile = program.profile
+        axis = profile.axes.get(ROTARY_AXIS)
+        if axis is None or not axis.short_rotate:
+            # Not declared, so not assumed. A control that honours absolute angles has no such hazard,
+            # and inventing the setting would report gouges on machines that cannot produce them.
+            return
+        steps = list(walk(program.commands))
+        machine: float | None = None  # where the axis physically is, which is not always after.a
+        for index, (command, before, after) in enumerate(steps):
+            if machine is None:
+                machine = before.a
+            if ROTARY_AXIS not in command.words or after.a is None:
+                continue
+            target = after.a
+            if command.motion != RAPID_MOTION or machine is None:
+                machine = target  # anything but a rapid honours the commanded angle exactly
+                continue
+            reached, tie = _short_rotation(target, machine)
+            if reached != target or tie:
+                yield self._finding(command, steps, index, machine, target, reached, tie, profile)
+            machine = reached
+
+    def _finding(
+        self,
+        command: Command,
+        steps: list[tuple[Command, Position, Position]],
+        index: int,
+        machine: float,
+        target: float,
+        reached: float,
+        tie: bool,
+        profile: MachineProfile,
+    ) -> Diagnostic:
+        travel = abs(target - machine)
+        cause = (
+            f"rapid commands A {format_angle(target)} from {format_angle(machine)}, a "
+            f"{format_angle(travel)} move"
+        )
+        if tie:
+            cause += (
+                "; exactly a half turn, so which way axes.a.short_rotate sends the control is its own "
+                f"tie-break and it may stop at {format_angle(reached)} instead of the commanded angle"
+            )
+        else:
+            cause += (
+                f"; axes.a.short_rotate says the control takes the short way round, so it stops at "
+                f"{format_angle(reached)} instead"
+            )
+        return Diagnostic(
+            rule_id=self.rule_id,
+            severity=Severity.WARNING,
+            line=command.ref.line_no,
+            message=(
+                f"{cause}, {_unwind_clause(steps, index + 1, reached, profile)}. A dwell or G61 does "
+                f"not help: the axis is in the wrong place, not merely early. Clear "
+                f"axes.a.short_rotate if the control honours absolute angles, or keep A monotonic so "
+                f"no rapid exceeds a half turn"
+            ),
+            offset=command.ref.start,
+        )
+
+
+def _short_rotation(target: float, machine: float) -> tuple[float, bool]:
+    """Where a control taking the short way round stops, and whether the two directions tie.
+
+    `round` breaks a tie toward even, which is not any control's rule, so the tie is reported
+    separately and named as the landing the program does *not* expect — the recoverable direction,
+    since a warning about a turn that does not happen costs less than silence about one that does.
+    """
+    delta = target - machine
+    tie = abs(abs(delta) - HALF_TURN) < _ANGLE_EPSILON
+    turns = (1 if delta > 0 else -1) if tie else round(delta / FULL_TURN)
+    return target - FULL_TURN * turns, tie
+
+
+def _unwind_clause(
+    steps: list[tuple[Command, Position, Position]],
+    start: int,
+    reached: float,
+    profile: MachineProfile,
+) -> str:
+    """What the next block commanding the axis will therefore do.
+
+    Only one block ahead is examined. A chain of rapids each short-rotating in turn needs no deeper
+    look, because the loop in `check` carries the physical position forward and every link reports
+    itself; going deeper here would only duplicate those findings inside each other's messages.
+    """
+    following = _next_rotary_block(steps, start)
+    if following is None:
+        return (
+            "and nothing after it commands A again, so the program ends a full turn from the angle "
+            "it reports and the next run starts out of phase"
+        )
+    command, _, after = following
+    line, target = command.ref.line_no, after.a
+    if target is None:
+        return f"and line {line} commands A from a position that is not established"
+    if command.motion == RAPID_MOTION:
+        return (
+            f"and line {line} is another rapid, which short-rotates from there in turn rather than "
+            f"making the turn up"
+        )
+    travel = abs(target - reached)
+    depth = _cutting_depth(command, after, profile)
+    if depth is not None:
+        units = command.modal_snapshot.units
+        return (
+            f"and line {line} then commands A {format_angle(target)} at feed with Z at "
+            f"{format_length(depth, units)}, below clearance: the axis makes up "
+            f"{format_angle(travel)} while in the material, cutting a full circle around the part"
+        )
+    if command.motion in CUTTING_MOTIONS:
+        return (
+            f"and line {line} then commands A {format_angle(target)} at feed, making up "
+            f"{format_angle(travel)} at cutting speed"
+        )
+    return (
+        f"and line {line} then commands A {format_angle(target)}, making up {format_angle(travel)}"
+    )
+
+
+def _next_rotary_block(
+    steps: list[tuple[Command, Position, Position]], start: int
+) -> tuple[Command, Position, Position] | None:
+    """The next block that commands the rotary axis.
+
+    Deliberately *not* stopped by an M-code or a `G4`, unlike `_next_moving_block`. Those flush a
+    control's look-ahead, which is what makes them a remedy for CV blending; a short-rotated axis is
+    standing in the wrong place and will still be standing there after any dwell.
+    """
+    for command, before, after in steps[start:]:
+        if ROTARY_AXIS in command.words:
+            return command, before, after
+    return None
+
+
+def _cutting_depth(command: Command, after: Position, profile: MachineProfile) -> float | None:
+    """This block's machine Z, when it cuts at or below clearance. `None` when it does not, or unknown.
+
+    An unset `[safety].min_clearance_z` yields `None` rather than a guessed plane: the drift is
+    reported either way, and only the wording that claims the tool is in material depends on knowing
+    where material starts.
+    """
+    clearance = profile.safety.min_clearance_z
+    if clearance is None or command.motion not in CUTTING_MOTIONS:
         return None
     z, _ = machine_value(after.z, "Z", command, profile)
     if z is None or z >= clearance:

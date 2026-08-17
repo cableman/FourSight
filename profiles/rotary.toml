@@ -47,6 +47,17 @@ max_rapid = 3000.0
 type = "rotary"
 wrap = true
 max_rapid = 3600.0
+# Both Mach3 profiles for this machine have `<ShortRot>1<` — "Ang Short Rot on G0" is on, so a rapid
+# takes the shorter of the two directions. Verified in Rotary.xml and Mach3Mill.xml, not assumed. Above
+# a half turn the short way is a *different place*: the axis stops a full turn from the commanded angle
+# and reports that, then the next cutting block makes the turn up while in the material. That is what
+# cut a ring round the blank at each profile reset in `Sprial-4--130-43-8mm_1-3`, where the resets are
+# `G00 A0.000` from A-270 — the only rapids in the file over 180 deg.
+#
+# Set this to match the machine, not to silence the rule. Clearing the Mach3 checkbox is the better fix:
+# the Vectric wrapped post emits A unwrapped, down past -667 deg, which assumes a control that honours
+# absolute angles. Leave it true while the checkbox is on.
+short_rotate = true
 
 [tolerance]
 arc_radius_mismatch = 0.005

@@ -302,8 +302,8 @@ def test_every_axis_key_is_editable_on_every_axis() -> None:
         for key in _AXIS_KEYS:
             if key == "type":
                 continue  # implied by the axis: the form has no reason to let A become linear
-            if key == "wrap" and axis != "a":
-                continue  # a linear axis does not wrap
+            if key in {"wrap", "short_rotate"} and axis != "a":
+                continue  # a linear axis neither wraps nor has an equivalent angle a turn away
             assert (f"axes.{axis}", key) in editable, f"axes.{axis}.{key}"
 
 

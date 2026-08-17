@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M13 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1730 tests**
-(1686 passed + 1 skipped without `test_dialect.py`, 43 in it).
+**M0–M14 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1752 tests**
+(1708 passed + 1 skipped without `test_dialect.py`, 43 in it).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -13,7 +13,7 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1669) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1709) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
@@ -219,8 +219,29 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under
   `blockSignals`. And `advance` takes the wall step as an **argument** rather than reading a clock, which is
   what lets every playback test run frame by frame without sleeping.
-- **Exactly one rule judges the control rather than the program, and it must stay a warning.**
-  `process.rotary-rapid-before-plunge` (M13) reports a `G0` whose duration is set by the rotary axis
+- **Exactly two rules judge the control rather than the program, both must stay warnings, and their
+  remedies do not overlap.** They fire on the *same blocks* of a wrapped-rotary post's profile resets, so
+  conflating them sends the user to apply the wrong fix and watch half the gouge survive. This is not
+  hypothetical: `G61` was applied to a real job, removed the groove inside each profile, and left the one
+  between profiles exactly as it was, because that one was never a blending fault.
+  `process.rotary-rapid-before-plunge` (M13) is a **timing** fault — a dwell or `G61` fixes it.
+  `process.rotary-rapid-short-rotates` (M14) leaves the axis **physically in the wrong place**, where no
+  dwell, M-code or `G61` helps at all. If you add a look-ahead-flush exemption to one, do not copy it to
+  the other: `_next_moving_block` stops at an M-code or `G4` and `_next_rotary_block` deliberately does
+  not, and `test_a_dwell_does_not_suppress_this_rule` is the paired assertion that keeps them apart.
+- **M14's rule tracks the *physical* rotary position, never the modelled one.** Under `short_rotate` a
+  `G0` past a half turn stops a full turn from the commanded angle and reports that as its position, so
+  the block that cuts is typically `G1 A0.000` when the program already has A at 0 — **no programmed
+  rotation at all**, and a rule keyed on a change in `after.a` reports the gouge nowhere. Keying off
+  `"A" in command.words` is what makes it visible. The drift also propagates: a rapid whose programmed
+  travel is 90° is a 270° move from a machine already a turn out, so the position is carried block to
+  block rather than recomputed. `[axes.a].short_rotate` **requires `wrap`** and is refused otherwise —
+  landing a full turn away is only the same place if the axis wraps — and it lives on the axis rather than
+  in `[dialect]` because it is a per-machine checkbox, not a property of the language, and `parser/` must
+  never learn about it. An exact half turn is reported as a **tie** rather than assumed harmless: both
+  directions are 180° and land a full turn apart, and a two-pass wrapped program resetting A0 from A-180
+  is that case.
+- `process.rotary-rapid-before-plunge` (M13) reports a `G0` whose duration is set by the rotary axis
   followed straight away by a plunge. The commanded path is *safe* — Z is at clearance for the whole
   rapid, every limit holds, the viewport draws it correctly — and a machine still cut a groove around
   the bar, because constant-velocity blending (Mach3 CV, `G64`) starts the descent before the rotation

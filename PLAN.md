@@ -439,6 +439,8 @@ wrap = true                 # 0-360 wraparound; when false, min/max below are en
 min = -360.0
 max = 360.0
 max_rapid = 3600.0          # deg/min
+short_rotate = false        # control takes the SHORT way round on G0 (Mach3 "Ang Short Rot on G0").
+                            # Describes the control, not the axis, and needs wrap. See M14 above.
 
 # Work offsets are NOT in the G-code file — they live in the controller. Without them
 # the travel-limit check cannot run in machine coordinates. Any offset left unset makes
@@ -681,9 +683,13 @@ it. T2.2 extends it for simulation; T2.8 re-runs limit checks over interpolated 
   the program. `feed-too-high` and `spindle-too-high` report per offending word, since each is a
   separate programming decision to change.
 - Coolant state is tracked inside its rule rather than added to `ModalState`; nothing else needs it.
-- **One rule here judges the control rather than the program.** `process.rotary-rapid-before-plunge`
-  (M13) reports a hazard the commanded geometry does not contain — see § CV blending below — which is
-  why its message names a control setting as the remedy instead of a profile key.
+- **Two rules here judge the control rather than the program.** `process.rotary-rapid-before-plunge`
+  (M13) and `process.rotary-rapid-short-rotates` (M14) each report a hazard the commanded geometry does
+  not contain — see § CV blending and § Short rotation below — which is why their messages name a
+  control setting as the remedy instead of a profile key. They fire on the same blocks of a
+  wrapped-rotary post's profile resets and their remedies do not overlap at all, which is the one thing
+  a reader must not get wrong: the first is a timing fault a dwell or `G61` fixes, the second leaves the
+  axis standing in the wrong place, where no dwell helps.
 
 #### CV blending and the rotary reposition (M13)
 
@@ -725,6 +731,49 @@ one reason: nothing else can see it. It is placed carefully to stay honest —
   geometry, and resting that on an assumed position would stack a second guess under the first.
 - **A warning, and it can never be more.** Whether the control blends is not knowable from the
   G-code. The rule says the corner is there; the machine decides what to do with it.
+
+#### Short rotation on a rapid (M14)
+
+**`process.rotary-rapid-short-rotates`** — a `G0` commanding the rotary axis further than a half turn,
+on a control configured to reach the angle the shorter way round. Found on the same machine and the same
+job as the rule above, *after* exact stop had fixed that one: the groove inside each profile disappeared
+and the one between profiles did not.
+
+Mach3's "Ang Short Rot on G0" (`<ShortRot>1<` in the profile XML) makes a rapid take the shorter of the
+two directions. Under a half turn that is the place the program asked for. Over it, the control goes the
+other way and **stops a full turn from the commanded angle**, reporting that as its position. The next
+block commanding an absolute angle is not short-rotated, so it makes the whole turn up — and if that
+block is cutting, it cuts a complete circle around the part.
+
+The evidence, from a Vectric wrapped post with passes at A0, A-90, A-180 and A-270: every rapid within a
+pass steps exactly 90°, so the control's choice agrees and nothing drifts. The profile reset,
+`G00 A0.000` from A-270, is the only rapid over a half turn — and `<Rot360>0<` in the same profile is why
+the machine's DRO showed A-360 rather than hiding it at 0.
+
+- **The setting appears nowhere in the G-code**, so `[axes.a].short_rotate` exists to state it, and an
+  undeclared setting disables the rule outright. It **requires `wrap`** on the same axis: short-rotating
+  means landing a full turn from the commanded angle, which is only the *same place* if the axis wraps.
+  Both the linear-axis and the non-wrapping cases are refused by the loader rather than half-honoured.
+- **Physical position is tracked, not the modelled one.** The block that cuts is often
+  `G1 A0.000` when the program already has A at 0 — no programmed rotation at all. A rule keyed on a
+  change in the modelled position sees nothing there and reports the gouge nowhere. The drift also
+  changes later findings: a rapid whose *programmed* travel is 90° can be a 270° move from a machine
+  that is already a turn out.
+- **Nothing flushes it**, unlike its sibling. A `G4` or an M-code defeats CV blending and does
+  absolutely nothing here, and neither does `G61`. A paired test asserts the dwell satisfies
+  `rotary-rapid-before-plunge` and leaves this rule firing, so the two can never be merged.
+- **An exact half turn is reported as a tie.** Both directions are 180° and they land a full turn apart,
+  so the control's choice is its own rule and is not in the G-code. A two-pass wrapped program resetting
+  A0 from A-180 is exactly that case, and assuming it goes the harmless way would be the confident guess
+  this plan forbids.
+- **A program ending on a short-rotated rapid is still reported**, with no consequence to name. It is
+  the occurrence that *repeats*: the axis is left a full turn from the angle the DRO shows, so the next
+  run starts out of phase and gouges near its beginning.
+- **A warning, and it stays one.** It fires three times on ordinary, correct Vectric post output;
+  `error` would make `foursight check` exit 1 on programs the user cannot reasonably hand-edit — the
+  `geometry.rapid-into-stock` argument. It is the control that is misconfigured, not the file. There is
+  no fix, for the same reason: the remedies are a checkbox in the control, or a post that emits the axis
+  monotonically so no rapid ever exceeds a half turn.
 
 ### Geometry checks (T1.9)
 
@@ -912,9 +961,13 @@ Severity per the taxonomy above.
 - [x] W: Straight-down G1 plunge above `limits.max_plunge_feed` — `process.plunge-feed-too-high` (M7).
   Z-only moves only: a block with XY motion is a ramp, and ramping in at the contouring feed is normal.
 - [x] W: Rotary-dominated rapid immediately before a plunge — `process.rotary-rapid-before-plunge`
-  (M13). The one rule here about the *control* rather than the program: the path as written is safe,
+  (M13). One of two rules here about the *control* rather than the program: the path as written is safe,
   but a control blending the corner starts the plunge before the rotation finishes and cuts a groove
   around the part. Reported per occurrence — each is a different place on the part to go and inspect.
+- [x] W: Rapid over a half turn where the control short-rotates —
+  `process.rotary-rapid-short-rotates` (M14). The other control rule, and the one whose remedy is *not*
+  a dwell: the axis stops a full turn from the commanded angle, and the next cutting block makes the
+  turn up in the material. Gated on `[axes.a].short_rotate`, which the G-code cannot state.
 - [ ] W: G91 active at program end
 - [ ] W: Program lacks M2/M30
 - [x] W: `G4 P` over 60 s under a seconds dialect (likely ms/s confusion) — `process.dwell-units-suspect`

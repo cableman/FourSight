@@ -82,6 +82,16 @@ min = -360.0
 max = 360.0
 max_rapid = 3600.0 # deg/min
 
+# The next key describes the CONTROL, not the axis, and it appears nowhere in the G-code — only this
+# file can state it. Mach3's "Ang Short Rot on G0" (<ShortRot>1< in the profile XML), and equivalents
+# elsewhere, make a rapid reach the commanded angle by the shorter of the two directions. Under a half
+# turn that is the place the program asked for. Over a half turn it is not: the axis stops a full turn
+# away and reports that as its position, and the next block commanding an absolute angle makes the
+# whole turn up — cutting a complete circle round the part if it happens to be in the material.
+# Reported by process.rotary-rapid-short-rotates. Needs wrap, since the premise is that an angle and
+# that angle plus a turn are the same place. Set it to match the machine, not to quieten the rule.
+short_rotate = false
+
 # Work offsets are NOT in the G-code file — they live in the controller. Without them the
 # travel-limit check cannot run in machine coordinates, so any offset left unset makes limit
 # violations WARNINGS ("assumes zero offset") rather than errors.

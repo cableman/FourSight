@@ -629,3 +629,196 @@ def test_an_unestablished_rotary_position_is_not_judged(profile) -> None:
 def test_the_baseline_program_is_not_reported(profile) -> None:
     """Its only rotary moves are G1, so there is no rapid-to-plunge corner to blend."""
     assert not of(diagnose(fixture_text("baseline_4axis.nc"), profile), RULE)
+
+
+# ---------------------------------------- a rapid over a half turn on a short-rotating control
+
+SHORT_ROT_RULE = "process.rotary-rapid-short-rotates"
+
+# The same rates as `CV_PROFILE`, plus the setting this rule exists for. Kept separate rather than
+# derived, so a test can drop `short_rotate` without also disturbing the sibling rule's fixture.
+SHORT_ROT_PROFILE = """
+[machine]
+units = "mm"
+[axes.x]
+max_rapid = 5000.0
+[axes.z]
+max_rapid = 3000.0
+[axes.a]
+type = "rotary"
+wrap = true
+max_rapid = 3600.0
+short_rotate = true
+[safety]
+min_clearance_z = 5.0
+"""
+
+# The shape observed on the machine, reduced to four blocks. A `G1` establishes A-270 exactly (a feed
+# move is never short-rotated), the `G0 A0` asks for 270 deg and so stops at A-360, and the plunge then
+# makes up a full revolution while below clearance. Lines 3-6 of the assembled program.
+SHORT_ROT_GOUGE = "G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nG1 A0 Z-5 F100\n"
+
+
+@pytest.fixture(scope="module")
+def short_rot():
+    return load_profile_text(SHORT_ROT_PROFILE)
+
+
+def _sr(body: str, profile):
+    return of(diagnose("G21 G90 G17 G94 G54\nS8000 M3\n" + body + "M30\n", profile), SHORT_ROT_RULE)
+
+
+def test_a_rapid_over_a_half_turn_is_reported(short_rot) -> None:
+    found = _sr(SHORT_ROT_GOUGE, short_rot)
+    assert len(found) == 1
+    assert found[0].severity is Severity.WARNING
+    assert found[0].line == 5, "anchored at the rapid that lands in the wrong place"
+    assert "line 6" in found[0].message, "and naming the block that makes the turn up"
+
+
+def test_the_message_names_where_the_axis_actually_stops(short_rot) -> None:
+    """The whole finding is that -360 is not 0, so the message is useless without both numbers."""
+    message = _sr(SHORT_ROT_GOUGE, short_rot)[0].message
+    assert "-360 deg" in message, "where it stops"
+    assert "270 deg move" in message, "what was asked for"
+    assert "360 deg while in the material" in message, "and what that costs"
+
+
+def test_the_message_does_not_offer_a_dwell_or_g61(short_rot) -> None:
+    """The distinction from `rotary-rapid-before-plunge`, and the one a reader will get wrong.
+
+    That rule's remedy is exact stop or a dwell. Here the axis is standing a full turn from where it
+    reports, and no amount of look-ahead flushing moves it — offering the same fix would send the user
+    to add a `G4` and watch the gouge survive it.
+    """
+    message = _sr(SHORT_ROT_GOUGE, short_rot)[0].message
+    assert "does not help" in message
+    assert "short_rotate" in message, "the setting to clear"
+    assert "monotonic" in message, "or the way to write around it"
+
+
+def test_an_undeclared_setting_disables_the_check() -> None:
+    """A control that honours absolute angles has no such hazard, and the G-code cannot say which."""
+    honest = load_profile_text(SHORT_ROT_PROFILE.replace("short_rotate = true", ""))
+    assert _sr(SHORT_ROT_GOUGE, honest) == []
+
+
+def test_a_rapid_under_a_half_turn_is_not_reported(short_rot) -> None:
+    """The short way and the commanded way are the same place, which is the ordinary case."""
+    assert _sr("G0 X0 Z10\nG1 A-90 F1000\nG0 A0\nG1 A0 Z-5 F100\n", short_rot) == []
+
+
+def test_a_wrapped_pass_sequence_reports_only_the_reset(short_rot) -> None:
+    """Why the machine cut cleanly for three passes and then gouged.
+
+    Passes at A0, A-90, A-180 and A-270 step by exactly 90 deg, so every rapid within the sequence
+    agrees with the control's choice. Only the reset back to A0 crosses a half turn.
+    """
+    # One pass as the post emits it: step A by 90 deg, plunge, spiral out, spiral back to the pass
+    # angle, retract. The spiral is a pair of G1s, so A returns to `target` exactly and the next
+    # rapid is another 90 deg step.
+    body = "G0 X0 Z10\nG1 A0 F1000\n" + "".join(
+        f"G0 A{target}\nG1 A{target} Z-5 F100\nG1 A{target - 400} F1000\n"
+        f"G1 A{target} F1000\nG0 Z10\n"
+        for target in (-90, -180, -270)
+    )
+    assert _sr(body, short_rot) == [], "every rapid steps 90 deg; the spirals are feed moves"
+    assert len(_sr(body + "G0 A0\nG1 A0 Z-5 F100\n", short_rot)) == 1, "the reset is 270 deg"
+
+
+def test_a_feed_move_over_a_half_turn_is_not_reported(short_rot) -> None:
+    """Only rapids are short-rotated; a G1 goes to the angle it was given."""
+    assert _sr("G0 X0 Z10\nG1 A-270 F1000\nG1 A0 F1000\nG1 A0 Z-5 F100\n", short_rot) == []
+
+
+def test_a_block_that_commands_the_axis_without_moving_it_still_counts(short_rot) -> None:
+    """The crux, and what a position-delta implementation would miss.
+
+    In `SHORT_ROT_GOUGE` the plunge is `G1 A0` when the *program* already has A at 0 — no programmed
+    rotation at all. The machine is at -360, so that block turns a full revolution. A rule keyed on a
+    change in the modelled position sees nothing here and reports the gouge nowhere.
+    """
+    found = _sr(SHORT_ROT_GOUGE, short_rot)
+    assert len(found) == 1
+    assert "line 6" in found[0].message, "the A0 block that looks like it holds station"
+
+
+def test_the_physical_position_is_tracked_across_blocks(short_rot) -> None:
+    """A second rapid whose *programmed* travel is only 90 deg, from a machine that is a turn out.
+
+    Programmed, line 6 goes A0 -> A-90. Physically it starts at -360, so it turns 270 deg and short-
+    rotates again. Judging the modelled delta would clear this block, and the drift it leaves behind
+    would then never be reported at all.
+    """
+    body = "G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nG0 A-90\nG1 A-90 Z-5 F100\n"
+    found = _sr(body, short_rot)
+    assert [d.line for d in found] == [5, 6]
+    assert "-450 deg" in found[1].message, "a second full turn out, not back in phase"
+
+
+def test_a_following_rapid_is_named_as_one(short_rot) -> None:
+    """It short-rotates from the drifted position in turn, so it does not make the turn up."""
+    body = "G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nG0 A-90\nG1 A-90 Z-5 F100\n"
+    assert "another rapid" in _sr(body, short_rot)[0].message
+
+
+def test_an_unwind_above_the_clearance_plane_claims_no_material(short_rot) -> None:
+    """The turn still happens and still desynchronises the axis; it just cuts nothing."""
+    message = _sr("G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nG1 A0 Z10 F100\n", short_rot)[0].message
+    assert "in the material" not in message
+    assert "cutting speed" in message
+
+
+def test_a_dwell_does_not_suppress_this_rule(short_rot) -> None:
+    """The paired assertion that keeps the two rotary rules from being merged.
+
+    `G4` is the remedy for CV blending and silences `rotary-rapid-before-plunge`. It does nothing for a
+    axis parked a full turn from the commanded angle, and this rule must go on saying so.
+    """
+    body = "G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nG4 P1\nG1 A0 Z-5 F100\n"
+    diagnostics = diagnose("G21 G90 G17 G94 G54\nS8000 M3\n" + body + "M30\n", short_rot)
+    assert of(diagnostics, RULE) == [], "the blending rule is satisfied by the dwell"
+    assert len(of(diagnostics, SHORT_ROT_RULE)) == 1, "the position is still wrong"
+
+
+def test_an_m_code_does_not_suppress_this_rule(short_rot) -> None:
+    body = "G0 X0 Z10\nG1 A-270 F1000\nG0 A0\nM8\nG1 A0 Z-5 F100\n"
+    assert len(_sr(body, short_rot)) == 1
+
+
+def test_a_program_ending_on_a_short_rotated_rapid_is_reported(short_rot) -> None:
+    """No consequence to name, and the occurrence that repeats: the *next* run starts out of phase."""
+    found = _sr("G0 X0 Z10\nG1 A-270 F1000\nG0 Z20\nG0 A0\n", short_rot)
+    assert len(found) == 1
+    assert "next run" in found[0].message
+    assert "nothing after it commands A" in found[0].message
+
+
+def test_an_exact_half_turn_is_reported_as_a_tie(short_rot) -> None:
+    """A two-pass wrapped program resets A0 from A-180, and 180 deg is 180 deg either way round.
+
+    Both landings are equally short and they are a full turn apart, so which one the control picks is
+    its own rule and is not in the G-code. Reported, with the message saying so, rather than assumed
+    to go the harmless way.
+    """
+    found = _sr("G0 X0 Z10\nG1 A-180 F1000\nG0 A0\nG1 A0 Z-5 F100\n", short_rot)
+    assert len(found) == 1
+    assert "tie-break" in found[0].message
+    assert "may stop at -360 deg" in found[0].message
+
+
+def test_the_direction_of_the_short_cut_follows_the_commanded_direction(short_rot) -> None:
+    """The mirror image: asking for -270 from 0 stops at +90, not -630."""
+    found = _sr("G0 X0 Z10\nG1 A0 F1000\nG0 A-270\nG1 A-270 Z-5 F100\n", short_rot)
+    assert len(found) == 1
+    assert "stops at 90 deg" in found[0].message
+
+
+def test_an_unestablished_rotary_position_is_not_judged_by_this_rule(short_rot) -> None:
+    """The first A command comes from an unknown angle, so there is no travel to measure."""
+    assert _sr("G0 X0 Z10\nG0 A0\nG1 A0 Z-5 F100\n", short_rot) == []
+
+
+def test_the_baseline_program_is_not_reported_by_this_rule(short_rot) -> None:
+    """Baseline plus one mutation: the clean fixture must stay clean under a new rule."""
+    assert not of(diagnose(fixture_text("baseline_4axis.nc"), short_rot), SHORT_ROT_RULE)

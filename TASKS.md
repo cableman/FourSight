@@ -2165,7 +2165,50 @@ guess about their CV settings is exactly the confidently-wrong output the projec
 
 ---
 
-**Project status: M0–M13 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M14 — The short-rotation warning
+
+The same machine and the same job as M13, *after* T13.1's remedy had been applied. `G61` removed the
+groove inside each of the three profiles and left the one **between** profiles untouched — so the second
+gouge was never a blending artifact at all. The control's DRO read **A-360** where the program said A0,
+and the block that cut was `G1 A0.000 Z-12.000`: a full commanded revolution, at feed, into the material.
+Confirmed against the machine's own Mach3 XML (`<ShortRot>1<`, `<Rot360>0<`), not inferred. See `PLAN.md`
+§ Short rotation on a rapid.
+
+- [x] **T14.1 — `[axes.a].short_rotate`.** A per-axis boolean stating that the control reaches a rapid's
+      commanded angle the shorter way round. It goes on the axis rather than in `[dialect]` for two
+      reasons: it is a per-machine checkbox, not a property of the language, so it cannot key off the
+      dialect *name*; and `parser/` never reads it, so putting it in `Dialect` would add a field to the
+      layer that must not know about machines. **Requires `wrap` on the same axis**, refused by the
+      loader otherwise — short-rotating means landing a full turn from the commanded angle, and that is
+      only the same place if the axis wraps. Refused on a linear axis for the same reason. Documented in
+      `default_4axis.toml` as an explicit `false`, because a required BOOL absent from the shipped
+      profile makes the profile editor dirty the moment it opens.
+      Files: `src/foursight/machine/profile.py`, `src/foursight/machine/profile_schema.py`,
+      `src/foursight/profiles/default_4axis.toml`, `profiles/rotary.toml`, `tests/test_profile.py`,
+      `tests/test_profile_doc.py`
+
+- [x] **T14.2 — `process.rotary-rapid-short-rotates`.** A `G0` commanding the rotary axis further than a
+      half turn, when `short_rotate` is set. **Tracks the physical position, not the modelled one** —
+      the block that cuts is usually `A0.000` when the program already has A at 0, so a rule keyed on a
+      change in the modelled position reports the gouge nowhere; and the drift changes later findings,
+      since a programmed 90° rapid is a 270° move from a machine already a turn out. **Nothing flushes
+      it**: a `G4` or an M-code is the remedy for M13 and does nothing here, asserted by a paired test
+      that shows the dwell satisfying `rotary-rapid-before-plunge` while this rule goes on firing.
+      An **exact half turn is reported as a tie** — both ways are 180° and land a full turn apart, and a
+      two-pass wrapped program resetting A0 from A-180 is exactly that. A program **ending** on a
+      short-rotated rapid is reported with no consequence to name, because it is the occurrence that
+      repeats into the next run. Warning only: it fires three times on correct Vectric output, so `error`
+      would exit 1 on programs nobody can hand-edit.
+      Files: `src/foursight/verify/checks/process.py`, `tests/test_checks_process.py`
+
+**Deliberately not built.** No fix, and for a stronger reason than M13's. The remedies are a checkbox in
+the control, or a post processor that emits the axis monotonically — neither is a text transform of the
+program, and unwrapping A across toolpaths changes every angle in the file on the strength of a setting
+we were *told* about rather than measured.
+
+---
+
+**Project status: M0–M14 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

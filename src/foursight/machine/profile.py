@@ -85,7 +85,7 @@ _KEYS: dict[str, frozenset[str]] = {
         {"min_clearance_z", "require_spindle_before_cut", "retract_before_toolchange"}
     ),
 }
-_AXIS_KEYS = frozenset({"type", "min", "max", "max_rapid", "wrap", "home"})
+_AXIS_KEYS = frozenset({"type", "min", "max", "max_rapid", "wrap", "home", "short_rotate"})
 
 
 class ProfileError(Exception):
@@ -110,6 +110,13 @@ class AxisLimits:
     # then not drawn at all rather than drawn to a guessed point — the reference point is
     # machine-specific and appears nowhere in the G-code.
     home: float | None = None
+    # The control takes the *short* way round on a G0 to this axis — Mach3's "Ang Short Rot on G0"
+    # (`<ShortRot>1<` in the profile XML), and the equivalent elsewhere. It is a machine setting and
+    # appears nowhere in the G-code, so only the profile can state it. A control that does this lands
+    # 360 deg from the commanded angle whenever the commanded move exceeds a half turn, which is what
+    # `process.rotary-rapid-short-rotates` reports. Requires `wrap`: the whole premise is that this
+    # angle and that angle plus 360 are the same physical place, and `wrap` is what asserts that.
+    short_rotate: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -550,6 +557,7 @@ def _axes(section: dict, scale: float, unknown: list[str]) -> dict[str, AxisLimi
             max_rapid=_scaled(body.get("max_rapid"), axis_scale),
             wrap=bool(body.get("wrap", False)),
             home=_scaled(body.get("home"), axis_scale),
+            short_rotate=bool(body.get("short_rotate", False)),
         )
     return axes
 
@@ -684,6 +692,33 @@ def _validate(profile: MachineProfile) -> None:
     for axis in profile.axes.values():
         if axis.min is not None and axis.max is not None and axis.min > axis.max:
             raise ProfileError(f"[axes.{axis.name.lower()}] min {axis.min} exceeds max {axis.max}")
+        _validate_short_rotate(axis)
+
+
+def _validate_short_rotate(axis: AxisLimits) -> None:
+    """`short_rotate` needs a wrapping rotary axis, or it describes nothing we can reason about.
+
+    Refused rather than ignored, both ways round. On a linear axis the setting is meaningless — there
+    is no equivalent position 360 units away. On a rotary axis that does *not* wrap, the premise fails
+    for a subtler reason: short-rotating means arriving at an angle the program never asked for, and
+    without `wrap` that angle is subject to travel limits which the control would then be violating.
+    Which of those two a real machine does is not something we can invent, and a rule that guessed
+    would report gouges at angles the axis cannot reach.
+    """
+    if not axis.short_rotate:
+        return
+    name = axis.name.lower()
+    if not axis.is_rotary:
+        raise ProfileError(
+            f"[axes.{name}].short_rotate applies only to a rotary axis: there is no equivalent "
+            f"position a full turn away on a linear one"
+        )
+    if not axis.wrap:
+        raise ProfileError(
+            f"[axes.{name}].short_rotate requires wrap = true on the same axis: taking the short "
+            f"way round means landing a full turn from the commanded angle, which is only the same "
+            f"place if the axis wraps"
+        )
 
 
 def _number(value: object) -> float:

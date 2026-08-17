@@ -336,6 +336,39 @@ def test_axis_min_above_max_is_refused() -> None:
         load_profile_text(MINIMAL + "\n[axes.x]\nmin = 10.0\nmax = 1.0\n")
 
 
+def test_short_rotate_needs_a_wrapping_axis() -> None:
+    """Short-rotating means stopping a full turn from the commanded angle.
+
+    That is only the *same place* if the axis wraps, so the combination is refused rather than
+    half-honoured — `process.rotary-rapid-short-rotates` would otherwise report gouges at angles a
+    limited axis cannot reach.
+    """
+    with pytest.raises(ProfileError, match="requires wrap = true"):
+        load_profile_text(MINIMAL + '\n[axes.a]\ntype = "rotary"\nshort_rotate = true\n')
+
+
+def test_short_rotate_on_a_linear_axis_is_refused() -> None:
+    """There is no equivalent position 360 mm away, so the setting cannot mean anything."""
+    with pytest.raises(ProfileError, match="only to a rotary axis"):
+        load_profile_text(MINIMAL + "\n[axes.x]\nshort_rotate = true\nwrap = true\n")
+
+
+def test_short_rotate_loads_on_a_wrapping_rotary_axis() -> None:
+    profile = load_profile_text(
+        MINIMAL + '\n[axes.a]\ntype = "rotary"\nwrap = true\nshort_rotate = true\n'
+    )
+    assert profile.axes["A"].short_rotate is True
+    assert profile.unknown_keys == (), (
+        "short_rotate is a known key, not a typo the loader tolerates"
+    )
+
+
+def test_short_rotate_defaults_to_off() -> None:
+    """A control that honours absolute angles is the assumption; the hazard is opted into."""
+    profile = load_profile_text(MINIMAL + '\n[axes.a]\ntype = "rotary"\nwrap = true\n')
+    assert profile.axes["A"].short_rotate is False
+
+
 def test_bad_centerline_offset_is_refused() -> None:
     with pytest.raises(ProfileError, match="centerline_offset"):
         load_profile_text(MINIMAL + "\n[kinematics]\ncenterline_offset = [1.0, 2.0]\n")

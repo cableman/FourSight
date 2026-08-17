@@ -120,6 +120,27 @@ def _axis(name: str, title: str, *, rotary: bool = False) -> Group:
                 help="When set, the travel limits above are not enforced.",
             ),
         )
+        fields.insert(
+            1,
+            Field(
+                section,
+                "short_rotate",
+                "Control short-rotates rapids",
+                Kind.BOOL,
+                optional=False,
+                default=False,
+                # Gated on `wrap` because the loader refuses the combination: short-rotating means
+                # stopping a full turn from the commanded angle, which is only the same place if the
+                # axis wraps. `str(True)` is what the gate compares, matching how BOOL rows read back.
+                requires=(section, "wrap", ("True",)),
+                help=(
+                    'Mach3\'s "Ang Short Rot on G0" (<ShortRot>1<), and its equivalents: a rapid '
+                    "reaches the commanded angle the shorter way round. Above a half turn that is a "
+                    "different place, so the axis stops a full turn out and the next cutting block "
+                    "makes up the difference in the material."
+                ),
+            ),
+        )
     return Group(section=section, title=title, fields=tuple(fields))
 
 
