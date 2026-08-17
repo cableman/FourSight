@@ -2208,7 +2208,37 @@ we were *told* about rather than measured.
 
 ---
 
-**Project status: M0–M14 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+## M15 — Playing from the line you clicked
+
+Asked for by the user: *"it would be nice to click on a line in the G-code and the play function would
+jump/be set to start on that line."* The sync already ran the other way — the scrubber has moved the cursor
+since T3.5 — so reaching a particular move meant dragging a handle and watching the readout's line number
+until it matched. See `PLAN.md` § Cursor → play head.
+
+- [x] **T15.1 — The cursor sets the play head.** `Timeline.start_of` (the start of a segment, against
+      `time_at`'s end), `LineSelection.first_segment`, and `TimelineBar.seek_to_segment`, wired from
+      `MainWindow._on_cursor_moved`. Three things are not obvious. The seek carries the **intended
+      segment index** rather than letting the widget re-derive it, because `index_at(start_of(i))` is
+      `i - 1` — the boundary belongs to the move that just finished — and a re-derived index would step
+      the cursor a line back on every click; `seek_to_segment` therefore emits `advanced` for the marker
+      and **not** `scrubbed`. The two sync directions are a **loop**, closed by
+      `_without_playback_seek` around every cursor move the user did not make — the scrubber's
+      `goto_line`, and `setPlainText` on load and after a fix — because playback moves the cursor ~30
+      times a second and a seek back to the line's start would stall the player inside the first long
+      move. And a line with **no geometry leaves the position alone**: nothing can say which neighbouring
+      move a comment stood in for, and the status bar already gives the reason.
+      A click in the viewport or on a diagnostic is left **unguarded** on purpose — both mean "start here".
+      Files: `src/foursight/gui/timeline.py`, `src/foursight/gui/timeline_bar.py`,
+      `src/foursight/gui/selection.py`, `src/foursight/gui/main_window.py`, `tests/test_timeline.py`,
+      `tests/test_selection.py`, `tests/test_main_window.py`, `docs/manual_tests/m15.md`
+
+**Deliberately not built.** No step-by-segment transport. Zero-duration moves are still unaddressable by
+time — that is inherent to a time-indexed position, and it is the reason the editor and click-to-pick
+exist. This task makes the editor the *precise* way in rather than adding a second position model.
+
+---
+
+**Project status: M0–M15 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
 
 ---
 

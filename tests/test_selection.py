@@ -81,6 +81,28 @@ def test_an_arc_line_selects_all_of_its_tessellated_segments(profile) -> None:
     assert select_line(sim, line_no).count > 10
 
 
+# --------------------------------------------------------------------------- where playback starts
+
+
+def test_the_first_segment_is_the_earliest_one_the_line_produced(profile) -> None:
+    """T15.1 parks the play head at the start of this segment, so it has to be the line's *first*
+    move — the store is built in program order, so the first set bit is it."""
+    sim = fixture_simulation("arc_full_circle_ijk.nc", profile)
+    line_no = int(np.bincount(sim.store.line).argmax())
+    selection = select_line(sim, line_no)
+
+    assert selection.first_segment == int(np.flatnonzero(selection.mask)[0])
+    assert int(sim.store.line[selection.first_segment]) == line_no
+
+
+def test_a_line_with_no_motion_has_no_first_segment(profile) -> None:
+    """None rather than 0: segment 0 is the start of the *program*, and a comment line must not send
+    the play head there."""
+    sim = simulation(PROGRAM, profile)
+    assert select_line(sim, 4).first_segment is None  # (a comment)
+    assert empty_selection(sim).first_segment is None
+
+
 # --------------------------------------------------------------------------- why there is nothing
 
 

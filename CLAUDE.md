@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M14 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1752 tests**
-(1708 passed + 1 skipped without `test_dialect.py`, 43 in it).
+**M0–M15 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1771 tests**
+(1727 passed + 1 skipped without `test_dialect.py`, 43 in it).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below. The two open items are **T0.8/T0.9** — launching the
 PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` has never been exercised.
@@ -219,6 +219,16 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   of an hour-long program is 3.6 seconds. `Playback.seconds` is authoritative; the slider is written under
   `blockSignals`. And `advance` takes the wall step as an **argument** rather than reading a clock, which is
   what lets every playback test run frame by frame without sleeping.
+- **Editor→transport and transport→editor are a loop, and `MainWindow._without_playback_seek` is what keeps
+  it open.** The cursor sets the play head (M15) and the play head moves the cursor (T3.5), so every cursor
+  move the *user* did not make must be wrapped: the scrubber's `goto_line`, and `setPlainText` on load and
+  after a fix. Ungated, playback moves the cursor ~30 times a second and each move seeks back to the
+  *start* of that line, so the player stalls inside the first long move — and a dropped scrub handle snaps
+  to a line boundary. A click in the viewport or on a diagnostic is deliberately **not** wrapped; both mean
+  "start here". The seek also carries the segment index it intends rather than letting the widget re-derive
+  it, because `index_at(start_of(i))` is **`i - 1`** — `cumulative` holds *end* times, so the boundary
+  belongs to the move that just finished — which is why `seek_to_segment` emits `advanced` and never
+  `scrubbed`.
 - **Exactly two rules judge the control rather than the program, both must stay warnings, and their
   remedies do not overlap.** They fire on the *same blocks* of a wrapped-rotary post's profile resets, so
   conflating them sends the user to apply the wrong fix and watch half the gouge survive. This is not

@@ -39,6 +39,19 @@ class LineSelection:
     def has_geometry(self) -> bool:
         return self.count > 0
 
+    @property
+    def first_segment(self) -> int | None:
+        """The earliest segment this line produced, or None when it produced none.
+
+        `SegmentBuilder` appends in program order, so the first set bit in the mask is the first thing the
+        line does — which is the segment a play head has to be parked at the start of for playback to run
+        the line next. None is not an error here: a comment, an M-code and a suppressed canned cycle all
+        legitimately produce no segments, and `describe` already says which.
+        """
+        if self.count == 0:
+            return None
+        return int(np.argmax(self.mask))
+
     def describe(self) -> str:
         """A status-bar line. Says *why* there is nothing, when there is nothing."""
         if self.suppressed is not None and not self.has_geometry:

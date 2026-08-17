@@ -104,6 +104,36 @@ def test_time_at_is_bounds_checked() -> None:
     assert timeline.time_at(99) == 0.0
 
 
+# --------------------------------------------------------------------------- start_of (T15.1)
+
+
+def test_start_of_is_where_a_segment_begins() -> None:
+    """What "play from this line" means: the clicked move has not happened yet."""
+    timeline = build_timeline(store_with_durations(1.0, 2.0, 3.0))
+    assert timeline.start_of(0) == 0.0
+    assert timeline.start_of(1) == 1.0
+    assert timeline.start_of(2) == 3.0
+
+
+def test_start_of_is_bounds_checked_like_time_at() -> None:
+    timeline = build_timeline(store_with_durations(1.0, 2.0))
+    assert timeline.start_of(-1) == 0.0
+    assert timeline.start_of(99) == 0.0
+
+
+def test_index_at_the_start_of_a_segment_names_the_previous_one() -> None:
+    """The trap `TimelineBar.seek_to_segment` exists to route around, asserted so it cannot surprise
+    anyone twice.
+
+    `cumulative` holds *end* times and `searchsorted(side="left")` returns the earliest segment at an
+    instant, so the boundary belongs to the move that has just finished. Deriving the segment back from
+    ``start_of(i)`` therefore yields ``i - 1`` — and a window that fed that to the editor would step the
+    cursor back a line on every click.
+    """
+    timeline = build_timeline(store_with_durations(1.0, 2.0, 3.0))
+    assert timeline.index_at(timeline.start_of(2)) == 1
+
+
 # --------------------------------------------------------------------------- incomplete totals
 
 
@@ -282,6 +312,73 @@ def test_loading_a_new_program_resets_the_position_without_emitting(bar, profile
     bar.set_simulation(second)
     assert bar.slider.value() == 0
     assert received == [], "resetting the slider emitted a scrub"
+
+
+def test_seeking_to_a_segment_parks_the_clock_at_its_start(bar, profile) -> None:
+    """T15.1: clicking a line sets where play begins, so the clicked move must still be ahead."""
+    sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
+    bar.set_simulation(sim)
+    index = len(sim.store) // 2
+
+    assert bar.seek_to_segment(index, line_no=int(sim.store.line[index])) is True
+    assert bar.seconds == pytest.approx(bar.timeline.start_of(index))
+    assert bar.seconds < bar.timeline.time_at(index), "the play head is past the clicked move"
+    assert bar.slider.value() == round(bar.seconds / bar.timeline.total * TICKS)
+
+
+def test_seeking_to_a_segment_moves_the_marker_but_not_the_editor(bar, profile) -> None:
+    """`advanced` drives the tool marker, so the user sees the play head land. `scrubbed` would send the
+    window back to move a cursor it has just moved itself — and at a segment boundary `index_at` names
+    the *previous* segment, so it would land a line early."""
+    sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
+    bar.set_simulation(sim)
+    scrubs: list[int] = []
+    advances: list[float] = []
+    bar.scrubbed.connect(scrubs.append)
+    bar.advanced.connect(advances.append)
+
+    bar.seek_to_segment(len(sim.store) // 2)
+
+    assert scrubs == [], "seeking to a segment emitted a scrub back at the editor"
+    assert advances == [pytest.approx(bar.seconds)]
+
+
+def test_the_readout_names_the_clicked_line_not_the_resolved_one(bar, profile) -> None:
+    sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
+    bar.set_simulation(sim)
+    bar.seek_to_segment(len(sim.store) // 2, line_no=12345)
+    assert "line 12345" in bar.readout.text()
+
+
+def test_seeking_is_refused_on_a_program_with_no_usable_time(bar, profile) -> None:
+    """The transport is disabled for these, and a marker on screen for a program that cannot be played
+    would contradict that."""
+    sim, _ = simulate_text("G21 G90 G94\nG1 X10\n", profile)
+    bar.set_simulation(sim)
+    advances: list[float] = []
+    bar.advanced.connect(advances.append)
+
+    assert bar.seek_to_segment(0) is False
+    assert advances == []
+
+
+def test_seeking_out_of_range_is_refused(bar, profile) -> None:
+    sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
+    bar.set_simulation(sim)
+    assert bar.seek_to_segment(-1) is False
+    assert bar.seek_to_segment(len(sim.store)) is False
+    assert bar.seconds == 0.0
+
+
+def test_seeking_during_playback_is_a_seek_not_a_stop(bar, profile) -> None:
+    """Clicking a line to restart from there must not also demand a second press of play."""
+    sim, _ = simulate_text(fixture_text("baseline_4axis.nc"), profile)
+    bar.set_simulation(sim)
+    bar.toggle_playback()
+    assert bar.playback.playing is True
+
+    bar.seek_to_segment(len(sim.store) // 2)
+    assert bar.playback.playing is True
 
 
 def test_clearing_disables_and_resets(bar, profile) -> None:

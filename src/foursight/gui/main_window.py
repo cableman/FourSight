@@ -17,6 +17,7 @@ command line. Whatever was loaded before stays on screen until a *successful* lo
 through the wait, a failure, or a cancellation.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import QDeadlineTimer, QEventLoop, Qt
@@ -99,6 +100,10 @@ class MainWindow(QMainWindow):
         #: True only while `_on_solid_toggled` is flipping `Part coordinates` itself, so the frame
         #: toggle's own re-carve does not race the one that is about to follow it.
         self._switching_frame_for_solid = False
+        #: True while the cursor is being moved by something other than the user, so the transport does
+        #: not follow it back. See `_without_playback_seek` — this is what keeps T3.5 and T15.1 from
+        #: forming a loop.
+        self._suppress_playback_seek = False
 
         self.setWindowTitle("FourSight")
         self.resize(1280, 800)
@@ -449,7 +454,11 @@ class MainWindow(QMainWindow):
         # Only rewrite the pane when the text actually differs. Re-setting identical text after a
         # buffer reload would reset the cursor and scroll position on every applied fix.
         if self.editor.toPlainText() != program.loaded.text:
-            self.editor.setPlainText(program.loaded.text)
+            # Guarded: `setPlainText` drops the cursor on line 1, and `set_simulation` above has just
+            # rewound the transport. A seek here would put a tool marker on screen for a program nobody
+            # has played, on the strength of a cursor move the user did not make.
+            with self._without_playback_seek():
+                self.editor.setPlainText(program.loaded.text)
         self.viewport.set_simulation(program.simulation)
         self.reload_action.setEnabled(program.path is not None)
 
@@ -517,6 +526,8 @@ class MainWindow(QMainWindow):
         self.selection = select_line(self.program.simulation, line_no)
         self.viewport.set_highlight(self.program.simulation.store, self.selection.mask)
         self.statusBar().showMessage(self.selection.describe())
+        if not self._suppress_playback_seek:
+            self._seek_playback_to_cursor()
 
     def _on_verified(self, diagnostics) -> None:
         """Stage two arrived. Ignored if a different program has since been loaded."""
@@ -525,8 +536,51 @@ class MainWindow(QMainWindow):
         self.diagnostics.set_diagnostics(diagnostics)
 
     def _on_diagnostic_activated(self, line_no: int) -> None:
-        """Clicking a finding jumps the editor there, which highlights the line via the T3.2 path."""
+        """Clicking a finding jumps the editor there, which highlights the line via the T3.2 path.
+
+        Unguarded, like `_on_segment_picked`: activating a diagnostic means "take me to this", and having
+        the transport ready to play from it is what the user would ask for next.
+        """
         self.editor.goto_line(line_no)
+
+    # ------------------------------------------------------------------ editor -> transport (T15.1)
+
+    @contextmanager
+    def _without_playback_seek(self):
+        """Move the cursor without the transport following it.
+
+        Cursor → play head (T15.1) and play head → cursor (T3.5) are both wanted, and together they are a
+        loop. The loop is not merely redundant. Playback moves the cursor on every frame that changes
+        line, and a seek back to the *start* of the line under it would drag the position backwards ~30
+        times a second: the player would stall inside the first long move and never leave it. Setting the
+        buffer's text is the same problem in slower motion — it drops the cursor on line 1, which is Qt
+        rewriting a document rather than a user asking to start there.
+
+        Re-entrant by saving the previous value, so a nested move cannot switch the guard off early.
+        """
+        previous = self._suppress_playback_seek
+        self._suppress_playback_seek = True
+        try:
+            yield
+        finally:
+            self._suppress_playback_seek = previous
+
+    def _seek_playback_to_cursor(self) -> None:
+        """Park the play head at the start of the line under the cursor, so play starts there.
+
+        A line with **no geometry leaves the position alone** rather than jumping to a neighbouring
+        line's move. Nothing here can tell which neighbour was meant, and a play head that starts
+        somewhere other than the line that was clicked is the transport's version of drawing a path the
+        program does not command. `_on_cursor_moved` has already put the reason in the status bar — "no
+        motion", or "not drawn" for a span the simulator refused — so the silence is explained rather
+        than mysterious.
+        """
+        if self.selection is None:
+            return
+        index = self.selection.first_segment
+        if index is None:
+            return
+        self.timeline.seek_to_segment(index, line_no=self.selection.line_no)
 
     # ------------------------------------------------------------------ fixes (T5.1)
 
@@ -604,7 +658,10 @@ class MainWindow(QMainWindow):
         The file on disk is untouched: PLAN.md requires fixes to modify the editor buffer with the user
         saving explicitly. So this loads from *text*, and the path is kept only for the title bar.
         """
-        self.editor.setPlainText(text)
+        # Guarded for `_show`'s reason, and one more: the program still on screen is the *old* one, so a
+        # seek here would move the play head using the pre-fix store's line numbers.
+        with self._without_playback_seek():
+            self.editor.setPlainText(text)
         self._cancel_running_load()
         self._loader = BufferLoader(
             text,
@@ -851,7 +908,10 @@ class MainWindow(QMainWindow):
         # still working its way along one long move. Compared against the editor's own cursor rather
         # than a remembered value, so a click in the editor mid-playback cannot leave it stale.
         if line_no != self.editor.current_line:
-            self.editor.goto_line(line_no)
+            # Under the guard, or the cursor move would seek the clock back to the *start* of this
+            # segment's line on every frame and playback would never leave it (T15.1).
+            with self._without_playback_seek():
+                self.editor.goto_line(line_no)
         # Fed back so the readout can name the line. Safe from a loop: `show_line` only sets a label.
         self.timeline.show_line(line_no)
 
@@ -874,6 +934,9 @@ class MainWindow(QMainWindow):
         the segment belongs to, not the single segment under the cursor, because that is what tells the
         user how far the block they clicked actually travels. It also terminates — `goto_line` moves the
         cursor once, and the resulting selection does not move it again.
+
+        **Unguarded on purpose**, unlike `_on_scrubbed`'s move: a click in the viewport is as explicit a
+        "start here" as a click in the text, so the play head follows it too (T15.1).
         """
         if self.program is None:
             return

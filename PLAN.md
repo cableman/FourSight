@@ -1428,6 +1428,45 @@ G4 contributes nothing because `Step.dwell` never reaches `store.duration`. A st
 would need an index-indexed position rather than a time-indexed one; the editor and click-to-pick remain
 the way to reach those moves.
 
+#### Cursor → play head (T15.1)
+
+Asked for by the user, and the missing half of a sync that already ran the other way: the scrubber moved
+the cursor from T3.5 on, but reaching a particular move in a 4000-line program still meant dragging a
+handle and reading the line number off the readout until it matched. **Putting the cursor on a line now
+parks the play head at the start of that line's first move**, so selecting a block and pressing Ctrl+Space
+runs it. The editor is already the precise index into the program; this makes it the transport's index too.
+
+Three decisions carry the weight.
+
+**The start of the move, not its end.** `Timeline.start_of(i)` is `cumulative[i-1]`, because `cumulative`
+holds *end* times — so `time_at` would start playback with the clicked move already behind it. The two
+look equally plausible on screen, which is why `tests/test_main_window.py` asserts on the marker's
+position rather than on the fact that it moved.
+
+**The intended segment travels with the seek; it is never re-derived.** `index_at(start_of(i))` is `i - 1`,
+not `i`: at an exact boundary `searchsorted(side="left")` names the segment that has just finished, which
+is right for a scrubber and wrong here. So `TimelineBar.seek_to_segment` takes the index and the line from
+its caller, emits `advanced` for the marker, and deliberately **does not** emit `scrubbed` — feeding a
+segment back to the window would move the cursor a line above the one the user just clicked.
+
+**The two directions are a loop, and the window owns the guard.** Playback moves the cursor on every frame
+that changes line; if that cursor move seeked, the position would be dragged back to the line's start ~30
+times a second and the player would stall inside the first long move and never leave it. So
+`MainWindow._without_playback_seek` wraps every cursor move the *user* did not make: the scrubber's
+`goto_line`, and `setPlainText` on load or after a fix — the latter drops the cursor on line 1, which is
+Qt rewriting a document, not a request to play from the top. A click in the viewport or on a diagnostic is
+left unguarded on purpose: both are as explicit a "start here" as a click in the text.
+
+A line with **no geometry leaves the position alone**. Nothing can tell which neighbouring move a comment
+or an `M8` was meant to stand in for, and a play head that starts somewhere other than the line that was
+clicked is this feature's version of drawing a path the program does not command. The status bar already
+says which of the three reasons applies — "no motion", or "not drawn" for a suppressed span.
+
+Two consequences worth stating: it parks at the start of the clicked line's **first** segment even when a
+segment further along that line was picked in the viewport, matching the whole-line reading the highlight
+has always taken; and seeking while playing is a **seek, not a stop**, so clicking a line mid-run restarts
+from there without a second press of play.
+
 #### Legend (T11.1–T11.3)
 
 The viewport distinguishes everything it draws by **colour alone**, and not by preference: `GLLinePlotItem`

@@ -6,6 +6,11 @@ of it — watching the code scroll past as the tool advances is how a timeline e
 rather than in a player. It also means the scrubber needs no highlight machinery of its own, and playback
 inherits that for free by going through the same signal.
 
+It also goes the other way (T15.1): the cursor **moves the play head**, via `seek_to_segment`, so
+selecting a line and pressing play starts there. Those two directions are a loop, and the window owns the
+guard that keeps it from closing — see `MainWindow._without_playback_seek`, because a player that seeks
+back to the start of the line it just scrolled to never leaves the first long move.
+
 The slider works in **integer thousandths of the total**, not seconds: `QSlider` is integral, and a
 seconds-valued slider would quantize a 40-hour program to one-second steps and a two-second program to
 two positions. Thousandths give the same resolution to both.
@@ -240,11 +245,15 @@ class TimelineBar(QWidget):
 
     def _apply_position(self, seconds: float) -> None:
         """Move the handle to ``seconds`` without letting it look like the user did."""
+        self._move_handle(seconds)
+        self._emit_position()
+
+    def _move_handle(self, seconds: float) -> None:
+        """Write the clock's position into the slider, blocked so it cannot read as a drag."""
         if self.timeline is not None and self.timeline.total > 0.0:
             self.slider.blockSignals(True)
             self.slider.setValue(round(seconds / self.timeline.total * TICKS))
             self.slider.blockSignals(False)
-        self._emit_position()
 
     def _emit_position(self) -> None:
         index = self.index()
@@ -252,6 +261,33 @@ class TimelineBar(QWidget):
         self.advanced.emit(self.seconds)
         if index is not None:
             self.scrubbed.emit(index)
+
+    def seek_to_segment(self, index: int, *, line_no: int | None = None) -> bool:
+        """Park the play head at the **start** of ``index``, so playing runs that segment next.
+
+        The editor → transport direction (T15.1): clicking a line of G-code sets where play begins.
+        `Timeline.start_of`, not `time_at` — the point of clicking a move is that it has not happened
+        yet, and starting at its end would play the *following* one.
+
+        Emits `advanced`, so the marker jumps to the clicked move and the user can see the play head land.
+        Deliberately does **not** emit `scrubbed`, and takes ``line_no`` for the readout instead. The
+        caller moved the cursor itself, so it already knows the line; asking it to move the cursor to
+        whatever segment this time resolves back to would be worse than redundant, because
+        ``index_at(start_of(i))`` is ``i - 1`` — the cursor would step back a line on every click.
+
+        Refuses on an unplayable program, matching the disabled transport: nothing should put a marker on
+        screen for a program whose total is zero and which `Playback.play` will not play.
+        """
+        if self.playback is None or self.timeline is None or not self.playback.playable:
+            return False
+        if not 0 <= index < self.timeline.segments:
+            return False
+        seconds = self.timeline.start_of(index)
+        self.playback.seek(seconds)
+        self._move_handle(seconds)
+        self._update_readout(index, line_no)
+        self.advanced.emit(self.seconds)
+        return True
 
     def show_line(self, line_no: int | None) -> None:
         """Called back by the window once it has resolved the segment to a source line."""

@@ -1038,6 +1038,122 @@ def test_scrubbing_still_moves_the_editor(window) -> None:
     assert window.editor.current_line > 1
 
 
+# --------------------------------------------------------------------------- editor -> transport (T15.1)
+
+# Line 16 of the baseline is `N120 G1 X10.0 Y30.0`, a plain feed move in the middle of the program, and
+# line 10 is `N60 M8` — motionless. Both are named here so the tests below read as intent rather than
+# arithmetic.
+MOTION_LINE = 16
+MOTIONLESS_LINE = 10
+
+
+def test_clicking_a_line_sets_where_playback_starts(window) -> None:
+    """The whole feature: put the cursor on a line, and the play head parks at the start of its move."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(MOTION_LINE)
+
+    index = window.selection.first_segment
+    timeline = window.timeline.timeline
+    assert int(window.program.simulation.store.line[index]) == MOTION_LINE
+    assert window.timeline.seconds == pytest.approx(timeline.start_of(index))
+    assert 0.0 < window.timeline.seconds < timeline.time_at(index), "the clicked move already ran"
+
+
+def test_the_marker_lands_at_the_start_of_the_clicked_move(window) -> None:
+    """Not at its end, and not at the following move. `start_of` rather than `time_at` is the difference,
+    and on screen the two look equally plausible — hence a test on the position."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(MOTION_LINE)
+
+    store = window.program.simulation.store
+    index = window.selection.first_segment
+    marker = np.asarray(window.viewport._marker.pos, dtype=np.float64)
+    assert window.viewport._marker.visible() is True
+    assert np.allclose(marker[0], store.lin[index, 0], atol=1e-3)
+
+
+def test_playing_after_clicking_a_line_starts_from_that_line(window) -> None:
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(MOTION_LINE)
+    parked = window.timeline.seconds
+
+    window.timeline.toggle_playback()
+    window.timeline._tick(0.001)
+
+    assert window.timeline.seconds > parked
+    assert window.editor.current_line == MOTION_LINE, "playback did not resume on the clicked line"
+
+
+def test_playback_is_not_dragged_back_by_the_cursor_it_moves(window) -> None:
+    """The loop the guard exists for, and the reason it is a test rather than an eye.
+
+    T3.5 moves the cursor as the tool advances; T15.1 moves the play head to the cursor. Ungated, every
+    frame that changes line would seek back to the *start* of that line — so the player would crawl,
+    stalling completely inside any move longer than one frame. The position is asserted exactly: 20
+    frames of a fortieth of the program is half of it, and anything less means something pulled it back.
+    """
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    total = window.timeline.timeline.total
+    window.timeline.toggle_playback()
+
+    positions = []
+    for _ in range(20):
+        window.timeline._tick(total / 40.0)
+        positions.append(window.timeline.seconds)
+
+    assert positions == sorted(positions), "the play head went backwards during playback"
+    assert positions[-1] == pytest.approx(total / 2.0)
+
+
+def test_a_line_with_no_motion_leaves_the_play_head_alone(window) -> None:
+    """Nothing here can say which neighbouring move was meant, and starting play somewhere other than
+    the line that was clicked is the transport's version of drawing a path nobody programmed."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.editor.goto_line(MOTION_LINE)
+    parked = window.timeline.seconds
+    assert parked > 0.0
+
+    window.editor.goto_line(MOTIONLESS_LINE)
+    assert window.timeline.seconds == parked
+    assert "no motion" in window.statusBar().currentMessage()
+
+
+def test_loading_a_program_leaves_the_play_head_at_the_start(window) -> None:
+    """`setPlainText` drops the cursor on line 1, which is Qt rewriting a document rather than a user
+    asking to start there — and a marker for a program nobody has played would say otherwise."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+
+    assert window.timeline.seconds == 0.0
+    assert window.viewport._marker is None or window.viewport._marker.visible() is False
+
+
+def test_clicking_a_segment_in_the_viewport_also_sets_the_play_head(window) -> None:
+    """A click in the picture is as explicit a "start here" as a click in the text.
+
+    It parks at the start of the clicked segment's **line**, not of the segment itself — the same
+    whole-line reading the highlight already takes, so the play head and the highlight agree.
+    """
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    store = window.program.simulation.store
+    index = int(np.flatnonzero(store.line == MOTION_LINE)[-1])
+
+    window._on_segment_picked(index)
+
+    assert window.editor.current_line == MOTION_LINE
+    first = int(np.flatnonzero(store.line == MOTION_LINE)[0])
+    assert window.timeline.seconds == pytest.approx(window.timeline.timeline.start_of(first))
+
+
+def test_scrubbing_does_not_have_its_position_rewritten_by_the_editor(window) -> None:
+    """Dropping the handle inside a long move must stay inside it. The cursor follows the scrub, and a
+    seek back to that line's start would quantize every scrub position to a line boundary."""
+    window.open_file_and_wait(FIXTURES / "baseline_4axis.nc")
+    window.timeline.slider.setValue(555)
+    expected = 555 / 1000 * window.timeline.timeline.total
+
+    assert window.timeline.seconds == pytest.approx(expected)
+
+
 # --------------------------------------------------------------------------- legend (T11.3)
 
 

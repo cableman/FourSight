@@ -61,6 +61,23 @@ class Timeline:
             return 0.0
         return float(self.cumulative[index])
 
+    def start_of(self, index: int) -> float:
+        """Cumulative seconds at the *start* of ``index`` — where a player sits to run it **next**.
+
+        The mirror of `time_at`, and emphatically not the same number: `cumulative` holds *end* times, so
+        segment ``i`` runs over ``(start_of(i), time_at(i)]``. Both exist because "the clicked move has
+        not happened yet" and "the clicked move has finished" are different requests, and answering one
+        with the other puts the play head a whole move away from the line the user pointed at.
+
+        Note that ``index_at(start_of(i))`` is ``i - 1``, not ``i``: at an exact boundary the segment that
+        has just *finished* is the one `index_at` names, which is the right answer for a scrubber — see
+        this module's docstring on zero-duration segments — and the reason
+        `TimelineBar.seek_to_segment` carries the intended index rather than re-deriving it from the time.
+        """
+        if not 0 <= index < self.segments:
+            return 0.0
+        return float(self.cumulative[index - 1]) if index > 0 else 0.0
+
 
 def build_timeline(store: SegmentStore, unknown: int = 0) -> Timeline:
     """Cumulative durations for ``store``.
