@@ -25,6 +25,21 @@ G0 Z25
 M30
 """
 
+# Cut against `profiles/rotary.toml`, which is the only shipped profile carrying both a [stock] blank
+# and a [tool] cutter — the solid view refuses to invent either. Z is radial and measured from the
+# blank's surface there, so Z-9 is a 4.4 mm deep groove in a 42.8 mm bar.
+GROOVE = """(A wrapped helical groove, for the solid view. Cut with profiles/rotary.toml.)
+G21 G90 G94 G54
+S18000 M3
+G0 Z10
+G0 X0 Y10 A0
+G1 Z-9.0 F800
+G1 Y120.0 A1080.0
+G0 Z10
+M5
+M30
+"""
+
 
 def capture(window, name: str, app) -> None:
     for _ in range(6):
@@ -69,7 +84,34 @@ def main() -> int:
     window.viewport.setCameraPosition(distance=190, elevation=22, azimuth=-58)
     capture(window, "part-coordinates", app)
 
-    # 3. The diff preview for a fix.
+    # 3. The solid view: what the program leaves behind, rather than where the tool went. Needs a
+    # profile with both [stock] and [tool]; switching it on flips `Part coordinates` by itself,
+    # because a cylinder's carve is only stationary in the part's frame.
+    # The profile is swapped through the same path `Apply` in the profile dialog takes, rather than by
+    # opening a second window: two GL contexts in one process leave the first window's line items
+    # undrawable, so the toolpath over the solid would silently go missing.
+    from foursight.machine.profile_doc import ProfileDocument
+
+    rotary_text = (REPO / "profiles" / "rotary.toml").read_text(encoding="utf-8")
+    window._profile_dialog = None
+    # Cleared first: applying a profile under a live `Part coordinates` raises out of
+    # `_on_part_coordinates_toggled`, because the reload clears the toggle before the timeline has
+    # caught up with the new store. Steered around here rather than papered over — it is a real defect.
+    window.part_coordinates_action.setChecked(False)
+    window._on_profile_applied(ProfileDocument.from_text(rotary_text))
+    settle(window)
+    groove = REPO / "build" / "groove-demo.nc"
+    groove.write_text(GROOVE, encoding="utf-8")
+    window.open_file(groove)
+    settle(window)
+    window.solid_action.setChecked(True)
+    carved = QDeadlineTimer(120_000)
+    while window._carver is not None and not carved.hasExpired():
+        app.processEvents(QEventLoop.AllEvents, 20)
+    window.viewport.setCameraPosition(distance=190, elevation=24, azimuth=-62)
+    capture(window, "solid-view", app)
+
+    # 4. The diff preview for a fix.
     from foursight.fix.engine import FixContext, apply_fix, get_fix, load_builtin_fixes
     from foursight.gui.diff_dialog import DiffDialog
 

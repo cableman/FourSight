@@ -13,11 +13,27 @@ PyInstaller bundle on a clean Windows VM, which needs a VM — and `--windowed` 
 **The full suite currently cannot be run in one process.** `pytest -q` segfaults at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects
 while a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it.
-Every test passes — run `pytest --ignore=tests/test_dialect.py` (1709) and `pytest
+Every test passes — run `pytest --ignore=tests/test_dialect.py` (1728, ~40 s) and `pytest
 tests/test_dialect.py` (43) and both are green. `tests/test_dialect.py` is only the *trigger*: it
 contains no Qt and no threads and merely shifts when a large collection lands. See `TASKS.md`
 § M6 for the full evidence and what has already been ruled out. **Run the suite in those two parts
 until it is fixed**, and do not read a green `--ignore` run as a green suite.
+
+**Open defect, found while regenerating the README screenshots: applying a machine profile while
+`Part coordinates` is on raises out of `_on_part_coordinates_toggled`.** Sequence: open a program,
+`Ctrl+P`, then `File → Machine profile…` → Apply a profile whose kinematics change the segment count.
+`_reload_from_buffer` clears the part-coordinates toggle before the timeline has caught up with the
+new store, and `playback.marker_point` refuses the mismatch it is given —
+`ValueError: timeline has 504 segments, store has 465 — they describe different programs`. The guard
+is right; the ordering is not. It surfaces on stderr and Qt swallows it, so the user sees only a marker
+that stopped updating. No test covers the sequence, and `scripts/screenshots.py` steers around it.
+
+`scripts/screenshots.py` regenerates `docs/images/` for the README (`DISPLAY=:0
+.venv/bin/python scripts/screenshots.py`). Refresh it after any visible UI change — a README picturing
+a version of the tool that no longer exists is confidently wrong about what the user will see. It
+drives **one** `MainWindow` throughout and swaps profiles through `_on_profile_applied`: a second GL
+context in the same process leaves the first window's line items undrawable, so a toolpath silently
+goes missing from the image with nothing but `Error while drawing item` on stderr.
 
 `PLAN.md` remains the single source of truth for the design: architecture, tech stack, G-code subset,
 verifier rules, milestones, and the reasoning behind every decision including the ones that were reversed.
