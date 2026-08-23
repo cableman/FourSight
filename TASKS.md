@@ -4,6 +4,10 @@ Execution layer for `PLAN.md`. **`PLAN.md` owns the design; this file owns the o
 Tasks reference PLAN.md sections rather than restating them — if a task and PLAN.md disagree,
 PLAN.md wins and the task is wrong.
 
+**`OPEN.md` owns what is left.** This file is mostly a completed log, so anything still owed lives in
+`OPEN.md` and is *pointed at* from the milestone it came from rather than restated here — one record of
+"is this done yet", never two. Start there; come here for how the work was ordered and why.
+
 ## How to use this file
 
 - Work tasks in ID order within a milestone. Cross-milestone order is M0 → M5.
@@ -233,7 +237,8 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       `libqxcb.so` are present; a real frame paints on Iris Xe; exit 0. Launched from a neutral
       working directory so nothing could resolve out of the source tree. **`HIDDEN_IMPORTS` stays
       empty — nothing needed adding.** The 265 MB size also corroborates rejecting one-file.
-      **Windows half: OUTSTANDING, and it is where the risk actually lives.** DLL resolution, the
+      **Windows half: OUTSTANDING** — status and the run instructions live in `OPEN.md` § 1.
+      It is where the risk actually lives. DLL resolution, the
       VC++ runtime and AV heuristics all differ; nothing above transfers. Copy `dist/gl-spike/` to
       a VM with no Python or dev tooling, run `gl-spike.exe` **from a terminal**, and read the exit
       code: 0 painted, 1 created but never painted, 2 import failed.
@@ -242,7 +247,7 @@ Nothing here ships. Two spikes can invalidate the Tech Stack; that is the point 
       Blocked by: a clean Windows VM
       Files: `spikes/gl_window.py`, `PLAN.md`
 
-- [ ] **T0.9 — Milestone gate** — *one item left: T0.8 on Windows*
+- [ ] **T0.9 — Milestone gate** — *one item left: T0.8 on Windows; see `OPEN.md` § 1*
       **DoD:** both spikes have a *measured* answer in `PLAN.md`; CI green; D1–D3 and D5 resolved.
       Status: CI green on `origin/main` (6/6 jobs) ✓ · render spike measured and recorded ✓ ·
       D1 ✓ D3 ✓ D5 ✓ · packaging spike measured **on Linux only**, D2 half-open.
@@ -1665,43 +1670,11 @@ The data model is already 4-axis-shaped, so this milestone is the transform itse
 pre-existing golden byte-identical. **But see the open issue below: the suite cannot currently be run
 in one process.**
 
-- **OPEN — the full suite segfaults, and `tests/test_dialect.py` is the trigger.**
-  `pytest -q` dies with `Fatal Python error: Segmentation fault` at
-  `test_editor.py::test_loading_a_program_shows_the_parsed_text`, reproducibly (3/3). Run the same
-  suite with `--ignore=tests/test_dialect.py` and it is green (1290 passed); run `test_dialect.py`
-  alone and it is green (43 passed). **Every test passes; they cannot all run in one process.**
-
-  What the evidence says, so the next person does not have to rediscover it:
-  - Pristine HEAD is green 3/3, so this arrived with M6.
-  - `test_dialect.py` contains no Qt and no threads. It only shifts *allocation timing*.
-  - The faulthandler dump is unambiguous: the **main thread is `Garbage-collecting`** while a
-    background `ProgramLoader` QThread is inside `tokenize`. PySide6 destroys Qt C++ objects during
-    that collection while the worker is still executing Python.
-  - Forcing `gc.collect()` after every test gets far past the crash, which fits: the danger is one
-    large accumulated collection landing at the wrong moment, not any single object.
-  - Running everything up to and including `test_editor.py` (417 tests) is green. The crash needs the
-    *whole* suite to have been collected, i.e. every test module imported.
-
-  Tried and **did not** fix it: closing the window in `test_editor.py`, and giving
-  `test_main_window.py`'s `window` fixture a teardown that calls `close()` (which is what cancels and
-  joins the loader). Both are arguably right anyway; neither addressed the cause, so both were
-  reverted rather than left in as a half-fix that reads like a solution.
-
-  Not diagnosed: **which** orphaned Qt object is unsafe to collect. Candidates are the unparented
-  widgets returned by the `editor` and `panel` fixtures, which are never deleted. The product itself
-  looks careful here — `MainWindow.closeEvent` cancels and waits for the loader precisely to avoid
-  "a QThread outliving its parent widget", and the real application pumps a true event loop rather
-  than `processEvents` in a tight loop — so this reads as test-harness fragility rather than a
-  shipping defect. That should be confirmed, not assumed.
-
-- **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`.** The value is computed, converted and
-  tested, and the timeline does not include dwell time. So the dwell-units change is correct and
-  currently unobservable outside tests. Worth closing when the timeline is next touched.
-- **Owed from M6 — `UNSUPPORTED_ONE_SHOT` is diagnosed only.** G10, G33, G38.x and G92 are reported
-  by `verify` and still drawn as ordinary moves by `sim`. G92 is the same bug class G68 was — a
-  coordinate-system shift drawn as if absent — and deserves the same treatment.
-  `tests/test_simulator.py::test_the_diagnostic_only_codes_are_listed_deliberately` pins the set, so
-  a new code cannot join the gap by accident.
+- **OPEN — the full suite segfaults in one process, and `tests/test_dialect.py` is the trigger.**
+  Evidence, what was tried and reverted, and what is still undiagnosed: `OPEN.md` § 3.
+- **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`** — `OPEN.md` § 6.
+- **Owed from M6 — `UNSUPPORTED_ONE_SHOT` (G10, G33, G38.x, G92) is diagnosed only**, and still
+  drawn as if understood — `OPEN.md` § 2.
 
 ---
 
@@ -1754,15 +1727,9 @@ reasoning; § Non-Goals now states explicitly which half is still deferred.
       `src/foursight/profiles/default_4axis.toml`, `tests/test_checks_geometry.py`,
       `tests/test_checks_interpolated.py`, `tests/test_profile.py`
 
-- **Owed from M7 — `process.feed-too-high` has the feed-mode blind spot T7.1 avoided.** It compares a
-  raw `F` word to `limits.max_feed` under every feed mode, so under G93 a legitimate `F1000` (a 0.06 s
-  block) is reported as "feed 1000 mm/min exceeds 3000 mm/min" — a wrong message, though a harmless
-  direction. Not fixed here because it changes existing behaviour and its own tests; the plunge rule
-  documents the correct treatment next to it.
-- **Owed from M7 — neither new rule has a fix.** `process.plunge-feed-too-high` has an obvious one
-  (rewrite the F on the plunge block), and it would be the first fix keyed to a rule whose diagnostic
-  spans two lines — the plunge and wherever the inherited F was set. Worth doing deliberately rather
-  than as an afterthought.
+- **Owed from M7 — `process.feed-too-high` has the feed-mode blind spot T7.1 avoided** —
+  `OPEN.md` § 5.
+- **Owed from M7 — neither new rule has a fix** — `OPEN.md` § 8.
 
 ---
 
@@ -1810,13 +1777,9 @@ switch on is a check nobody uses. `PLAN.md` § Editing the profile in the GUI ow
       `src/foursight/gui/app.py`, `tests/test_profile_dialog.py`, `tests/test_main_window.py`,
       `tests/test_gui_app.py`
 
-- **Owed from M8 — the dialog has no diff preview.** Every other change FourSight makes to a file is
-  reviewable as a unified diff first (`DiffDialog`), and a profile edit is not. `ProfileDocument` holds
-  both texts, so the diff is already available; showing it before `Save as…` would close the gap.
-- **Owed from M8 — `[axes.*].type` is not editable.** The schema deliberately omits it, since the form
-  has no reason to let A become linear, but that means a profile using `[axes.b]` cannot be edited in the
-  GUI at all — it simply does not appear. 5-axis is post-v1, so this is recorded rather than fixed;
-  `test_every_loader_key_is_editable` covers the flat sections and would not catch a new axis.
+- **Owed from M8 — the dialog has no diff preview** — `OPEN.md` § 9.
+- **Owed from M8 — `[axes.*].type` is not editable**, so `[axes.b]` cannot be edited at all —
+  `OPEN.md` § 10.
 
 ---
 
@@ -1869,11 +1832,8 @@ checks.
       Files: `src/foursight/machine/profile_schema.py`, `src/foursight/gui/profile_dialog.py`,
       `src/foursight/machine/profile_doc.py`, `tests/test_profile_dialog.py`
 
-- **Owed from M9 — the plunge check is still Z-only.** On a rotary job the "plunge" into a bar is radial,
-  and for a tool working the side of a blank that can be a Y move rather than a Z one.
-  `process.plunge-feed-too-high` would not see it. The stock's axis is now known, so the radial direction
-  is available; whether a *rate* limit should be expressed radially is a real question rather than an
-  oversight, so it is recorded rather than guessed at.
+- **Owed from M9 — the plunge check is still Z-only**, and a rotary plunge is radial —
+  `OPEN.md` § 7.
 
 ---
 
@@ -2239,6 +2199,7 @@ exist. This task makes the editor the *precise* way in rather than adding a seco
 ---
 
 **Project status: M0–M15 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+Everything still owed — that gate, four defects and five owed items — is in **`OPEN.md`**.
 
 ---
 

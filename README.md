@@ -350,7 +350,9 @@ mirrored wrap.
 
 ## Status
 
-M0–M15 complete. Known gaps, all deliberate and recorded in `PLAN.md`:
+M0–M15 complete. **`OPEN.md` lists everything still owed** — one gate, four defects and five owed items,
+each with its evidence and what closing it takes. The gaps that are deliberate design decisions rather
+than debt, all reasoned out in `PLAN.md`:
 
 - **No tool table**, so `G43`/`G44` tool length is not modelled. The path's shape is correct and its Z datum
   is shifted; the program is drawn and flagged `unsupported`, because refusing every program that uses G43
@@ -361,8 +363,7 @@ M0–M15 complete. Known gaps, all deliberate and recorded in `PLAN.md`:
   not reported. Rotary step sizing likewise uses the path's own radius as a proxy for the part's.
 - **No cutter-compensation geometry.** The programmed centreline is drawn and marked unverified, and it is
   not carved.
-- Windows bundles are built in CI but have not been launched on a clean Windows VM, and `--windowed` has
-  never been exercised.
-- The full test suite does not run in one process — see Development above.
-- Applying a machine profile while `Part coordinates` is on raises out of the toggle handler, because the
-  reload clears the toggle before the timeline has caught up with the new store. Switch it off first.
+
+Two of `OPEN.md`'s items are worth knowing before you rely on a build: **Windows bundles have never been
+launched on a clean VM** (they are built in CI, and `--windowed` has never been exercised), and **applying a
+machine profile while `Part coordinates` is on** raises out of the toggle handler — switch it off first.
