@@ -90,10 +90,16 @@ class ProgramSummary:
                 "This toolpath is incomplete."
             )
         if self.unverified:
+            # The reason comes off the spans, never restated here. Until M16 this line claimed every
+            # unverified span was "the programmed centreline, which is not where the tool goes" —
+            # true of cutter compensation and flatly wrong about G33, where the centreline is exactly
+            # where the tool goes and only the *timing* is unmodelled. A summary that confidently
+            # mis-states which part of the picture to distrust is worse than a vaguer one.
+            reasons = sorted({span.reason for span in self.unverified})
+            detail = reasons[0] if len(reasons) == 1 else "see the diagnostics for why"
             messages.append(
                 f"Drawn but unverified: {_count(len(self.unverified), 'span')} at "
-                f"{_line_ranges(self.unverified)} — shown as the programmed centreline, "
-                "which is not where the tool goes."
+                f"{_line_ranges(self.unverified)} — {detail}"
             )
         if self.parse_errors:
             messages.append(

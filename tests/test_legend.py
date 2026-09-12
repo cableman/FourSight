@@ -4,7 +4,7 @@ Two properties carry the weight, and neither is about layout.
 
 **The legend names what is on screen, and only that.** A row for a colour the program does not contain
 would train the reader to ignore the key, and the unverified row *appearing* is itself the information —
-it means part of this picture is a programmed centreline rather than a tool path.
+it means part of this picture cannot be trusted, with the span's own reason saying which part.
 
 **The legend does not restate the palette; it reads it off the batches.** Every label and every colour
 comes from the `Batch` that was uploaded to GL. A second table here would be a second copy of the

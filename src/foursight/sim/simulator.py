@@ -32,6 +32,9 @@ from foursight.machine.state import MachineState, Move, Position, Step
 from foursight.parser.model import (
     CANNED_CYCLE_CODES,
     COORD_TRANSFORM_MODES,
+    DATUM_SHIFT_CONSEQUENCE,
+    SPINDLE_SYNC_CODES,
+    SPINDLE_SYNC_CONSEQUENCE,
     Command,
     CoordTransformMode,
     ModalState,
@@ -227,11 +230,27 @@ class _Run:
         if transforms:
             self._extend(line, _transform_reason(transforms), drawn=False)
             return
+        if modal.datum_shift is not None:
+            self._extend(
+                line,
+                f"G{modal.datum_shift} datum shift active; {DATUM_SHIFT_CONSEQUENCE}",
+                drawn=False,
+            )
+            return
         if modal.cutter_comp is not None:
             self._extend(
                 line,
                 f"G{modal.cutter_comp} cutter compensation active; the drawn path is the programmed "
                 "centerline, not the compensated path",
+                drawn=True,
+            )
+            return
+        if command.motion in SPINDLE_SYNC_CODES:
+            # Last among the drawn tiers: with compensation also active, the path is wrong in
+            # *space*, which outranks a span whose only fault is its clock.
+            self._extend(
+                line,
+                f"G{command.motion} spindle-synchronized motion; {SPINDLE_SYNC_CONSEQUENCE}",
                 drawn=True,
             )
             return

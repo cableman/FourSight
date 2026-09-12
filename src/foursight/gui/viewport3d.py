@@ -102,10 +102,13 @@ LEGEND_STYLE = (
     "background: rgba(20, 20, 20, 190); color: #d8d8d8; border-radius: 4px; padding: 6px 8px;"
 )
 LEGEND_MARGIN_PX = 10
-# Reused verbatim from `session` and `selection`, which say this about the same geometry. The colour
-# means nothing on its own — what makes an amber span actionable is knowing it is a centreline.
+# The legend cannot name the *reason* — it has only the batches, and one program's unverified spans
+# may be cutter comp while another's are spindle-synchronized motion, which are wrong about different
+# things. So the tooltip says where the reason lives rather than guessing at it; before M16 it
+# asserted "the programmed centreline", which is exactly right for G41 and false for G33.
 LEGEND_TOOLTIP = (
-    "Unverified spans are drawn as the programmed centreline, which is not where the tool goes."
+    "Unverified spans are drawn, but part of what they show cannot be trusted; "
+    "the diagnostics list says what."
 )
 # How far the cursor may travel between press and release and still count as a *click*, in pixels
 # (Manhattan distance, which is what Qt's own drag-start heuristic uses). Above it the gesture was a

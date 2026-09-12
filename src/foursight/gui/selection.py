@@ -33,7 +33,7 @@ class LineSelection:
     mask: np.ndarray  # (N,) bool over the store
     count: int
     suppressed: Span | None  # the span that stopped this line being drawn, if any
-    unverified: Span | None  # drawn, but not where the tool actually goes
+    unverified: Span | None  # drawn, but part of what it shows cannot be trusted; see its reason
 
     @property
     def has_geometry(self) -> bool:
@@ -60,9 +60,13 @@ class LineSelection:
             return f"Line {self.line_no}: no motion"
         segments = "segment" if self.count == 1 else "segments"
         if self.unverified is not None:
+            # The reason comes off the span, exactly as the suppressed branch above takes it. This
+            # line used to assert "shown as the programmed centreline", which is right for cutter
+            # comp and wrong for G33: a thread is drawn exactly where the tool goes, and it is the
+            # *timing* that is unmodelled.
             return (
-                f"Line {self.line_no}: {self.count:,} {segments} — unverified, "
-                "shown as the programmed centreline"
+                f"Line {self.line_no}: {self.count:,} {segments} — unverified: "
+                f"{self.unverified.reason}"
             )
         return f"Line {self.line_no}: {self.count:,} {segments}"
 

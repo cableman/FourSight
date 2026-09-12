@@ -229,6 +229,44 @@ def test_a_known_offset_shifts_where_the_limit_bites() -> None:
     assert "430 mm" in found[0].message
 
 
+def test_an_offset_table_value_is_not_reported_as_a_position(profile) -> None:
+    """The defect this closes: `check` exited 1 on a correct program.
+
+    `G10 L2 P1 X9999` writes an offset-table entry. Reading its X as a destination produced
+    `geometry.axis-travel-exceeded` — an **error** — against a coordinate the machine never visits.
+    """
+    found = of(check(program("G10 L2 P1 X9999 Y0 Z0\n"), profile), "geometry.axis-travel-exceeded")
+    assert found == []
+
+
+def test_a_travel_violation_after_a_g10_downgrades_to_a_warning() -> None:
+    """The program rewrote the offset table, so the profile's copy no longer describes the machine."""
+    shifted = load_profile_text(
+        '[machine]\nunits="mm"\n[axes.x]\nmin=0.0\nmax=400.0\n'
+        "[offsets]\ng54 = [50.0, 0.0, 0.0, 0.0]\n"
+    )
+    body = "G21 G90 G54\nS8000 M3\nG10 L2 P1 X0 Y0 Z0\nG1 X380 F100\nM30\n"
+    found = only(diagnose(body, shifted), "geometry.axis-travel-exceeded")
+    assert found[0].severity is Severity.WARNING
+    assert "unconfirmed" in found[0].message
+
+
+def test_a_travel_violation_under_a_datum_shift_downgrades_to_a_warning() -> None:
+    """G92 states coordinates against a datum that is not in the file, so the offset cannot be applied.
+
+    X500 is outside the 400 limit on its own, so the violation is real and still reported — but as a
+    warning, because the machine coordinate it would name is an assumption.
+    """
+    shifted = load_profile_text(
+        '[machine]\nunits="mm"\n[axes.x]\nmin=0.0\nmax=400.0\n'
+        "[offsets]\ng54 = [50.0, 0.0, 0.0, 0.0]\n"
+    )
+    body = "G21 G90 G54\nS8000 M3\nG92 X0\nG1 X500 F100\nM30\n"
+    found = only(diagnose(body, shifted), "geometry.axis-travel-exceeded")
+    assert found[0].severity is Severity.WARNING
+    assert "unconfirmed" in found[0].message
+
+
 def test_below_minimum_is_also_caught(profile) -> None:
     found = only(check(program("G1 X-10 F100\n"), profile), "geometry.axis-travel-exceeded")
     assert "minimum" in found[0].message

@@ -650,13 +650,41 @@ An unrecognized code that never touches position stays a warning. An unrecognize
   inside a cycle is already known to belong to it. An uncancelled span runs to end of program and
   says so.
 - **Three code tables, and no code may appear in two of them:** `INTERPRETED_GCODES` (silent),
-  the unsupported sets (`CANNED_CYCLES`, `CUTTER_COMP`, `UNSUPPORTED_ONE_SHOT`), and everything
-  else, which warns. The *cancel* codes G40 and G80 are interpreted; their activations are not.
+  the unsupported sets (`CANNED_CYCLES`, `CUTTER_COMP`, `COORD_TRANSFORM_CODES`, `DATUM_SHIFT_ACTIVATES`,
+  `PROBE_CODES`, `SPINDLE_SYNC_CODES`, `UNSUPPORTED_ONE_SHOT`), and everything else, which warns.
+  The *cancel* codes G40, G80, G92.1 and G92.2 are interpreted; their activations are not.
 - **G61/G61.1/G64 and G98/G99 are accepted silently.** They change cornering or canned-cycle return,
   not the programmed centreline we draw, so there is nothing about the toolpath to warn on — and
   G64 appears in nearly every LinuxCNC program, so warning would be pure noise.
 - **`G10` and `G92`/`G92.x` are `unsupported`, not warnings.** They shift the coordinate system or
-  tool table, which changes where subsequent motion actually goes.
+  tool table, which changes where subsequent motion actually goes. **M16 made both consequential in
+  `sim` as well**, having found them diagnosed-only and still drawn:
+  - **Their axis words are parameters, not a destination**, and `_advance` consumed them as one. A
+    `G10 L2 P1 X50 Y50 Z-10` drew a feed line to (50, 50, −10) and then offset every later block by
+    it; `verify` walks the same helper, so `foursight check` reported `geometry.axis-travel-exceeded`
+    as an **error** against a coordinate the machine never visits — a correct program exiting 1. The
+    guard lives in `_advance`, which is the one place both layers share.
+  - **A G92 shift is a suppressed span**, on `ModalState.datum_shift`, ending at G92.1/G92.2 and
+    running to end of program otherwise. **Accepted cost, recorded rather than dodged:** under this
+    plan's assumed start position a preamble `G92 X0 Y0 Z0` has a *zero* shift, so suppression blanks
+    a picture that was accidentally correct. No "suppress only when the shift is non-zero" exemption
+    — that is the mode that is right most of the time and inexplicable the rest, which § G50 already
+    refuses. The alternative, *interpreting* G92 arithmetically, is a scope change and is not taken.
+  - **A G10 makes the profile's `[offsets]` stale from that line on** (`offsets_rewritten_from`), so
+    every machine-coordinate claim after it carries `offset_known=False` — a travel violation there
+    is the warning it can stand behind rather than the error it cannot. Geometry is still drawn: the
+    programmed path is unaffected, only the frame it is stated in is.
+- **Probing (G38.2–G38.5) is a suppressed span and costs the position.** A probe stops *at contact*,
+  which the file does not contain — the programmed endpoint is a limit on the search. `MachineState`
+  clears the position and sets `position_lost`, the M98 pathway, so the moves after it are refused
+  until X, Y and Z are restated absolutely. It is a *motion mode*, so the bare block after one is a
+  second probe, not a straight move.
+- **Spindle-synchronized motion (G33) is the one refused motion mode that is drawn.** The path is a
+  straight line to the programmed endpoint and v1 gets it exactly right; what is unmodelled is the
+  feed law (distance per revolution against spindle speed, not F). Suppressing it would delete real
+  geometry to avoid a timing error — the G43 trade, decided the same way — so it is a `drawn=True`
+  span and cutter compensation outranks it, because being wrong in *space* outranks being wrong
+  about the clock.
 - **An unknown code is reported once per code, not once per line**, so a 100k-line file with a stray
   `G12` on every line yields one warning rather than 100k.
 

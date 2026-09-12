@@ -9,20 +9,19 @@ done yet" is exactly the drift this codebase refuses everywhere else.
 When an item closes: delete it here, and tick it where `TASKS.md` points at it. When a new one opens —
 including anything found by launching the application and looking at it — add it here first.
 
-Project status: **M0–M15 complete except T0.8/T0.9.**
+Project status: **M0–M16 complete except T0.8/T0.9.**
 
 | # | Item | Kind | Blocked by |
 |---|---|---|---|
 | [1](#1-the-windows-bundle-has-never-been-launched-t08--t09) | Windows bundle never launched | gate | a clean Windows VM |
-| [2](#2-four-motion-affecting-codes-are-drawn-as-if-understood) | G10/G33/G38.x/G92 drawn as if understood | defect | — |
-| [3](#3-the-full-test-suite-cannot-run-in-one-process) | Full suite segfaults in one process | defect | diagnosis |
-| [4](#4-applying-a-profile-under-part-coordinates-raises) | Profile Apply under Part coordinates raises | defect | — |
-| [5](#5-processfeed-too-high-has-a-feed-mode-blind-spot) | `feed-too-high` blind to G93 | defect | — |
-| [6](#6-stepdwell-reaches-no-consumer) | `Step.dwell` reaches no consumer | owed | — |
-| [7](#7-the-plunge-check-is-still-z-only) | Plunge check is Z-only on rotary jobs | owed | a design answer |
-| [8](#8-neither-m7-rule-has-a-fix) | Neither M7 rule has a fix | owed | — |
-| [9](#9-the-profile-dialog-has-no-diff-preview) | Profile dialog has no diff preview | owed | — |
-| [10](#10-axestype-is-not-editable-so-axesb-is-invisible) | `[axes.*].type` not editable | owed | 5-axis is post-v1 |
+| [2](#2-the-full-test-suite-cannot-run-in-one-process) | Full suite segfaults in one process | defect | diagnosis |
+| [3](#3-applying-a-profile-under-part-coordinates-raises) | Profile Apply under Part coordinates raises | defect | — |
+| [4](#4-processfeed-too-high-has-a-feed-mode-blind-spot) | `feed-too-high` blind to G93 | defect | — |
+| [5](#5-stepdwell-reaches-no-consumer) | `Step.dwell` reaches no consumer | owed | — |
+| [6](#6-the-plunge-check-is-still-z-only) | Plunge check is Z-only on rotary jobs | owed | a design answer |
+| [7](#7-neither-m7-rule-has-a-fix) | Neither M7 rule has a fix | owed | — |
+| [8](#8-the-profile-dialog-has-no-diff-preview) | Profile dialog has no diff preview | owed | — |
+| [9](#9-axestype-is-not-editable-so-axesb-is-invisible) | `[axes.*].type` not editable | owed | 5-axis is post-v1 |
 
 ---
 
@@ -56,32 +55,14 @@ in `PLAN.md` and applied to `scripts/build.py`; D2 ticked; T0.9's gate closed.
 
 ## Defects
 
-### 2. Four motion-affecting codes are drawn as if understood
-
-**The most serious item in this file**, because it is the governing rule failing in the one direction the
-rule exists to prevent — not a refusal to draw, but a confident drawing of a path the program does not
-command.
-
-`UNSUPPORTED_ONE_SHOT` — **G10, G33, G38.x and G92** — is *diagnosed only*. `verify` reports each one, and
-`sim` still draws the surrounding motion as ordinary moves. **G92 is the same bug class G68 was**: a
-coordinate-system shift drawn as if absent, so every subsequent move is rendered at the wrong place with a
-diagnostic that says nothing about the geometry being wrong. G68 got suppressed spans in M6; these did not.
-
-`tests/test_simulator.py::test_the_diagnostic_only_codes_are_listed_deliberately` pins the set, so a new
-code cannot join the gap by accident — but it pins the gap, it does not close it.
-
-**Done when:** each of the four either suppresses its affected span the way `COORD_TRANSFORM_MODES` does, or
-is argued down to genuinely inert in `PLAN.md` with the test updated to match.
-*TASKS.md § M6, owed.*
-
-### 3. The full test suite cannot run in one process
+### 2. The full test suite cannot run in one process
 
 `pytest -q` dies with `Fatal Python error: Segmentation fault` at
 `test_editor.py::test_loading_a_program_shows_the_parsed_text`, reproducibly (3/3). Run the suite in two
 parts and every test passes:
 
 ```bash
-.venv/bin/pytest -q --ignore=tests/test_dialect.py   # 1728, ~40 s
+.venv/bin/pytest -q --ignore=tests/test_dialect.py   # 1777, ~40 s
 .venv/bin/pytest -q tests/test_dialect.py            # 43, <1 s
 ```
 
@@ -115,7 +96,7 @@ assumed.**
 **Done when:** `pytest -q` is green in one process on Linux and Windows, and the CI matrix has run.
 *TASKS.md § M6, OPEN.*
 
-### 4. Applying a profile under Part coordinates raises
+### 3. Applying a profile under Part coordinates raises
 
 Found while regenerating the README screenshots — no test covers the sequence.
 
@@ -137,7 +118,7 @@ Qt swallows the exception, so the user sees nothing but a marker that stopped up
 **Done when:** the toggle is cleared with the timeline and store agreeing, and a test drives the three steps
 above.
 
-### 5. `process.feed-too-high` has a feed-mode blind spot
+### 4. `process.feed-too-high` has a feed-mode blind spot
 
 It compares a raw `F` word to `limits.max_feed` under **every** feed mode, so under G93 (inverse time) a
 legitimate `F1000` — a 0.06 s block — is reported as *"feed 1000 mm/min exceeds 3000 mm/min"*. A wrong
@@ -154,7 +135,7 @@ correctly or skipped with that stated.
 
 ## Owed
 
-### 6. `Step.dwell` reaches no consumer
+### 5. `Step.dwell` reaches no consumer
 
 The value is computed, converted and tested, and **the timeline does not include dwell time**. So M6's
 dwell-units change is correct and currently unobservable outside tests, and playback skips dwells instantly.
@@ -162,7 +143,7 @@ dwell-units change is correct and currently unobservable outside tests, and play
 Worth closing when the timeline is next touched.
 *TASKS.md § M6, owed.*
 
-### 7. The plunge check is still Z-only
+### 6. The plunge check is still Z-only
 
 On a rotary job the "plunge" into a bar is **radial**, and for a tool working the side of a blank that can
 be a Y move rather than a Z one. `process.plunge-feed-too-high` would not see it.
@@ -174,7 +155,7 @@ rather than guessed at.
 **Needs a decision before it needs code.**
 *TASKS.md § M9, owed.*
 
-### 8. Neither M7 rule has a fix
+### 7. Neither M7 rule has a fix
 
 `process.plunge-feed-too-high` has an obvious one — rewrite the `F` on the plunge block — and it would be
 **the first fix keyed to a rule whose diagnostic spans two lines**: the plunge, and wherever the inherited
@@ -184,14 +165,14 @@ rather than guessed at.
 different number.
 *TASKS.md § M7, owed.*
 
-### 9. The profile dialog has no diff preview
+### 8. The profile dialog has no diff preview
 
 Every other change FourSight makes to a file is reviewable as a unified diff first (`DiffDialog`) — a
 profile edit is not. `ProfileDocument` already holds both texts, so the diff is available; showing it before
 `Save as…` would close the gap.
 *TASKS.md § M8, owed.*
 
-### 10. `[axes.*].type` is not editable, so `[axes.b]` is invisible
+### 9. `[axes.*].type` is not editable, so `[axes.b]` is invisible
 
 The schema deliberately omits `type`, since the form has no reason to let A become linear. The consequence
 is that **a profile using `[axes.b]` cannot be edited in the GUI at all** — it simply does not appear.

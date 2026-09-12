@@ -20,6 +20,13 @@ from foursight.parser.model import (
     CANNED_CYCLE_CODES,
     COORD_TRANSFORM_CODES,
     COORD_TRANSFORM_MODES,
+    DATUM_SHIFT_ACTIVATES,
+    DATUM_SHIFT_CANCELS,
+    DATUM_SHIFT_CONSEQUENCE,
+    PROBE_CODES,
+    PROBE_CONSEQUENCE,
+    SPINDLE_SYNC_CODES,
+    SPINDLE_SYNC_CONSEQUENCE,
     Command,
     CoordTransformMode,
     ParseErrorKind,
@@ -44,6 +51,7 @@ INTERPRETED_GCODES = frozenset({
     "80",                                    # canned-cycle CANCEL
     "90", "91", "90.1", "91.1",
     "93", "94", "95",
+    "92.1", "92.2",                          # datum-shift clear and suspend; both end the span
     "98", "99",                              # canned-cycle return mode; only meaningful with 8x
 })  # fmt: skip
 
@@ -70,18 +78,18 @@ INTERPRETED_MCODES = frozenset({"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"
 # Borrowed from the parse layer so `sim` and `verify` cannot disagree about what a cycle is.
 CANNED_CYCLES = CANNED_CYCLE_CODES
 CUTTER_COMP = frozenset({"41", "42"})
-# Per-occurrence rather than span-based: these are one-shot or rarely repeated.
+# Per-occurrence rather than span-based: G10 writes a table entry at one point in the program.
+#
+# Its *consequence* still spans — after it, `[offsets]` describes a table the program has changed —
+# but that is carried as `offset_known=False` from `machine_value` rather than as a second
+# diagnostic, so a travel violation downstream is a warning it can stand behind instead of an error
+# it cannot. See `machine/state.py::offsets_rewritten_from`.
 UNSUPPORTED_ONE_SHOT: dict[str, str] = {
-    "10": "G10 sets tool/offset table values, which v1 does not model",
-    "33": "G33 spindle-synchronized motion is not interpreted in v1",
-    "38.2": "G38.2 probing motion is not interpreted in v1",
-    "38.3": "G38.3 probing motion is not interpreted in v1",
-    "38.4": "G38.4 probing motion is not interpreted in v1",
-    "38.5": "G38.5 probing motion is not interpreted in v1",
-    "92": "G92 coordinate-system offset is not interpreted in v1",
-    "92.1": "G92.1 clears coordinate-system offsets, which v1 does not model",
-    "92.2": "G92.2 suspends coordinate-system offsets, which v1 does not model",
-    "92.3": "G92.3 restores coordinate-system offsets, which v1 does not model",
+    "10": (
+        "G10 writes the offset or tool table, which v1 does not model; the profile's [offsets] are "
+        "treated as unknown from here on, so machine-coordinate checks after this line are "
+        "reported as warnings rather than errors"
+    ),
 }
 
 # The M-code counterpart of UNSUPPORTED_ONE_SHOT, and `UnknownCodes`'s M branch **must** consult it.
@@ -299,6 +307,8 @@ class UnsupportedMotionCodes(Rule):
         yield from self._transform_spans(commands)
         yield from self._comp_spans(commands)
         yield from self._one_shots(commands)
+        yield from self._datum_spans(commands)
+        yield from self._motion_mode_spans(commands)
 
     def _cycle_spans(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
         for start, end in _spans(commands, lambda c: (c.motion or "") in CANNED_CYCLES):
@@ -337,6 +347,53 @@ class UnsupportedMotionCodes(Rule):
                         f"{'' if closed else f' (never cancelled by G{mode.cancel})'}"
                         f"; {mode.consequence}"
                     ),
+                    offset=commands[start].ref.start,
+                )
+
+    def _datum_spans(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
+        """G92 datum shifts, from the field `sim` reads to decide not to draw them.
+
+        A span rather than one diagnostic per G92, because the consequence is what spans: every block
+        until G92.1/G92.2 states its coordinates against a datum that is not in the file.
+        """
+        for start, end in _spans(commands, lambda c: c.modal_snapshot.datum_shift is not None):
+            first = commands[start].ref.line_no
+            last = commands[end].ref.line_no
+            code = commands[start].modal_snapshot.datum_shift
+            closed = end + 1 < len(commands) and bool(
+                DATUM_SHIFT_CANCELS & set(commands[end + 1].gcodes)
+            )
+            yield Diagnostic(
+                rule_id=self.rule_id,
+                severity=Severity.UNSUPPORTED,
+                line=first,
+                message=(
+                    f"G{code} datum shift active from line {first} to {last}"
+                    f"{'' if closed else ' (never cancelled by G92.1/G92.2)'}"
+                    f"; {DATUM_SHIFT_CONSEQUENCE}"
+                ),
+                offset=commands[start].ref.start,
+            )
+
+    def _motion_mode_spans(self, commands: Sequence[Command]) -> Iterator[Diagnostic]:
+        """Probing and spindle-synchronized motion: modal, so reported per span like a cycle.
+
+        Both are motion modes, so the bare blocks after one are further probes or further threading
+        passes — the canned-cycle problem, and the reason neither can be a per-occurrence code.
+        """
+        for codes, consequence in (
+            (PROBE_CODES, PROBE_CONSEQUENCE),
+            (SPINDLE_SYNC_CODES, SPINDLE_SYNC_CONSEQUENCE),
+        ):
+            for start, end in _spans(commands, lambda c, s=codes: (c.motion or "") in s):
+                first = commands[start].ref.line_no
+                last = commands[end].ref.line_no
+                extent = f"line {first}" if first == last else f"lines {first} to {last}"
+                yield Diagnostic(
+                    rule_id=self.rule_id,
+                    severity=Severity.UNSUPPORTED,
+                    line=first,
+                    message=f"G{commands[start].motion} active at {extent}; {consequence}",
                     offset=commands[start].ref.start,
                 )
 
@@ -398,7 +455,15 @@ def _all_unsupported() -> frozenset[str]:
     **Every table that rule owns must appear here.** One that does not produces both a warning and
     an unsupported diagnostic for the same code, and the warning's text contradicts the other.
     """
-    return CANNED_CYCLES | CUTTER_COMP | COORD_TRANSFORM_CODES | frozenset(UNSUPPORTED_ONE_SHOT)
+    return (
+        CANNED_CYCLES
+        | CUTTER_COMP
+        | COORD_TRANSFORM_CODES
+        | DATUM_SHIFT_ACTIVATES
+        | PROBE_CODES
+        | SPINDLE_SYNC_CODES
+        | frozenset(UNSUPPORTED_ONE_SHOT)
+    )
 
 
 def _spans(commands: Sequence[Command], active) -> list[tuple[int, int]]:

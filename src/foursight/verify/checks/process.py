@@ -31,7 +31,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from foursight.machine.profile import MachineProfile
-from foursight.machine.state import Position, machine_value, walk
+from foursight.machine.state import (
+    Position,
+    machine_value,
+    offsets_rewritten_from,
+    offsets_stale_at,
+    walk,
+)
 from foursight.parser.dialect import DwellUnits
 from foursight.parser.model import AXIS_LETTERS, Command
 from foursight.verify.report import (
@@ -325,10 +331,14 @@ class ToolChangeWithoutRetract(Rule):
         clearance = safety.min_clearance_z
         if not safety.retract_before_toolchange or clearance is None:
             return
+        rewritten_from = offsets_rewritten_from(program.commands)
         for command, before, _ in walk(program.commands):
             if TOOL_CHANGE not in command.mcodes:
                 continue
             z, offset_known = machine_value(before.z, "Z", command, program.profile)
+            offset_known = offset_known and not offsets_stale_at(
+                command.ref.line_no, rewritten_from
+            )
             if z is not None and z >= clearance:
                 continue
             units = command.modal_snapshot.units
@@ -363,10 +373,14 @@ class RapidBelowClearance(Rule):
         clearance = program.profile.safety.min_clearance_z
         if clearance is None:
             return
+        rewritten_from = offsets_rewritten_from(program.commands)
         for command, _, after in walk(program.commands):
             if command.motion != "0" or not command.words:
                 continue
             z, offset_known = machine_value(after.z, "Z", command, program.profile)
+            offset_known = offset_known and not offsets_stale_at(
+                command.ref.line_no, rewritten_from
+            )
             if z is None or z >= clearance:
                 continue
             units = command.modal_snapshot.units

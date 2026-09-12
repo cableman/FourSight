@@ -1671,10 +1671,16 @@ pre-existing golden byte-identical. **But see the open issue below: the suite ca
 in one process.**
 
 - **OPEN — the full suite segfaults in one process, and `tests/test_dialect.py` is the trigger.**
-  Evidence, what was tried and reverted, and what is still undiagnosed: `OPEN.md` § 3.
-- **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`** — `OPEN.md` § 6.
-- **Owed from M6 — `UNSUPPORTED_ONE_SHOT` (G10, G33, G38.x, G92) is diagnosed only**, and still
-  drawn as if understood — `OPEN.md` § 2.
+  Evidence, what was tried and reverted, and what is still undiagnosed: `OPEN.md` § 2.
+- **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`** — `OPEN.md` § 5.
+- [x] **Owed from M6 — `UNSUPPORTED_ONE_SHOT` (G10, G33, G38.x, G92) was diagnosed only** — *done in
+  M16*. All four were drawn as if understood, and G10/G92 were worse than that: their axis words were
+  consumed as a destination, so `sim` drew a feed line to an offset-table value and `verify` reported
+  a travel-limit **error** at a coordinate the machine never visits. Now: `PARAMETER_ONLY_CODES`
+  skipped in `_advance` (the helper both layers share), G92 a suppressed span on
+  `ModalState.datum_shift`, G38.x suppressed and position-losing, G33 drawn-and-marked, and a G10
+  makes the profile's `[offsets]` stale from that line on. `PLAN.md` § Structural checks carries the
+  reasoning including the accepted cost; four fixtures, `tests/golden/segments.json` re-recorded.
 
 ---
 
@@ -1728,8 +1734,8 @@ reasoning; § Non-Goals now states explicitly which half is still deferred.
       `tests/test_checks_interpolated.py`, `tests/test_profile.py`
 
 - **Owed from M7 — `process.feed-too-high` has the feed-mode blind spot T7.1 avoided** —
-  `OPEN.md` § 5.
-- **Owed from M7 — neither new rule has a fix** — `OPEN.md` § 8.
+  `OPEN.md` § 4.
+- **Owed from M7 — neither new rule has a fix** — `OPEN.md` § 7.
 
 ---
 
@@ -1777,9 +1783,9 @@ switch on is a check nobody uses. `PLAN.md` § Editing the profile in the GUI ow
       `src/foursight/gui/app.py`, `tests/test_profile_dialog.py`, `tests/test_main_window.py`,
       `tests/test_gui_app.py`
 
-- **Owed from M8 — the dialog has no diff preview** — `OPEN.md` § 9.
+- **Owed from M8 — the dialog has no diff preview** — `OPEN.md` § 8.
 - **Owed from M8 — `[axes.*].type` is not editable**, so `[axes.b]` cannot be edited at all —
-  `OPEN.md` § 10.
+  `OPEN.md` § 9.
 
 ---
 
@@ -1833,7 +1839,7 @@ checks.
       `src/foursight/machine/profile_doc.py`, `tests/test_profile_dialog.py`
 
 - **Owed from M9 — the plunge check is still Z-only**, and a rotary plunge is radial —
-  `OPEN.md` § 7.
+  `OPEN.md` § 6.
 
 ---
 

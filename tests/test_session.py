@@ -100,9 +100,20 @@ def test_the_suppression_warning_says_the_toolpath_is_incomplete(profile) -> Non
     assert any("Not drawn" in message for message in warnings)
 
 
-def test_the_unverified_warning_says_it_is_not_where_the_tool_goes(profile) -> None:
-    warnings = summary_of(fixture_text("cutter_comp_span.nc"), profile).warnings()
-    assert any("not where the tool goes" in message for message in warnings)
+def test_the_unverified_warning_carries_the_span_reason(profile) -> None:
+    """Restating the reason here made the line right about cutter comp and wrong about G33."""
+    summary = summary_of(fixture_text("cutter_comp_span.nc"), profile)
+    warning = next(m for m in summary.warnings() if "unverified" in m)
+    assert summary.unverified[0].reason in warning
+    assert "not the compensated path" in warning
+
+
+def test_the_unverified_warning_does_not_claim_a_thread_is_in_the_wrong_place(profile) -> None:
+    """G33's path is exact; only its clock is unmodelled, and the banner must not say otherwise."""
+    summary = summary_of(fixture_text("spindle_sync_g33.nc"), profile)
+    warning = next(m for m in summary.warnings() if "unverified" in m)
+    assert "centerline" not in warning and "centreline" not in warning
+    assert "time estimate" in warning
 
 
 def test_missing_geometry_is_reported_before_merely_untrusted_geometry(profile) -> None:

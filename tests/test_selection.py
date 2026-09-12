@@ -162,6 +162,20 @@ def test_an_unverified_line_is_selected_and_flagged(profile) -> None:
         assert "unverified" in selection.describe()
 
 
+def test_the_unverified_readout_carries_the_span_reason(profile) -> None:
+    """Clicking a thread must not be told it is a centreline.
+
+    The readout restated cutter comp's consequence for every unverified span, so a G33 segment — drawn
+    exactly where the tool goes, with only its timing unmodelled — explained itself as being somewhere
+    else entirely.
+    """
+    sim = fixture_simulation("spindle_sync_g33.nc", profile)
+    span = sim.unverified[0]
+    described = select_line(sim, span.first_line).describe()
+    assert span.reason in described
+    assert "centreline" not in described and "centerline" not in described
+
+
 def test_an_unverified_line_is_not_reported_as_suppressed(profile) -> None:
     """Drawn-but-untrusted and not-drawn are different tiers and must not collapse into one."""
     sim = fixture_simulation("cutter_comp_span.nc", profile)

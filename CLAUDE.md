@@ -4,21 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M15 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1771 tests**
-(1727 passed + 1 skipped without `test_dialect.py`, 43 in it).
+**M0–M15 are complete, plus M16** (the four diagnosed-only motion-affecting codes — `OPEN.md` § 2,
+now closed). `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1820 tests**
+(1776 passed + 1 skipped without `test_dialect.py`, 43 in it).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
 and will fail as configured**, because the job invokes `pytest -q` in one process — see below.
 
-**`OPEN.md` is the list of everything still owed** — one gate, four defects and five owed items — and it
+**`OPEN.md` is the list of everything still owed** — one gate, three defects and five owed items — and it
 is the *only* live record of each: `TASKS.md` points at it rather than restating status. Read it before
 picking up work, and put anything newly found there first. Two of its items bind on daily work:
 
 - **The full suite cannot be run in one process.** `pytest -q` segfaults at
   `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects while
   a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it. Every test
-  passes — run `pytest --ignore=tests/test_dialect.py` (1728, ~40 s) and `pytest tests/test_dialect.py`
+  passes — run `pytest --ignore=tests/test_dialect.py` (1777, ~40 s) and `pytest tests/test_dialect.py`
   (43) and both are green. **Run the suite in those two parts until it is fixed**, and do not read a green
-  `--ignore` run as a green suite. Evidence and the two fixes already tried and reverted: `OPEN.md` § 3.
+  `--ignore` run as a green suite. Evidence and the two fixes already tried and reverted: `OPEN.md` § 2.
 - **T0.8/T0.9** — launching the PyInstaller bundle on a clean Windows VM, which needs a VM — and
   `--windowed` has never been exercised. `OPEN.md` § 1.
 
@@ -118,6 +119,25 @@ These are the ones that are easy to violate silently. `PLAN.md` has the reasonin
   drawn. `CoordTransformMode.field` is three names at once — the `_GROUPS` key, the `ModalState`
   field, and the attribute both layers read — and a rename that misses one makes every span vanish
   silently.
+- **A block's axis words are not always a destination, and `_advance` is the one place that knows.**
+  `PARAMETER_ONLY_CODES` (G10, G92, G92.1–G92.3) carry X/Y/Z as *values*: G10 writes a table entry,
+  G92 renames the current point. Consuming them as motion drew a feed line to the offset values and
+  then hung every later block off it — and because `verify` walks the same `_advance`, `foursight
+  check` reported `geometry.axis-travel-exceeded` as an **error** at a coordinate the machine never
+  visits, failing a correct program. The guard therefore lives in `_advance`, not in
+  `MachineState.apply`: a fix in `apply` alone leaves the verifier lying. `apply` has its own branch
+  as well, because skipping the words is only half of it — the G10 also makes the profile's
+  `[offsets]` stale (`offsets_rewritten_from`, `offsets_stale_at`, and four rules that ask).
+- **The three refused motion tiers are not interchangeable, and the reason text lives with the
+  table.** `PROBE_CODES` (G38.2–G38.5) is *suppressed and loses the position*, because a probe stops
+  at contact and the file does not contain that point; `SPINDLE_SYNC_CODES` (G33) is **drawn** and
+  marked, because the path is exact and only the clock is not; `DATUM_SHIFT_ACTIVATES` (G92/G92.3)
+  is a suppressed span on `ModalState.datum_shift`, cancelled by G92.1/G92.2. All three are motion
+  modes or modal spans, so the *bare block after one belongs to it* — the canned-cycle trap. Never
+  restate a span's reason anywhere downstream: **three** places did — `session.warnings()`, the
+  legend tooltip and `selection.describe()` — and all three told the user a thread was "the
+  programmed centreline, which is not where the tool goes", which is true of G41 and false of G33.
+  Read `Span.reason`; both `LineSelection.unverified` and `Simulation.unverified` carry it.
 - **The profile editor edits the profile's *text*, never a `MachineProfile`.** Two things break if that
   is reversed. `MachineProfile` values are already mm, so a form populated from one shows 2540 for an
   inch profile's `max_feed = 100.0` and converts it again on write — 25.4× per round trip, silent. And

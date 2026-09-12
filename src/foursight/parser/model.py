@@ -95,6 +95,52 @@ COORD_TRANSFORM_CANCELS = frozenset(mode.cancel for mode in COORD_TRANSFORM_MODE
 # list would confuse two unrelated constructs.
 SUBPROGRAM_MCODES = frozenset({"98", "99"})
 
+# Blocks whose axis words are **parameters, not a destination**: G10 writes an offset or tool-table
+# entry, G92 states what the current point is to be called. Neither moves the machine.
+#
+# They live here, apart from the motion tables, because the damage was never in the drawing decision
+# alone: `_advance` consumed `G10 L2 P1 X50 Y50 Z-10` as a move to (50, 50, -10), so `sim` drew a
+# feed line across the part *and* every later block inherited the bogus origin — and `verify`, which
+# walks the same helper, reported `geometry.axis-travel-exceeded` as an **error** against a
+# coordinate the machine never visits. Skipping them is a correctness fix for both layers, and is
+# separate from what the datum change then means (`DATUM_SHIFT_*` below).
+PARAMETER_ONLY_CODES = frozenset({"10", "92", "92.1", "92.2", "92.3"})
+
+# The G92 family, by what each does to the datum shift. G92.1 clears it and G92.2 merely suspends
+# it; the difference is real on the machine and irrelevant here, because both leave it out of force.
+# G92.3 restores it, and does so **even with no G92 in this program**: the value then comes from the
+# control's persistent variable file, which no file states, so a restore is at least as unknowable as
+# a set and is treated identically rather than assumed to be zero.
+DATUM_SHIFT_ACTIVATES = frozenset({"92", "92.3"})
+DATUM_SHIFT_CANCELS = frozenset({"92.1", "92.2"})
+DATUM_SHIFT_FIELD = "datum_shift"
+DATUM_SHIFT_CONSEQUENCE = (
+    "the coordinates in this span are stated against a datum v1 does not model, so the span is "
+    "not drawn"
+)
+
+# Probing. G38.2-G38.5 are *motion* modes and are modal, so the bare blocks after one are further
+# probes — the canned-cycle problem exactly. They are suppressed rather than drawn because a probe
+# stops **at contact**, which is a point the file does not contain: the programmed endpoint is a
+# limit on the search, not a destination. For the same reason the position afterwards is lost, the
+# way it is after an undrawable G28 or an M98.
+PROBE_CODES = frozenset({"38.2", "38.3", "38.4", "38.5"})
+PROBE_CONSEQUENCE = (
+    "a probe stops where it touches the part, which the program does not state, so the move is not "
+    "drawn and the position after it is treated as unknown"
+)
+
+# Spindle-synchronized motion (threading). The one refused motion mode that is **drawn**: the path
+# is a straight line to the programmed endpoint and v1 gets it exactly right. What is not modelled is
+# the feed law — distance per revolution against spindle speed rather than F — so the geometry is
+# trustworthy and the time estimate is not. Suppressing it would delete real geometry to avoid a
+# timing error, which is the G43 trade, decided the same way.
+SPINDLE_SYNC_CODES = frozenset({"33"})
+SPINDLE_SYNC_CONSEQUENCE = (
+    "the feed is spindle-synchronized rather than set by F, so the path is drawn but the time "
+    "estimate for this span is not modelled"
+)
+
 # Dialect defaults for a program that never states them, used as ModalState's field defaults.
 # PLAN.md § Dialect Divergences pins arc-centre mode: G91.1 default, G90.1 honoured.
 DEFAULT_PLANE = "17"
@@ -240,6 +286,11 @@ class ModalState:
     rotation: str | None = None  # '68' under G68, None under G69
     scaling: str | None = None  # '51' under G51, None under G50
     polar: str | None = None  # '16' under G16, None under G15
+    # The G92 datum shift; see DATUM_SHIFT_ACTIVATES. Not a modal *group* — G92 is non-modal, and
+    # putting it in one would make `G92 G92.1` a group conflict rather than the set-then-clear pair
+    # a control honours — but its *consequence* spans exactly like a transform, so it is snapshotted
+    # here and read by `sim` and `verify` the same way.
+    datum_shift: str | None = None  # '92'/'92.3' while in force, None after G92.1/G92.2
 
 
 @dataclass(slots=True)

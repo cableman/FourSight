@@ -408,6 +408,9 @@ SPAN_CONSTRUCTS = [
     ("G51 P2\nG1 X10 F100\nG50\n", False),
     ("G16\nG1 X10 Y30 F100\nG15\n", False),
     ("M98 P1000\n", False),
+    ("G92 X0 Y0 Z0\nG1 X10 F100\nG92.1\n", False),
+    ("G38.2 Z-20 F50\n", False),
+    ("G33 X20 K1.0\n", True),
 ]
 
 
@@ -431,18 +434,65 @@ def test_every_refusal_is_both_reported_and_not_drawn(body: str, drawn: bool, pr
     )
 
 
-#: Codes `verify` reports and `sim` still draws as ordinary moves. Listed so the gap is visible.
-DIAGNOSTIC_ONLY = {"10", "33", "38.2", "38.3", "38.4", "38.5", "92", "92.1", "92.2", "92.3"}
+# ------------------------------------------------- G10/G92/G33/G38 (M16)
+
+#: G10 writes a table entry, G92 renames the current point. Both carry X/Y/Z as *values*.
+PARAMETER_BLOCKS = ["G10 L2 P1 X50 Y50 Z-10", "G92 X0 Y0 Z0"]
 
 
-def test_the_diagnostic_only_codes_are_listed_deliberately() -> None:
-    """A pre-existing gap, recorded rather than closed here.
+@pytest.mark.parametrize("block", PARAMETER_BLOCKS)
+def test_a_parameter_block_draws_nothing_and_does_not_move_the_machine(block, profile) -> None:
+    """The defect this closes: these words were consumed as a destination.
 
-    These are reported by `verify` and drawn normally by `sim`. G92 in particular shifts the
-    coordinate system with no simulator consequence at all — the same bug class as G68 was, and it
-    deserves the same treatment in a follow-up. Pinning the set means a *new* code cannot join it by
-    accident: adding one to `UNSUPPORTED_ONE_SHOT` without a `sim` branch fails here.
+    `G10 L2 P1 X50 Y50 Z-10` drew a feed line to (50, 50, -10) and left every later block hanging off
+    that point — a cut across the part that the program never commands.
     """
-    from foursight.verify.checks.structural import UNSUPPORTED_ONE_SHOT
+    without = run(PREAMBLE + "G1 X10 F600\n", profile)
+    with_block = run(PREAMBLE + f"G1 X10 F600\n{block}\n", profile)
+    assert len(with_block.store) == len(without.store), f"{block} produced geometry"
+    assert 6 not in lines_with_segments(with_block)
 
-    assert set(UNSUPPORTED_ONE_SHOT) == DIAGNOSTIC_ONLY
+
+def test_a_datum_shift_span_is_suppressed_and_drawing_resumes_after_its_cancel(profile) -> None:
+    sim = run(PREAMBLE + "G1 X10 F600\nG92 X0 Y0 Z0\nG1 X20\nG92.1\nG1 X30\n", profile)
+    assert [(s.first_line, s.last_line) for s in sim.suppressed] == [(6, 7)]
+    drawn = lines_with_segments(sim)
+    assert 7 not in drawn, "a block stated against an unmodelled datum must not be drawn"
+    assert 9 in drawn, "G92.1 ends the span"
+
+
+def test_the_last_block_of_a_program_still_under_a_datum_shift_is_covered(profile) -> None:
+    """An uncancelled G92 runs to the end: a control keeps the shift until G92.1 or the next power cycle."""
+    sim = run(PREAMBLE + "G92 X0 Y0 Z0\nG1 X20 F600\nG1 X30\n", profile)
+    assert sim.suppressed and sim.suppressed[-1].last_line == 7
+    assert not {6, 7} & lines_with_segments(sim)
+
+
+def test_a_probe_is_not_drawn_and_costs_the_position(profile) -> None:
+    """The programmed endpoint is where the probe stops *searching*, not where it stops."""
+    sim = run(PREAMBLE + "G1 X10 F600\nG38.2 Z-20 F50\nG1 X20\n", profile)
+    assert 6 not in lines_with_segments(sim)
+    assert 7 not in lines_with_segments(sim), "the move after a probe starts from an unknown point"
+    assert any("probe" in span.reason for span in sim.suppressed)
+
+
+def test_the_bare_blocks_after_a_probe_are_probes_too(profile) -> None:
+    """G38.x is a motion mode, so a following bare block is another probe, not a straight move."""
+    sim = run(PREAMBLE + "G38.2 Z-20 F50\nZ-25\n", profile)
+    assert not {5, 6} & lines_with_segments(sim)
+
+
+def test_spindle_synchronized_motion_is_drawn_but_marked(profile) -> None:
+    """The one refused motion mode that is drawn: the path is exact, only the clock is not."""
+    sim = run(PREAMBLE + "G33 X20 K1.0\nX30\nG1 X40 F600\n", profile)
+    assert {5, 6} <= lines_with_segments(sim), "threading geometry is real and must be drawn"
+    assert [(s.first_line, s.last_line) for s in sim.unverified] == [(5, 6)]
+    assert sim.suppressed == ()
+
+
+def test_cutter_compensation_outranks_spindle_sync(profile) -> None:
+    """Both are drawn tiers, so the block under both must read as the one wrong in *space*."""
+    # Line 6 is under compensation AND spindle-synchronized motion; line 7 is comp only.
+    sim = run(PREAMBLE + "G41 D1\nG33 X20 K1.0\nG1 X30 F600\nG40\n", profile)
+    covering = [span.reason for span in sim.spans if span.contains(6)]
+    assert covering and all("compensation" in reason for reason in covering), covering

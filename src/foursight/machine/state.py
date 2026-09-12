@@ -23,7 +23,14 @@ from dataclasses import dataclass, replace
 
 from foursight.machine.profile import MachineProfile
 from foursight.parser.dialect import DwellUnits
-from foursight.parser.model import AXIS_LETTERS, SUBPROGRAM_MCODES, Command
+from foursight.parser.model import (
+    AXIS_LETTERS,
+    PARAMETER_ONLY_CODES,
+    PROBE_CODES,
+    PROBE_CONSEQUENCE,
+    SUBPROGRAM_MCODES,
+    Command,
+)
 
 # G53 makes a block's coordinates machine-absolute for that block only.
 _MACHINE_COORDS = "53"
@@ -59,6 +66,16 @@ def walk(commands: Sequence[Command]) -> Iterator[tuple[Command, Position, Posit
 
 
 def _advance(current: Position, command: Command) -> Position:
+    """Where this block leaves the programmed position.
+
+    A block carrying `PARAMETER_ONLY_CODES` does not move at all: `G10 L2 P1 X50 Y50 Z-10` names an
+    offset-table entry and `G92 X0` renames the current point, so consuming either as a destination
+    fabricates a move to a place the machine never goes — and then offsets every later block by it.
+    The guard is here, in the helper both layers share, rather than in `MachineState`: `walk` is the
+    verifier's path, and before M16 it reported a travel-limit **error** against the G10 value.
+    """
+    if any(code in PARAMETER_ONLY_CODES for code in command.gcodes):
+        return current
     moved = {
         _FIELD_OF[letter]: value
         for letter, value in command.words.items()
@@ -91,15 +108,47 @@ def machine_value(
     programmed value is returned with ``offset_known=False`` — the caller then weakens its claim
     rather than asserting a machine position it cannot know. Work offsets live in the controller,
     not the G-code file, so "unknown" is the normal case, not an error.
+
+    A block under an active G92 datum shift is ``offset_known=False`` whatever the profile says: the
+    shift is real, is not in the file, and is not modelled, so the machine coordinate derived from
+    the programmed one is an assumption rather than a fact. `sim` refuses to draw that span at all;
+    `verify` still checks it, and this is what keeps a travel violation there a warning instead of an
+    error it cannot stand behind.
     """
     if programmed is None:
         return None, True
     if is_machine_absolute(command):
         return programmed, True
+    if command.modal_snapshot.datum_shift is not None:
+        return programmed, False
     offset = profile.offset(command.modal_snapshot.offset)
     if offset is None:
         return programmed, False
     return programmed + getattr(offset, letter.lower()), True
+
+
+def offsets_rewritten_from(commands: Sequence[Command]) -> int | None:
+    """The first source line at which a G10 rewrites the offset table, or None.
+
+    `MachineState` carries the same fact as a flag while it steps; the verifier has no stepper and
+    walks statelessly, so it asks once and compares line numbers. One decision — "after a G10 the
+    profile's offsets describe a table the program has changed" — expressed for both callers here,
+    rather than as a second reading of G10 inside `verify`.
+    """
+    for command in commands:
+        if _OFFSET_TABLE_WRITE in command.gcodes:
+            return command.ref.line_no
+    return None
+
+
+def offsets_stale_at(line: int, rewritten_from: int | None) -> bool:
+    """Whether `line` sits at or after the G10 that `offsets_rewritten_from` found.
+
+    Trivial, and shared anyway: four rules ask it, and a `>` written for `>=` in one of them would
+    exempt exactly the G10 block itself — the one line where the profile's offsets are certainly
+    already wrong.
+    """
+    return rewritten_from is not None and line >= rewritten_from
 
 
 # =============================================================================================
@@ -125,6 +174,8 @@ def machine_value(
 
 _REFERENCE_RETURN = frozenset({"28", "30"})
 _DWELL = "4"
+# The one `PARAMETER_ONLY_CODES` member that touches the offset table the verifier reads.
+_OFFSET_TABLE_WRITE = "10"
 _TOOL_LENGTH_ON = frozenset({"43", "44"})
 _TOOL_LENGTH_OFF = "49"
 _RAPID_MOTIONS = frozenset({"0"})
@@ -175,7 +226,7 @@ class MachineState:
     is how a work offset ends up applied twice.
     """
 
-    __slots__ = ("_profile", "active_h", "position_lost", "programmed")
+    __slots__ = ("_profile", "active_h", "offsets_rewritten", "position_lost", "programmed")
 
     def __init__(self, profile: MachineProfile) -> None:
         self._profile = profile
@@ -187,6 +238,10 @@ class MachineState:
         # either refuses to draw every program's approach moves or fabricates a position after a
         # reference return.
         self.position_lost = False
+        # Set by a G10 that writes the offset table. From there on the profile's `[offsets]` describe
+        # a table the program has since changed, so every machine coordinate derived from them is an
+        # assumption. See `offsets_rewritten_from` for the verifier's half of the same decision.
+        self.offsets_rewritten = False
 
     @property
     def profile(self) -> MachineProfile:
@@ -205,10 +260,17 @@ class MachineState:
             # First: if a block calls or returns from a subprogram, nothing else about it can be
             # honoured, because we do not know what the called blocks did.
             return self._subprogram(command, subprogram)
+        if any(code in PARAMETER_ONLY_CODES for code in command.gcodes):
+            # Before the motion branches: these blocks carry X/Y/Z as *values*, not as a destination.
+            return self._parameter_block(command)
         if _DWELL in command.gcodes:
             return Step(command=command, dwell=self._dwell_seconds(command))
         if any(code in _REFERENCE_RETURN for code in command.gcodes):
             return self._reference_return(command)
+        if command.motion in PROBE_CODES:
+            # Keyed on the resolved motion mode, not on the block's own codes: G38.x is modal, so the
+            # bare blocks that follow one are further probes rather than straight moves.
+            return self._probe(command)
         return self._ordinary_move(command)
 
     # ---------------------------------------------------------------- individual constructs
@@ -302,6 +364,38 @@ class MachineState:
             ),
         )
 
+    def _parameter_block(self, command: Command) -> Step:
+        """G10 and the G92 family: values, not motion.
+
+        Nothing moves, so no `Move` is produced and the programmed position is left exactly where it
+        was — `_advance` refuses these blocks for the same reason, on the walker's behalf.
+
+        A G10 additionally makes the profile's offset table stale: the program has just written an
+        entry of it, and the value in `[offsets]` is whatever the machine had *before* the program
+        ran. That is recorded rather than applied, because applying it is interpretation and v1
+        reports G10 as unsupported (PLAN.md § Supported G-code Subset).
+
+        The G92 datum shift needs no field here: the resolver already carries it in the modal
+        snapshot, so `machine_value` and `sim` read it from the block itself.
+        """
+        if _OFFSET_TABLE_WRITE in command.gcodes:
+            self.offsets_rewritten = True
+        return Step(command=command, tool_length_unmodelled=self.active_h is not None)
+
+    def _probe(self, command: Command) -> Step:
+        """G38.2-G38.5: the move ends where the probe touches, which the file does not state.
+
+        The programmed endpoint is a *limit on the search*, not a destination, so drawing to it draws
+        a move the machine did not make and leaves every later block hanging off that wrong point.
+        The position is therefore lost, exactly as after an undrawable G28 or an M98, and drawing
+        resumes once X, Y and Z are restated absolutely.
+        """
+        self.programmed = Position()
+        self.position_lost = True
+        return Step(
+            command=command, undrawable=f"G{command.motion} probing move: {PROBE_CONSEQUENCE}"
+        )
+
     def _dwell_seconds(self, command: Command) -> float:
         """G4 P → seconds.
 
@@ -334,7 +428,9 @@ class MachineState:
 
     def _to_machine(self, position: Position, command: Command) -> tuple[Position, bool]:
         values: dict[str, float | None] = {}
-        known = True
+        # A G10 earlier in the program rewrote the table these offsets come from, so the frame is an
+        # assumption from here on however well `[offsets]` is configured.
+        known = not self.offsets_rewritten
         for letter, field in _FIELD_OF.items():
             value, offset_known = machine_value(
                 position.get(letter), letter, command, self._profile

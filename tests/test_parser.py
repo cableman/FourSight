@@ -46,6 +46,7 @@ EXPECTED_FIELDS = {
         "rotation",
         "scaling",
         "polar",
+        "datum_shift",
     ),
     Command: ("ref", "gcodes", "mcodes", "motion", "words", "modal_snapshot"),
 }

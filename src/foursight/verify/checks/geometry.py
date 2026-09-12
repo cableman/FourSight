@@ -32,7 +32,14 @@ from foursight.machine.profile import (
     StockCylinder,
     StockEnvelope,
 )
-from foursight.machine.state import Position, is_machine_absolute, machine_value, walk
+from foursight.machine.state import (
+    Position,
+    is_machine_absolute,
+    machine_value,
+    offsets_rewritten_from,
+    offsets_stale_at,
+    walk,
+)
 from foursight.parser.model import AXIS_LETTERS, Command
 from foursight.sim.interpolate import PLANES
 from foursight.sim.segments import Kind
@@ -236,13 +243,17 @@ class AxisTravelExceeded(Rule):
         if program.segments is not None and len(program.segments):
             yield from _interpolated_violations(program, self.rule_id, rotary=False)
             return
+        # A G10 rewrote the offset table the profile describes, so no machine coordinate at or after
+        # it can be asserted — the same call `_offset_known_by_line` makes for the interpolated path.
+        rewritten_from = offsets_rewritten_from(program.commands)
         for command, _, after in walk(program.commands):
             if not command.words:
                 continue
-            yield from self._for_command(command, after, program.profile)
+            stale = offsets_stale_at(command.ref.line_no, rewritten_from)
+            yield from self._for_command(command, after, program.profile, stale=stale)
 
     def _for_command(
-        self, command: Command, after: Position, profile: MachineProfile
+        self, command: Command, after: Position, profile: MachineProfile, *, stale: bool = False
     ) -> Iterator[Diagnostic]:
         for letter in sorted(AXIS_LETTERS & set(command.words)):
             axis = profile.axes.get(letter)
@@ -251,6 +262,7 @@ class AxisTravelExceeded(Rule):
                 # checking it here too would report every violation twice.
                 continue
             value, offset_known = machine_value(after.get(letter), letter, command, profile)
+            offset_known = offset_known and not stale
             if value is None:
                 continue
             violated = self._violation(axis, value)
@@ -337,7 +349,9 @@ class RotaryTravelExceeded(Rule):
         if program.segments is not None and len(program.segments):
             yield from _interpolated_violations(program, self.rule_id, rotary=True)
             return
+        rewritten_from = offsets_rewritten_from(program.commands)
         for command, _, after in walk(program.commands):
+            stale = offsets_stale_at(command.ref.line_no, rewritten_from)
             for letter in sorted(AXIS_LETTERS & set(command.words)):
                 axis = program.profile.axes.get(letter)
                 if axis is None or not axis.is_rotary or axis.wrap:
@@ -345,6 +359,7 @@ class RotaryTravelExceeded(Rule):
                 value, offset_known = machine_value(
                     after.get(letter), letter, command, program.profile
                 )
+                offset_known = offset_known and not stale
                 if value is None:
                     continue
                 if axis.min is not None and value < axis.min:
@@ -422,12 +437,19 @@ def _offset_known_by_line(program: Program) -> dict[int, bool]:
     arithmetic — but it still needs to know whether those coordinates rest on a configured offset or
     an assumed one, because that is what decides `error` versus `warning`. A program may mix a
     configured G54 with an unconfigured G55, so this is per line rather than program-wide.
+
+    A G10 earlier in the program rewrote the table those offsets come from, so every line at or after
+    it is unknown too whatever `[offsets]` says — the same decision `MachineState.offsets_rewritten`
+    makes for `sim`, taken from the one helper both call.
     """
+    rewritten_from = offsets_rewritten_from(program.commands)
     known: dict[int, bool] = {}
     for command in program.commands:
         code = command.modal_snapshot.offset
         resolved = is_machine_absolute(command) or program.profile.offset(code) is not None
         line = command.ref.line_no
+        if rewritten_from is not None and line >= rewritten_from:
+            resolved = False
         known[line] = known.get(line, True) and resolved
     return known
 

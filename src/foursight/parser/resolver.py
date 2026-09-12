@@ -23,6 +23,9 @@ from functools import lru_cache
 from foursight.parser.dialect import LINUXCNC, Dialect
 from foursight.parser.model import (
     COORD_TRANSFORM_MODES,
+    DATUM_SHIFT_ACTIVATES,
+    DATUM_SHIFT_CANCELS,
+    DATUM_SHIFT_FIELD,
     LINEAR_LENGTH_LETTERS,
     Command,
     ModalState,
@@ -301,6 +304,15 @@ def _modal_changes(
     """Collect only the fields whose value actually differs, so copy-on-write stays meaningful."""
     pending: dict[str, object] = {}
     for code in gcodes:
+        # First, and keyed on the code rather than a group: the G92 family is non-modal, so it has
+        # no `_GROUPS` entry to dispatch on, and giving it one would turn the ordinary set-then-clear
+        # pair `G92 ... G92.1` into a modal-group conflict.
+        if code in DATUM_SHIFT_ACTIVATES:
+            pending[DATUM_SHIFT_FIELD] = code
+            continue
+        if code in DATUM_SHIFT_CANCELS:
+            pending[DATUM_SHIFT_FIELD] = None
+            continue
         group = tables.group_of.get(code)
         if group == "units":
             # Looked up rather than tested against "20": under Mach3, G70 is inch and G71 is mm, so

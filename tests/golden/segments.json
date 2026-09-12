@@ -269,6 +269,40 @@
     ],
     "unknown_durations": 0
   },
+  "datum_shift_g92.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        20.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 11.754,
+    "feed": 3,
+    "geometry_sha256": "dd7ebadf1927b34a934efa2c1e5cfc9c",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 6,
+    "spans": [
+      [
+        13,
+        15,
+        "suppressed"
+      ]
+    ],
+    "unknown_durations": 0
+  },
   "framing_fanuc.nc": {
     "bounds_mm_deg": {
       "A": [
@@ -323,6 +357,107 @@
     "rapid": 3,
     "segments": 65,
     "spans": [],
+    "unknown_durations": 0
+  },
+  "offset_write_g10.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        30.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 12.34,
+    "feed": 3,
+    "geometry_sha256": "be0fbb697e5ddf89950dfd808cf33d6d",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 6,
+    "spans": [],
+    "unknown_durations": 0
+  },
+  "probe_g38.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        50.0
+      ],
+      "Y": [
+        0.0,
+        10.0
+      ],
+      "Z": [
+        -1.0,
+        25.0
+      ]
+    },
+    "duration_s": 10.34,
+    "feed": 2,
+    "geometry_sha256": "c9506f936c06dbf03fc31c4783e5951a",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 5,
+    "spans": [
+      [
+        13,
+        14,
+        "suppressed"
+      ],
+      [
+        15,
+        15,
+        "suppressed"
+      ]
+    ],
+    "unknown_durations": 0
+  },
+  "spindle_sync_g33.nc": {
+    "bounds_mm_deg": {
+      "A": [
+        0.0,
+        0.0
+      ],
+      "X": [
+        0.0,
+        10.0
+      ],
+      "Y": [
+        0.0,
+        10.0
+      ],
+      "Z": [
+        -25.0,
+        25.0
+      ]
+    },
+    "duration_s": 11.62,
+    "feed": 3,
+    "geometry_sha256": "7a7ae38d636f9177ebacc5aabd4373c0",
+    "notes": 0,
+    "rapid": 3,
+    "segments": 6,
+    "spans": [
+      [
+        12,
+        13,
+        "unverified"
+      ]
+    ],
     "unknown_durations": 0
   },
   "subprogram_call.nc": {

@@ -272,6 +272,35 @@ def test_cutter_comp_fixture_has_an_active_span() -> None:
     assert commands[-1].modal_snapshot.cutter_comp is None, "span must be cancelled by G40"
 
 
+def test_datum_shift_fixture_has_a_cancelled_span_with_cutting_inside_it() -> None:
+    commands = parse(fixture_text("datum_shift_g92.nc")).commands
+    inside = [c for c in commands if c.modal_snapshot.datum_shift == "92"]
+    assert len(inside) >= 3, "fixture must cut while the shift is in force"
+    assert commands[-1].modal_snapshot.datum_shift is None, "span must be cancelled by G92.1"
+
+
+def test_offset_write_fixture_carries_axis_words_that_are_not_a_destination() -> None:
+    """Without the X/Y/Z words the fixture would not exercise the defect at all."""
+    commands = parse(fixture_text("offset_write_g10.nc")).commands
+    writes = [c for c in commands if "10" in c.gcodes]
+    assert len(writes) == 1
+    assert {"X", "Y", "Z"} <= set(writes[0].words), "G10 block must carry axis words"
+
+
+def test_probe_fixture_has_a_bare_block_under_an_active_probe() -> None:
+    """The block that must NOT be drawn as a straight move: modal G38.x, like a canned cycle."""
+    commands = parse(fixture_text("probe_g38.nc")).commands
+    bare = [c for c in commands if c.motion == "38.2" and not c.gcodes]
+    assert bare, "fixture must have a bare axis block under an active probe"
+
+
+def test_spindle_sync_fixture_threads_over_more_than_one_block() -> None:
+    commands = parse(fixture_text("spindle_sync_g33.nc")).commands
+    threading = [c for c in commands if c.motion == "33"]
+    assert len(threading) >= 2, "fixture must carry G33 into a following bare block"
+    assert any("K" in c.words for c in threading), "threading needs a distance per revolution"
+
+
 def test_fixtures_are_committed_as_files_not_generated() -> None:
     """The targeted fixtures are real .nc files a human can open in the app."""
     for name in TARGETED:
