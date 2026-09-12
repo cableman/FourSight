@@ -92,12 +92,14 @@ is actually on screen: a program with no cutter-compensated span gets no `unveri
 | | Shortcut | |
 |---|---|---|
 | Fit to program | `Ctrl+0` | |
+| Open… / Reload | `Ctrl+O` / `F5` | |
 | Play / pause | `Ctrl+Space` | not bare Space — the editor holds the focus and Space must still type a space |
 | Legend | `Ctrl+L` | on by default |
 | Part coordinates | `Ctrl+P` | the path as it lies on the part (table mount) or the tool tip (head mount) |
 | Solid view | `Ctrl+D` | |
 | Toolpath | `Ctrl+T` | independent of the solid, deliberately |
 | Machine profile… | `Ctrl+M` | |
+| Undo last fix | `Ctrl+Z` | undoes the whole fix and its re-parse, not a typed character |
 
 Left-drag orbits, the wheel zooms, and panning is on **Shift+left-drag, right-drag and middle-drag** — a
 middle button is what a trackpad does not have. Every pan works in the camera plane rather than pyqtgraph's
@@ -144,9 +146,10 @@ The toolpath and the solid are **independent** toggles. Lines over a solid is th
 ![Reviewing a fix before applying it](docs/images/diff-preview.png)
 
 There are eight fixes. Every one is previewed as a unified diff and applied only on confirmation, and
-applied to the **editor buffer** — the file on disk is never written until you save. Applying one fix re-runs the entire pipeline (parse →
-simulate → verify), because a fix shifts every line number after it and a second fix aimed at "line 42"
-would otherwise land somewhere else.
+applied to the **editor buffer** — your file on disk is never written. Note that it currently cannot be:
+there is no `Save` yet, so a fix is reviewable and re-verifiable but not keepable (`OPEN.md` § 10).
+Applying one fix re-runs the entire pipeline (parse → simulate → verify), because a fix shifts every line
+number after it and a second fix aimed at "line 42" would otherwise land somewhere else.
 
 Two fixes decline on purpose:
 
@@ -162,10 +165,14 @@ diff does not show**.
 
 ## Machine profiles
 
-A TOML file describes the machine — travel limits, rapid rates, tolerances, rotary mount and centreline.
-The rule throughout is that **absence means unknown, never a fabricated value**: a limit that is not
-configured disables its check rather than defaulting to something plausible, and a head-mount profile with
-no `pivot_to_tip` refuses to show part coordinates rather than inventing a tool length.
+A TOML file describes the machine: travel limits and rapid rates per axis, tolerances, rotary mount and
+centreline, work offsets, safety minima, the stock blank and the cutter. Values may be written in inch
+(`[machine].units = "inch"`) and are converted on load, so a profile's numbers are in whatever unit the
+machine's documentation uses. The rule throughout is that **absence means unknown, never a fabricated
+value**: a limit that is not configured disables its check rather than defaulting to something plausible,
+an unset work offset downgrades travel-limit violations to warnings that say they assume zero, an unset
+`[axes.*].home` leaves `G28` undrawn rather than drawn to a guess, and a head-mount profile with no
+`pivot_to_tip` refuses to show part coordinates rather than inventing a tool length.
 
 ```bash
 foursight check part.nc --profile my-mill.toml
@@ -224,7 +231,17 @@ cannot be expressed.
 Both are unset by default, because neither has an honest generic value: a sane plunge rate belongs to the
 tool and the material, and no shipped profile knows what is clamped to your table today. `[stock]` also
 feeds the solid view, together with `[tool]` — which is the cutter the carve uses and nothing else, read by
-no verifier rule.
+no verifier rule:
+
+```toml
+[tool]
+diameter = 6.0
+shape = "flat"    # "flat" | "ball" — only the cutter's bottom matters to a heightfield
+```
+
+There is **no tool table**: one cutter carves the whole program, so a program that changes tools is carved
+wrongly wherever the other tool cut, and the legend says so. Unset, the solid view is unavailable and
+explains why rather than guessing a 6 mm end mill.
 
 What they catch and what they do not is worth being precise about:
 
@@ -251,13 +268,19 @@ comments accepted.
 
 Mach3 is selectable, because two of its behaviours are **controller configuration** rather than G-code —
 nothing in the file can tell us which way they are set, and guessing wrong at the arc-centre mode draws
-every unqualified arc in the program in the wrong place with no diagnostic at all.
+every unqualified arc in the program in the wrong place with no diagnostic at all. Both are refused under
+`linuxcnc`, where they mean nothing, rather than accepted and ignored.
 
 ```toml
 [dialect]
 name = "mach3"
-arc_centre = "absolute"   # Mach3's Config -> General "IJ Mode" radio button
+arc_centre = "absolute"    # Mach3's Config -> General "IJ Mode" radio button
+dwell_units = "milliseconds"  # some Mach3 posts emit G4 P in ms; never inferred from P's magnitude,
+                              # because a 90-second cooling dwell is legitimate
 ```
+
+`--arc-centre` overrides the first from the command line; `dwell_units` has no flag, because rescaling
+every dwell in a program is not a thing to try casually.
 
 ```bash
 foursight check part.nc --dialect mach3 --arc-centre absolute
@@ -347,7 +370,7 @@ mirrored wrap.
 
 ## Status
 
-M0–M15 complete. **`OPEN.md` lists everything still owed** — one gate, four defects and five owed items,
+M0–M16 complete. **`OPEN.md` lists everything still owed** — one gate, three defects and six owed items,
 each with its evidence and what closing it takes. The gaps that are deliberate design decisions rather
 than debt, all reasoned out in `PLAN.md`:
 

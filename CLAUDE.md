@@ -22,7 +22,7 @@ switching the solid view off mid-carve and quitting. It is a **shipping** crash,
 same shape (a `MainWindow` collected while its `ProgramLoader` parses) reproduces the exact stack the old
 segfault report recorded.
 
-**`OPEN.md` is the list of everything still owed** — one gate, three defects and five owed items — and it
+**`OPEN.md` is the list of everything still owed** — one gate, three defects and six owed items — and it
 is the *only* live record of each: `TASKS.md` points at it rather than restating status. Read it before
 picking up work, and put anything newly found there first. One of its items binds on daily work:
 

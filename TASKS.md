@@ -2205,8 +2205,8 @@ exist. This task makes the editor the *precise* way in rather than adding a seco
 
 ---
 
-**Project status: M0–M15 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
-Everything still owed — that gate, four defects and five owed items — is in **`OPEN.md`**.
+**Project status: M0–M16 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+Everything still owed — that gate, three defects and six owed items — is in **`OPEN.md`**.
 
 ---
 

@@ -22,6 +22,7 @@ Project status: **M0–M16 complete except T0.8/T0.9.**
 | [7](#7-neither-m7-rule-has-a-fix) | Neither M7 rule has a fix | owed | — |
 | [8](#8-the-profile-dialog-has-no-diff-preview) | Profile dialog has no diff preview | owed | — |
 | [9](#9-axestype-is-not-editable-so-axesb-is-invisible) | `[axes.*].type` not editable | owed | 5-axis is post-v1 |
+| [10](#10-there-is-no-way-to-save-the-edited-program) | No way to save the edited program | owed | — |
 
 ---
 
@@ -186,3 +187,33 @@ is that **a profile using `[axes.b]` cannot be edited in the GUI at all** — it
 5-axis is post-v1, so this is recorded rather than fixed. Note that
 `test_every_loader_key_is_editable` covers the flat sections and **would not catch a new axis**.
 *TASKS.md § M8, owed.*
+
+### 10. There is no way to save the edited program
+
+Four places state the contract — `PLAN.md` § Fix Engine, `fix/engine.py:17`, `gui/editor.py:8` and
+`README.md` § Fixes — and all four say the same thing: *"fixes modify the editor buffer and the user saves
+explicitly."* The second half was never built. `main_window.py` contains no `save` at all: `File` is Open,
+Reload, Machine profile…, Quit. The only `QFileDialog.getSaveFileName` in the codebase is the profile
+dialog's (`profile_dialog.py:233`), which writes the *profile*.
+
+So a fix can be previewed, applied and re-verified, and then the only thing the user can do with the result
+is retype it. `tests/test_main_window.py:760` and `tests/test_editor.py:172` both quote the contract while
+asserting only the buffer half of it, so nothing fails.
+
+**Not a deferral.** `PLAN.md` § Non-Goals (`:21-38`) defers removal simulation, 5-axis, CAM, macro
+languages, canned cycles, coordinate transforms and subprograms — and says nothing about saving. `:1037`
+states the contract positively, in the same paragraph that lists the eight fixes. So this is owed work that
+was never done, not scope that was declined.
+
+**One thing to settle first:** `:1037` says *"fixes never write to the original file"*, which constrains the
+**fix**, not the user — an explicit `Save` over the loaded path is still the user's act, and every editor
+works that way. Read the other way it means `Save as…` only. Decide it before writing the menu, because the
+two differ in exactly the case that matters: a fixed file the operator meant to keep beside the original.
+
+`LoadedFile.newline` (`fileio/loader.py:60`) exists **for** this — it is the recorded line ending a save is
+supposed to restore, and the Windows CRLF defect it was added for is only half-closed until something writes
+it back. Editing the buffer by hand has the same problem; this is not specific to fixes.
+
+**Done when:** `File → Save` and `Save as…` write the editor buffer using `LoadedFile.newline`, the window
+title or status bar shows unsaved state, quitting with unsaved changes prompts, and a test round-trips a
+CRLF fixture through a fix and asserts the bytes on disk.
