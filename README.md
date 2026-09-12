@@ -324,20 +324,17 @@ screen rather than a partial one, because half a program is not a program.
 
 ```bash
 .venv/bin/pip install -e ".[dev,gui]"
-.venv/bin/pytest -q --ignore=tests/test_dialect.py         # 1728, ~40 s   ] see below:
-.venv/bin/pytest -q tests/test_dialect.py                  # 43, <1 s      ] two runs, not one
+.venv/bin/pytest -q                                        # 1820, ~38 s
 .venv/bin/ruff check --fix . && .venv/bin/ruff format .
 .venv/bin/python scripts/build.py                          # PyInstaller one-dir bundle
 DISPLAY=:0 .venv/bin/python scripts/screenshots.py         # regenerate the images above
 ```
 
-**The 1771 tests do not currently run in one process.** `pytest -q` segfaults at
-`test_editor.py::test_loading_a_program_shows_the_parsed_text`: the main thread garbage-collects while a
-background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it. Every test passes
-in the two-part run above. `tests/test_dialect.py` is only the *trigger* — it contains no Qt and no threads,
-and merely shifts when a large collection lands. `TASKS.md` § M6 has the evidence and what has been ruled
-out. **Do not read a green `--ignore` run as a green suite**, and note that the CI matrix still invokes
-`pytest -q -rs` in one process, so it will fail as configured.
+The suite once segfaulted in one process at `test_editor.py::test_loading_a_program_shows_the_parsed_text`
+and had to be run in two parts. It no longer reproduces — twelve one-process runs across two revisions,
+two Qt platforms, `PYTHONMALLOC=malloc` and forced per-test collection are all green — so the split is
+gone. The hazard behind it is real and is tracked as `OPEN.md` § 4: a worker `QThread` the window has
+forgotten is destroyed while still running, which aborts the process.
 
 `PLAN.md` is the design record and owns every architectural decision, with the reasoning for each.
 `TASKS.md` is the execution log. When the two disagree, PLAN.md wins.

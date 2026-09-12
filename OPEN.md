@@ -14,9 +14,9 @@ Project status: **M0–M16 complete except T0.8/T0.9.**
 | # | Item | Kind | Blocked by |
 |---|---|---|---|
 | [1](#1-the-windows-bundle-has-never-been-launched-t08--t09) | Windows bundle never launched | gate | a clean Windows VM |
-| [2](#2-the-full-test-suite-cannot-run-in-one-process) | Full suite segfaults in one process | defect | diagnosis |
-| [3](#3-applying-a-profile-under-part-coordinates-raises) | Profile Apply under Part coordinates raises | defect | — |
-| [4](#4-processfeed-too-high-has-a-feed-mode-blind-spot) | `feed-too-high` blind to G93 | defect | — |
+| [2](#2-applying-a-profile-under-part-coordinates-raises) | Profile Apply under Part coordinates raises | defect | — |
+| [3](#3-processfeed-too-high-has-a-feed-mode-blind-spot) | `feed-too-high` blind to G93 | defect | — |
+| [4](#4-a-forgotten-worker-thread-aborts-the-application-on-quit) | Forgotten worker aborts the app on quit | defect | — |
 | [5](#5-stepdwell-reaches-no-consumer) | `Step.dwell` reaches no consumer | owed | — |
 | [6](#6-the-plunge-check-is-still-z-only) | Plunge check is Z-only on rotary jobs | owed | a design answer |
 | [7](#7-neither-m7-rule-has-a-fix) | Neither M7 rule has a fix | owed | — |
@@ -55,48 +55,7 @@ in `PLAN.md` and applied to `scripts/build.py`; D2 ticked; T0.9's gate closed.
 
 ## Defects
 
-### 2. The full test suite cannot run in one process
-
-`pytest -q` dies with `Fatal Python error: Segmentation fault` at
-`test_editor.py::test_loading_a_program_shows_the_parsed_text`, reproducibly (3/3). Run the suite in two
-parts and every test passes:
-
-```bash
-.venv/bin/pytest -q --ignore=tests/test_dialect.py   # 1777, ~40 s
-.venv/bin/pytest -q tests/test_dialect.py            # 43, <1 s
-```
-
-**The CI matrix still invokes `pytest -q -rs` in one process, so it will fail as configured.** The M6 matrix
-has not been run since.
-
-What the evidence says, so the next person does not rediscover it:
-
-- Pristine HEAD is green 3/3, so this arrived with M6.
-- `test_dialect.py` contains no Qt and no threads. It is the *trigger*, not the cause: it only shifts
-  allocation timing.
-- The faulthandler dump is unambiguous: the **main thread is `Garbage-collecting`** while a background
-  `ProgramLoader` QThread is inside `tokenize`. PySide6 destroys Qt C++ objects during that collection
-  while the worker is still executing Python.
-- Forcing `gc.collect()` after every test gets far past the crash, which fits: the danger is one large
-  accumulated collection landing at the wrong moment, not any single object.
-- Running everything up to and including `test_editor.py` (417 tests) is green. The crash needs the *whole*
-  suite to have been collected, i.e. every test module imported.
-
-**Tried, and did not fix it** — both reverted rather than left in as a half-fix that reads like a solution:
-closing the window in `test_editor.py`; giving `test_main_window.py`'s `window` fixture a teardown that
-calls `close()` (which is what cancels and joins the loader).
-
-**Not diagnosed:** *which* orphaned Qt object is unsafe to collect. Candidates are the unparented widgets
-returned by the `editor` and `panel` fixtures, which are never deleted. The product itself looks careful
-here — `MainWindow.closeEvent` cancels and waits for the loader precisely to avoid a QThread outliving its
-parent widget, and the real application pumps a true event loop rather than `processEvents` in a tight loop
-— so this reads as test-harness fragility rather than a shipping defect. **That should be confirmed, not
-assumed.**
-
-**Done when:** `pytest -q` is green in one process on Linux and Windows, and the CI matrix has run.
-*TASKS.md § M6, OPEN.*
-
-### 3. Applying a profile under Part coordinates raises
+### 2. Applying a profile under Part coordinates raises
 
 Found while regenerating the README screenshots — no test covers the sequence.
 
@@ -118,7 +77,7 @@ Qt swallows the exception, so the user sees nothing but a marker that stopped up
 **Done when:** the toggle is cleared with the timeline and store agreeing, and a test drives the three steps
 above.
 
-### 4. `process.feed-too-high` has a feed-mode blind spot
+### 3. `process.feed-too-high` has a feed-mode blind spot
 
 It compares a raw `F` word to `limits.max_feed` under **every** feed mode, so under G93 (inverse time) a
 legitimate `F1000` — a 0.06 s block — is reported as *"feed 1000 mm/min exceeds 3000 mm/min"*. A wrong
@@ -130,6 +89,53 @@ right next to it. Not fixed at the time because it changes existing behaviour an
 **Done when:** the rule reads the feed mode from the modal snapshot, and G93 blocks are either judged
 correctly or skipped with that stated.
 *TASKS.md § M7, owed.*
+
+### 4. A forgotten worker thread aborts the application on quit
+
+Found while investigating the old § 2. **Reproduced 3/3, deterministically, in two seconds** — this is a
+shipping crash, not a test-harness one:
+
+1. Open a program large enough that the carve takes a moment.
+2. `Ctrl+D` to switch the solid view on.
+3. `Ctrl+D` again *while it is still carving*.
+4. Quit.
+
+```
+QThread: Destroyed while thread '' is still running
+Fatal Python error: Aborted            (SIGABRT, exit 134)
+  File "src/foursight/sim/solid.py", line 431 in _sample_chunks
+  File "src/foursight/gui/background.py", line 172 in run
+```
+
+`_on_solid_toggled(False)` sets `self._carver = None` while the thread is still running
+(`main_window.py:807`) — that is what makes a superseded result droppable, since `_on_carved` compares
+identity. But `closeEvent` (`:495-505`) cancels and waits **only** `self._carver`, so a forgotten carve is
+never joined, and destroying the window destroys a running `QThread` child. `_start_carve` (`:838`,
+*"replacing any carve already running"*) drops a live carver exactly the same way — one defect, two routes.
+
+Nulling the reference is not what makes the result droppable: `_on_carved` already guards with
+`not self.solid_action.isChecked()`. `SolidCarver` has no `cancel` by design (`background.py:144-146`), so
+the remedy is to **wait**, which `closeEvent` already does — it simply cannot see a worker the window has
+forgotten. The window needs to own *every* running worker until it finishes, not just the current one.
+
+The same shape is reachable through the tests, which is the likely mechanism behind the old § 2: a
+`MainWindow` left to be garbage-collected while its parented `ProgramLoader` is still parsing aborts with
+the identical message, and that stack (`tokenize` under `background.py:91`) is exactly what the § 2 dump
+recorded. The suite itself no longer crashes (12 one-process runs green across two revisions, `xcb` and
+`offscreen`, `PYTHONMALLOC=malloc`, and forced per-test collection), so § 2 is closed — but this is the
+hazard it was describing, and it is live.
+
+Two tests build their own window in the test *body* rather than taking the fixture —
+`test_editor.py:226` (`test_loading_a_program_shows_the_parsed_text`, the test the old § 2 named) and
+`test_main_window.py:910` — and neither closes it. That is worth knowing before anyone reaches for fixture
+teardown again: § 2 records `close()` on the `window` fixture as tried and reverted, and it *could not*
+have worked, because `closeEvent` already cancels and waits `self._loader` (`:495-498`) and the windows
+that leak are not the fixture's. A teardown assertion that no worker `QThread` is still running — tracked
+by patching `QThread.start` into a `WeakSet` — catches a leak whatever built the window, which a fixture
+`close()` cannot.
+
+**Done when:** a worker started by the window is cancelled and joined before the window is destroyed,
+whichever route dropped the reference, and a test drives the four steps above.
 
 ---
 

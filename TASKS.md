@@ -1667,11 +1667,12 @@ The data model is already 4-axis-shaped, so this milestone is the transform itse
       `verify/checks/structural.py`, `tests/test_dialect.py`, `tests/conftest.py`
 
 **M6 COMPLETE** — **1333 tests pass** (1290 + 43 in `test_dialect.py`), ruff clean, every
-pre-existing golden byte-identical. **But see the open issue below: the suite cannot currently be run
-in one process.**
+pre-existing golden byte-identical. The one-process segfault recorded here is **closed**: it stopped
+reproducing (twelve one-process runs, two revisions, `offscreen` and `xcb`, `PYTHONMALLOC=malloc`, forced
+per-test collection), and the suite is run with plain `pytest -q` again. The thread-lifetime hazard it
+described is real, was reproduced deterministically against the *product* while investigating, and is now
+`OPEN.md` § 4.
 
-- **OPEN — the full suite segfaults in one process, and `tests/test_dialect.py` is the trigger.**
-  Evidence, what was tried and reverted, and what is still undiagnosed: `OPEN.md` § 2.
 - **Owed from M6 — `Step.dwell` reaches no consumer in `sim/`** — `OPEN.md` § 5.
 - [x] **Owed from M6 — `UNSUPPORTED_ONE_SHOT` (G10, G33, G38.x, G92) was diagnosed only** — *done in
   M16*. All four were drawn as if understood, and G10/G92 were worse than that: their axis words were
@@ -1734,7 +1735,7 @@ reasoning; § Non-Goals now states explicitly which half is still deferred.
       `tests/test_checks_interpolated.py`, `tests/test_profile.py`
 
 - **Owed from M7 — `process.feed-too-high` has the feed-mode blind spot T7.1 avoided** —
-  `OPEN.md` § 4.
+  `OPEN.md` § 3.
 - **Owed from M7 — neither new rule has a fix** — `OPEN.md` § 7.
 
 ---

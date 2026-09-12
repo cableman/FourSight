@@ -4,22 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M15 are complete, plus M16** (the four diagnosed-only motion-affecting codes — `OPEN.md` § 2,
-now closed). `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1820 tests**
-(1776 passed + 1 skipped without `test_dialect.py`, 43 in it).
-CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has not been run
-and will fail as configured**, because the job invokes `pytest -q` in one process — see below.
+**M0–M16 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1820 tests**
+and **runs in one process**: `.venv/bin/pytest -q` is green (1819 passed + 1 skipped, ~38 s).
+CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has still not been
+run**, though the reason it was expected to fail no longer holds.
+
+The suite used to segfault in one process at `test_editor.py::test_loading_a_program_shows_the_parsed_text`
+and had to be run in two parts. **That is no longer the case and the split is gone.** It did not reproduce
+in twelve one-process runs across two revisions (pre- and post-M16), under both `offscreen` and `xcb`,
+under `PYTHONMALLOC=malloc`, and with `gc.set_threshold(200, 5, 5)` plus a forced collection after every
+test. Run `.venv/bin/pytest -q`.
+
+What that investigation *did* find is live and is now `OPEN.md` § 4: a worker `QThread` the window has
+forgotten is never joined, so destroying the window kills a running thread —
+`QThread: Destroyed while thread is still running`, `SIGABRT`, reproducible 3/3 in two seconds by
+switching the solid view off mid-carve and quitting. It is a **shipping** crash, not a harness one, and the
+same shape (a `MainWindow` collected while its `ProgramLoader` parses) reproduces the exact stack the old
+segfault report recorded.
 
 **`OPEN.md` is the list of everything still owed** — one gate, three defects and five owed items — and it
 is the *only* live record of each: `TASKS.md` points at it rather than restating status. Read it before
-picking up work, and put anything newly found there first. Two of its items bind on daily work:
+picking up work, and put anything newly found there first. One of its items binds on daily work:
 
-- **The full suite cannot be run in one process.** `pytest -q` segfaults at
-  `test_editor.py::test_loading_a_program_shows_the_parsed_text`; the main thread garbage-collects while
-  a background `ProgramLoader` QThread is mid-parse, and PySide6 destroys Qt objects under it. Every test
-  passes — run `pytest --ignore=tests/test_dialect.py` (1777, ~40 s) and `pytest tests/test_dialect.py`
-  (43) and both are green. **Run the suite in those two parts until it is fixed**, and do not read a green
-  `--ignore` run as a green suite. Evidence and the two fixes already tried and reverted: `OPEN.md` § 2.
 - **T0.8/T0.9** — launching the PyInstaller bundle on a clean Windows VM, which needs a VM — and
   `--windowed` has never been exercised. `OPEN.md` § 1.
 
