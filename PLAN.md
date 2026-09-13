@@ -623,11 +623,17 @@ inside the kernel's range. The inch reading is 160 steps/inch on a 33 m table; t
 
 **`<Units>` is still checked rather than trusted, because the documented failure mode is a mis-set flag.**
 Mach3 defaults to metric, and tuning steps-per-unit in inches without switching native units is the
-commonest Mach3 setup error there is — the profile then says mm while the operator means inch. So the
-importer computes `Steps × Vel` and the soft-limit extent under the flag it was given, and **flags the row
-when the result is not a machine** (a step rate outside roughly 1–200 kHz, or travel outside roughly
-10 mm–10 m). The dialog's native-units selector is that row's remedy: one click, with the resulting rapid
-rates redrawn in the units chosen, so the operator recognises their own numbers.
+commonest Mach3 setup error there is — the profile then says mm while the operator means inch. The
+importer therefore recomputes the machine under the flag it was given and **warns when the result is not
+a machine**: a linear rapid above 60 m/min, or a longest axis travel outside 50 mm – 20 m.
+
+Two things that check cannot be. **`Steps × Vel` is useless for it**, which is worth stating because it
+looks like exactly the right test: it is a step rate in Hz, *identical under both readings*, and it
+corroborates the file rather than the flag. And **the two directions are not equally detectable** — a
+metric machine read as inch is 25.4× too big and unmistakable, while an inch machine read as mm shrinks
+into numbers that stay superficially plausible. The travel floor catches most of that direction, and the
+reliable remedy is the dialog's native-units selector with the values redrawn in the units chosen: an
+operator recognises their own machine's rapid rate at a glance, which no threshold does.
 
 **Rotary values never scale.** `[axes.a]` travel and rate are degrees end to end, exactly as
 `profile_schema.SCALED` already has it, and Mach3 agrees: `<AAngular>1</AAngular>` says A is angular, and

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<profile>
+	<Preferences>
+		<!-- machine-wide settings FourSight reads -->
+		<Profile>Inch router, flag left at mm</Profile>
+		<Units>0</Units>
+		<IJMode>0</IJMode>
+		<DwellinMilli>0</DwellinMilli>
+		<ShortRot>0</ShortRot>
+		<Rot360>1</Rot360>
+		<ROTSOFT>1</ROTSOFT>
+		<SoftLimit>1</SoftLimit>
+		<AAngular>1</AAngular>
+		<RadiusA>0.</RadiusA>
+		<PULLEY>1</PULLEY>
+		<!-- axis X (motor 0) -->
+		<Vel0>6.</Vel0>
+		<Steps0>2000.</Steps0>
+		<Acc0>20.</Acc0>
+		<M0Min>0.</M0Min>
+		<M0Max>48.</M0Max>
+		<Motor0Active>1</Motor0Active>
+		<AxisToMotor0>0</AxisToMotor0>
+		<!-- axis Y (motor 1) -->
+		<Vel1>6.</Vel1>
+		<Steps1>2000.</Steps1>
+		<Acc1>20.</Acc1>
+		<M1Min>0.</M1Min>
+		<M1Max>24.</M1Max>
+		<Motor1Active>1</Motor1Active>
+		<AxisToMotor1>1</AxisToMotor1>
+		<!-- axis Z (motor 2) -->
+		<Vel2>4.</Vel2>
+		<Steps2>2000.</Steps2>
+		<Acc2>20.</Acc2>
+		<M2Min>-6.</M2Min>
+		<M2Max>0.</M2Max>
+		<Motor2Active>1</Motor2Active>
+		<AxisToMotor2>2</AxisToMotor2>
+		<!-- axis A (motor 3) -->
+		<Vel3>50.</Vel3>
+		<Steps3>88.8889</Steps3>
+		<Acc3>200.</Acc3>
+		<M3Min>-360.</M3Min>
+		<M3Max>360.</M3Max>
+		<Motor3Active>1</Motor3Active>
+		<AxisToMotor3>3</AxisToMotor3>
+		<!-- spindle pulley table -->
+		<LSPEED1>1000.</LSPEED1>
+		<SPEED1>18000.</SPEED1>
+		<!-- settings the importer deliberately does not read -->
+		<XCLength>48.</XCLength>
+	</Preferences>
+</profile>

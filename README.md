@@ -197,6 +197,25 @@ that ships inside the package. Three details worth knowing:
   when you switch it back on.
 - Values you type are written verbatim — `0.005` stays `0.005`.
 
+### Importing a Mach3 profile
+
+**Import from Mach3…**, in the same form, reads a Mach3 `.xml` profile. It exists because the settings
+`[dialect]` and `[axes.a].short_rotate` carry — the arc-centre mode, whether `G4 P` is milliseconds,
+whether the control short-rotates a rapid — appear nowhere in a G-code program, and the only honest
+source for them is the controller's own file.
+
+The import is a **review table**, not an action. Every row names the tag it came from and the value it
+would write, and nothing is applied: the rows land in the form as pending edits that the same **Apply**
+validates. What it will not do matters as much:
+
+- Soft limits arrive **unticked** when Mach3 is not enforcing them, because numbers nothing has had to
+  be true are not a travel limit.
+- `[kinematics]`, `[stock]`, `[tool]`, `[offsets]`, `[safety]` and `[tolerance]` are **not in the file**
+  and are never guessed. They come back as a list explaining what was left alone and why — a guessed
+  rotary axis draws a confidently wrong toolpath, which is the one thing this tool refuses to do.
+- `[machine].units` is never written. Lengths are converted into the units your profile already
+  declares, and a native-units selector redraws them if Mach3's `<Units>` flag has been left mis-set.
+
 ### Stock, and rapids that would hit it
 
 Two optional settings answer the commonest complaint about a previewer — *it doesn't tell me the machine is
@@ -370,9 +389,8 @@ mirrored wrap.
 
 ## Status
 
-M0–M16 complete; M17 (importing a Mach3 profile) is planned in `TASKS.md` and not started. **`OPEN.md`
-lists everything still owed** — one gate, four defects and six owed items, each with its evidence and
-what closing it takes. The gaps that are deliberate design decisions rather
+M0–M17 complete. **`OPEN.md` lists everything still owed** — one gate, four defects and six owed items,
+each with its evidence and what closing it takes. The gaps that are deliberate design decisions rather
 than debt, all reasoned out in `PLAN.md`:
 
 - **No tool table**, so `G43`/`G44` tool length is not modelled. The path's shape is correct and its Z datum

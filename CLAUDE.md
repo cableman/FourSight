@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**M0–M16 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1820 tests**
-and **runs in one process**: `.venv/bin/pytest -q` is green (1819 passed + 1 skipped, ~38 s).
+**M0–M17 are complete.** `src/`, `tests/` and `pyproject.toml` all exist; the suite is **1862 tests**
+and **runs in one process**: `.venv/bin/pytest -q` is green (1861 passed + 1 skipped, ~38 s).
 CI ran green on Ubuntu and Windows for py3.11 and py3.12 through M5; **the M6 matrix has still not been
 run**, though the reason it was expected to fail no longer holds.
 

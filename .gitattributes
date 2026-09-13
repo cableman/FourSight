@@ -9,3 +9,8 @@
 
 # The golden fingerprints are compared byte-for-byte across the matrix.
 tests/golden/*.json text eol=lf
+
+# Mach3 profiles are read as bytes, and `rotary.xml` deliberately keeps the raw control character that
+# makes the real file invalid XML. `-text` rather than `eol=lf`: git must not touch these at all, or a
+# Windows checkout would both rewrite the endings and risk the byte the reader exists to survive.
+tests/fixtures/mach3/*.xml -text

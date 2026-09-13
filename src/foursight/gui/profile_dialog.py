@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from foursight.gui.mach3_import import MACH3_FILTER, Mach3ImportDialog
+from foursight.machine.mach3_xml import read as read_mach3
 from foursight.machine.profile import ProfileError, default_profile_path
 from foursight.machine.profile_doc import UNSET, Edit, ProfileDocument, render
 from foursight.machine.profile_schema import GROUPS, Field, Group, Kind, unit_label
@@ -119,9 +121,11 @@ class ProfileDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         self.revert_button = buttons.addButton("Revert", QDialogButtonBox.ResetRole)
+        self.import_button = buttons.addButton("Import from Mach3…", QDialogButtonBox.ActionRole)
         self.save_button = buttons.addButton("Save as…", QDialogButtonBox.ActionRole)
         self.apply_button = buttons.addButton("Apply", QDialogButtonBox.ApplyRole)
         self.revert_button.clicked.connect(self.revert)
+        self.import_button.clicked.connect(self.import_mach3)
         self.save_button.clicked.connect(self.save_as)
         self.apply_button.clicked.connect(self.apply)
         buttons.rejected.connect(self.reject)
@@ -205,6 +209,56 @@ class ProfileDialog(QDialog):
         self._error.setText(message)
         self._error.show()
         return False
+
+    def import_mach3(self) -> bool:
+        """Read a Mach3 profile and offer its mapping as pending edits. Returns whether any landed.
+
+        Deliberately not an apply: the rows arrive in the form, where the user can look at them, change
+        them, and press the same Apply that validates a hand edit. An import FourSight would refuse
+        therefore cannot take effect, and Revert discards it like anything else.
+        """
+        self._error.hide()
+        suggested = str(self.path.parent if self.path else Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Import a Mach3 profile", suggested, MACH3_FILTER
+        )
+        if not chosen:
+            return False
+        try:
+            mach3 = read_mach3(Path(chosen))
+        except (OSError, ProfileError) as error:
+            return self._fail(str(error))
+        review = Mach3ImportDialog(mach3, self.document, self)
+        if review.exec() != QDialog.Accepted:
+            return False
+        return self.propose(review.edits())
+
+    def propose(self, edits: list[Edit]) -> bool:
+        """Show ``edits`` in the form as unapplied changes. Returns whether anything was placed.
+
+        A target with no row is reported rather than dropped: silently losing part of an import is the
+        one outcome worse than refusing it, because the profile then looks imported and is not.
+        """
+        placed, missing = 0, []
+        for edit in edits:
+            row = self._row(edit.section, edit.key)
+            if row is None:
+                missing.append(f"[{edit.section}].{edit.key}")
+                continue
+            row.show_value(edit.value)
+            placed += 1
+        self._on_field_changed()
+        if missing:
+            self._fail("the form has no field for " + ", ".join(missing))
+        return placed > 0
+
+    def _row(self, section: str, key: str | None) -> "_Row | None":
+        if key is None:
+            return None
+        for group in self._groups:
+            if group.group.section == section:
+                return group.rows.get(key)
+        return None
 
     def revert(self) -> None:
         """Discard unapplied edits, back to the last applied (or opened) document."""

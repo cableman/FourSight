@@ -9,7 +9,7 @@ done yet" is exactly the drift this codebase refuses everywhere else.
 When an item closes: delete it here, and tick it where `TASKS.md` points at it. When a new one opens —
 including anything found by launching the application and looking at it — add it here first.
 
-Project status: **M0–M16 complete except T0.8/T0.9.**
+Project status: **M0–M17 complete except T0.8/T0.9.**
 
 | # | Item | Kind | Blocked by |
 |---|---|---|---|

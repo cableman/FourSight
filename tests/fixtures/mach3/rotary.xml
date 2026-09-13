@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<profile>
+	<Preferences>
+		<!-- machine-wide settings FourSight reads -->
+		<Profile>Rotary</Profile>
+		<Units>0</Units>
+		<IJMode>1</IJMode>
+		<DwellinMilli>1</DwellinMilli>
+		<ShortRot>0</ShortRot>
+		<Rot360>0</Rot360>
+		<ROTSOFT>0</ROTSOFT>
+		<SoftLimit>0</SoftLimit>
+		<AAngular>1</AAngular>
+		<RadiusA>63.</RadiusA>
+		<PULLEY>3</PULLEY>
+		<!-- axis X (motor 0) -->
+		<Vel0>85.</Vel0>
+		<Steps0>160.</Steps0>
+		<Acc0>300.</Acc0>
+		<M0Min>745.</M0Min>
+		<M0Max>970.</M0Max>
+		<Motor0Active>1</Motor0Active>
+		<AxisToMotor0>0</AxisToMotor0>
+		<!-- axis Y (motor 1) -->
+		<Vel1>83.33</Vel1>
+		<Steps1>160.</Steps1>
+		<Acc1>300.</Acc1>
+		<M1Min>230.</M1Min>
+		<M1Max>1188</M1Max>
+		<Motor1Active>1</Motor1Active>
+		<AxisToMotor1>1</AxisToMotor1>
+		<!-- axis Z (motor 2) -->
+		<Vel2>66.67</Vel2>
+		<Steps2>320.</Steps2>
+		<Acc2>300.</Acc2>
+		<M2Min>-185.</M2Min>
+		<M2Max>1.</M2Max>
+		<Motor2Active>1</Motor2Active>
+		<AxisToMotor2>2</AxisToMotor2>
+		<!-- axis A (motor 3) -->
+		<Vel3>50.</Vel3>
+		<Steps3>88.8889</Steps3>
+		<Acc3>200.</Acc3>
+		<M3Min>-9999</M3Min>
+		<M3Max>9999</M3Max>
+		<Motor3Active>1</Motor3Active>
+		<AxisToMotor3>3</AxisToMotor3>
+		<!-- spindle pulley table -->
+		<LSPEED1>0</LSPEED1>
+		<SPEED1>1000</SPEED1>
+		<LSPEED2>0</LSPEED2>
+		<SPEED2>2000</SPEED2>
+		<LSPEED3>0</LSPEED3>
+		<SPEED3>4000</SPEED3>
+		<LSPEED4>0</LSPEED4>
+		<SPEED4>24000</SPEED4>
+		<LSPEED5>0</LSPEED5>
+		<SPEED5>25000</SPEED5>
+		<!-- settings the importer deliberately does not read -->
+		<PulseSpeed>6</PulseSpeed>
+		<LookAhead>40</LookAhead>
+		<CVFeedOn>0</CVFeedOn>
+		<CVDegrees>12.</CVDegrees>
+		<PlungeLimit>60</PlungeLimit>
+		<NoPlunge>0</NoPlunge>
+		<m_SafeZ>50.</m_SafeZ>
+		<UseSafeZ>1</UseSafeZ>
+		<StockSize>50</StockSize>
+		<MinPerPass>0.1</MinPerPass>
+		<AtoX>0.</AtoX>
+		<AtoY>0.</AtoY>
+		<AtoZ>0.</AtoZ>
+		<AParallel>1</AParallel>
+		<G92Off>1</G92Off>
+		<Diameter>0</Diameter>
+		<UseDiam>1</UseDiam>
+		<XCLength>1.3e+003</XCLength>
+		<GHomeWay1>-1</GHomeWay1>
+		<GHomeWay2>-1</GHomeWay2>
+		<RapidFeed>4.e+003</RapidFeed>
+		<ToolRotations>1</ToolRotations>
+		<!-- Mach3 stores a fixed-width binary blob here; it is what makes the file invalid XML -->
+		<LastUser>MaoA ¯Ð</LastUser>
+	</Preferences>
+</profile>

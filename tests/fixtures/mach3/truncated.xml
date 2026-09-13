@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<profile>
+	<Preferences>
+		<!-- machine-wide settings FourSight reads -->
+		<Profile>Rotary</Profile>
+		<Units>0</Units>
+		<IJMode>1</IJMode>
+		<DwellinMilli>1</DwellinMilli>
+		<ShortRot>0</ShortRot>
+		<Rot360>0</Rot360>
+		<ROTSOFT>0</ROTSOFT>
+		<SoftLimit>0</S

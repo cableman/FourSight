@@ -2207,7 +2207,7 @@ exist. This task makes the editor the *precise* way in rather than adding a seco
 
 ## M17 — Importing a Mach3 profile
 
-**Planned, not started.** `PLAN.md` § Importing a Mach3 profile owns the reasoning; this section owns
+**Complete.** `PLAN.md` § Importing a Mach3 profile owns the reasoning; this section owns
 the order. Prompted by the state of `profiles/rotary.toml`: two of its keys — `dwell_units` and
 `short_rotate` — were set by reading tags out of the machine's Mach3 XML by hand, and its comments quote
 the tags as evidence. That evidence is now **out of date**.
@@ -2223,7 +2223,7 @@ with their citations. What remains is not a guess to make but a guard to build (
 `<Units>` is the commonest Mach3 setup error there is, and the import must notice rather than scale
 someone's machine by 25.4.
 
-- [ ] **T17.1 — `machine/mach3_xml.py`: the tolerant reader.** `read(text) -> Mach3Profile`, a flat
+- [x] **T17.1 — `machine/mach3_xml.py`: the tolerant reader.** `read(text) -> Mach3Profile`, a flat
       mapping of tag → string for the sections we read, plus the source path. **Not an XML parser.**
       `Rotary.xml` is not well-formed — raw bytes inside `<LastUser>` make `xml.etree` raise
       `not well-formed (invalid token)` at column 40229 of its single 153 KB line — so this decodes
@@ -2237,7 +2237,7 @@ someone's machine by 25.4.
       Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`,
       `tests/fixtures/mach3/*.xml`
 
-- [ ] **T17.2 — the mapping: `plan_import(document, mach3, units) -> ImportPlan`.** Blocked by T17.1.
+- [x] **T17.2 — the mapping: `plan_import(document, mach3, units) -> ImportPlan`.** Blocked by T17.1.
       `ImportPlan` carries `rows` (each: source tags, target section/key, rendered value, whether it is
       ticked by default, and the assumption or caveat in words) and `notes` (what was *not* imported and
       why). It produces `Edit`s against the open `ProfileDocument`, so M8's surgery keeps the comments.
@@ -2265,7 +2265,7 @@ someone's machine by 25.4.
       now reads 0/0. Only `[dialect]` and `max_spindle_rpm` coincide, and asserting more would fail.
       Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
 
-- [ ] **T17.3 — the `<ShortRot>1` + `<Rot360>0` conflict row.** Blocked by T17.2. **The loader rule is
+- [x] **T17.3 — the `<ShortRot>1` + `<Rot360>0` conflict row.** Blocked by T17.2. **The loader rule is
       right and stays** — `short_rotate` requires `wrap` (T14.1, and a standing invariant): landing a full
       turn from the commanded angle is only the same place if the axis wraps, so ShortRot's own premise
       implies a wrapping axis. Mach3 nonetheless has the two as independent checkboxes, and its `Rot360`
@@ -2279,7 +2279,7 @@ someone's machine by 25.4.
       `ProfileDocument.profile()` rejects.
       Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
 
-- [ ] **T17.4 — `gui/mach3_import.py` and the dialog button.** Blocked by T17.2. **Import from Mach3…**
+- [x] **T17.4 — `gui/mach3_import.py` and the dialog button.** Blocked by T17.2. **Import from Mach3…**
       beside `Save as…` in `ProfileDialog`, a file chooser, then a modal review table: tick, source tag
       and value, target key, resulting value, caveat. Above it a **native-units selector** pre-set from
       `<Units>`; below it the *not imported, and why* list. OK writes the accepted rows into the
@@ -2294,22 +2294,25 @@ someone's machine by 25.4.
       Files: `src/foursight/gui/mach3_import.py`, `src/foursight/gui/profile_dialog.py`,
       `tests/test_mach3_import.py`, `tests/test_profile_dialog.py`
 
-- [ ] **T17.5 — the mis-set `<Units>` guard.** Blocked by T17.2. The conventions are documented (see the
+- [x] **T17.5 — the mis-set `<Units>` guard.** Blocked by T17.2. The conventions are documented (see the
       milestone header), so this is not a guess to settle but the *documented* failure mode to catch:
       Mach3 defaults to metric and tuning steps-per-unit in inches without switching native units is the
       commonest Mach3 setup error, which makes the flag say mm while the operator means inch. The
-      importer recomputes the machine from the flag it was given — `Steps`*n* × `Vel`*n* as a step rate,
-      and the soft-limit extent as a travel — and **flags the row when the result is not a machine**
-      (step rate outside roughly 1–200 kHz, travel outside roughly 10 mm–10 m). The dialog's units
-      selector is that row's remedy, with the rapid rates redrawn in the units chosen.
+      importer recomputes the machine under the flag it was given and **warns when the result is not a
+      machine**: a linear rapid above 60 m/min, or a longest travel outside 50 mm – 20 m.
+      **`Steps`*n* × `Vel`*n* was the obvious test and is the wrong one** — it is a step rate in Hz,
+      identical under both readings, so it corroborates the file and says nothing about the flag. The
+      two directions are also not equally detectable: a metric machine read as inch is unmistakable,
+      while an inch machine read as mm stays superficially plausible, so the selector with the values
+      redrawn in the units chosen is the reliable remedy and the thresholds are the backstop.
       Worth one confirmation at the machine while someone is there, since it costs a minute: toggle
       Config → Select Native Units, save, diff the XML; same for the I/J Mode radio. Both should move
       exactly the tag `PLAN.md` names.
-      **Done when:** a fixture whose `<Units>` disagrees with its own arithmetic produces the flagged
-      row, and the sample profiles produce none.
+      **Done when:** a fixture whose `<Units>` disagrees with its own arithmetic warns, and the sample
+      profiles do not.
       Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
 
-- [ ] **T17.6 — the documentation the milestone owes.** Blocked by T17.4. `docs/manual_tests/m17.md`
+- [x] **T17.6 — the documentation the milestone owes.** Blocked by T17.4. `docs/manual_tests/m17.md`
       walking a real import of `Rotary.xml` against `default_4axis.toml` — the GUI convention since M2,
       and the only place the units selector and the *not imported* list get looked at by eye. One
       paragraph in `README.md` § Machine profile. **No screenshot refresh:** `docs/images/` has no
@@ -2325,9 +2328,8 @@ makes a profile look more configured than it is.
 
 ---
 
-**Project status: M0–M16 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
-Everything still owed — that gate, four defects and six owed items — is in **`OPEN.md`**. **M17 is planned
-and not started**; its tasks are above, and anything it leaves owed moves to `OPEN.md` when it closes.
+**Project status: M0–M17 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
+Everything still owed — that gate, four defects and six owed items — is in **`OPEN.md`**.
 
 ---
 
