@@ -80,6 +80,7 @@ FourSight/
 │   │   ├── profile.py       # MachineProfile loaded from TOML (limits, offsets, kinematics)
 │   │   ├── profile_doc.py   # the profile as EDITABLE TEXT: surgical key edits (NO Qt)
 │   │   ├── profile_schema.py# which keys the profile editor shows, as data (NO Qt)
+│   │   ├── mach3_xml.py     # Mach3 profile XML -> profile-document edits (NO Qt)
 │   │   └── kinematics.py    # rotary table vs rotary head transforms
 │   ├── sim/
 │   │   ├── interpolate.py   # lines, arcs (G2/G3 IJK + R), rotary blending → segments
@@ -109,6 +110,7 @@ FourSight/
 │   │   ├── viewport3d.py    # GL view and camera; thin, because batching.py holds the logic
 │   │   ├── editor.py        # code pane, line highlighting
 │   │   ├── profile_dialog.py# the machine-profile form, generated from profile_schema
+│   │   ├── mach3_import.py  # the Mach3 import review table, over mach3_xml
 │   │   └── diagnostics_panel.py
 │   ├── fileio/              # NOT `io/` — that shadows the stdlib module
 │   │   └── loader.py        # file loading, encoding detection, large-file handling
@@ -568,6 +570,148 @@ is exactly what "the dialect is resolved once, at the CLI/GUI boundary" exists t
 to a `MachineProfile`. That is the second deliberate duplication in the codebase after `sim/timing.py`'s
 two paths, and it is guarded the same way: a test drives both over every combination of starting dialect,
 override and arc-centre and demands the same result, including the same refusals.
+
+### Importing a Mach3 profile (M17)
+
+`File → Machine profile…` grows an **Import from Mach3…** button. It reads a Mach3 `.xml` profile and
+turns it into a reviewable set of **pending edits on the profile already open** — not a generated file.
+
+The case for it is that everything `[dialect]` and `[axes.a].short_rotate` carry is a setting **only the
+controller knows**, and the two this repo has actually set were filled in by opening the machine's Mach3
+XML in a text editor and reading a tag. `profiles/rotary.toml` says so in its own comments — *"Mach3 XML
+has `DwellinMilli = 1` in both this machine's profiles"* for `dwell_units`, and *"Both Mach3 profiles for
+this machine have `<ShortRot>1<` … Verified in Rotary.xml and Mach3Mill.xml, not assumed"* for
+`short_rotate`. `TASKS.md` § M14 cites the same tags as the evidence for a rule.
+
+Reading them by hand has **already gone stale**. The machine's `Rotary.xml` today reads
+`<ShortRot>0</ShortRot>` and `<Rot360>0</Rot360>`, while the profile in this repo asserts
+`short_rotate = true` and quotes `<ShortRot>1<` as verified. Most likely the operator cleared the
+checkbox — that was M14's recommended remedy — but the direction does not matter: a shipped profile
+states a controller setting the controller's own file contradicts, and nothing in the tool could see it.
+That is the whole argument for reading the file instead of a person.
+
+**The import is a list of `Edit`s, applied through the form.** Everything M8 decided still holds: the
+edits are surgical so `default_4axis.toml`'s inline documentation survives, `Apply` is the only path to
+a live profile so an import FourSight would refuse never takes effect, and `Save as…` is still the only
+thing that touches disk. Writing a fresh TOML from the XML would discard every comment in the file it
+replaced and bypass the validation gate in one step. The accepted rows are written into the **widgets**,
+not into `ProfileDocument`, so an import shows up as ordinary pending edits: visible, adjustable,
+revertable, and applied by the same button as a hand edit.
+
+**`[machine].units` is never written, and every imported length is converted into the units the document
+already declares.** Setting `units = "inch"` on an mm profile silently reinterprets every key the import
+did *not* touch — `max_feed`, the tolerances, `[stock]`, `[offsets]` — by 25.4×, with no diff to look at,
+because none of those lines change. The M8 round-trip trap, one level up.
+
+**The units are settled by Mach3's own documentation, not by inference from these two files.** Both
+conventions are stated in the *Mach3 V3.x Macro Programmers Reference* (machsupport.com), which documents
+the same values the profile stores:
+
+- **`GetSetupUnits()` → `0 = mm units`, `1 = inch units`**, described as *"the native setup units of the
+  machine … the return value does not change with the use of G20/G21"*. So `<Units>0</Units>` is a metric
+  machine, and the flag survives a G20 in the program — which is what makes it safe to read at all.
+- **`VelocitiesX…C` → *"axis maximum velocity, from motor tuning, in units/second"*.** `Vel0`…`Vel5` are
+  the same numbers, so the conversion into `max_rapid` is **×60**. Mach3's motor-tuning *screen* is
+  labelled units/min; the file and the UI disagree, and only the file is being read here.
+- **`GetIJMode()` → `0 = absolute`, `1 = incremental`**, *"as set in Config>GeneralConfig"* — the radio
+  button `[dialect].arc_centre` exists for.
+
+Both samples then corroborate all three arithmetically: `<Units>0`, `Steps0 = 160` steps/unit, 1200 units
+of travel and `XCLength = 1300` describe a 1.3 m metric router, and `160 × 85` is a 13.6 kHz step rate —
+inside the kernel's range. The inch reading is 160 steps/inch on a 33 m table; the per-minute reading is an
+85 mm/min rapid. Neither is a machine.
+
+**`<Units>` is still checked rather than trusted, because the documented failure mode is a mis-set flag.**
+Mach3 defaults to metric, and tuning steps-per-unit in inches without switching native units is the
+commonest Mach3 setup error there is — the profile then says mm while the operator means inch. So the
+importer computes `Steps × Vel` and the soft-limit extent under the flag it was given, and **flags the row
+when the result is not a machine** (a step rate outside roughly 1–200 kHz, or travel outside roughly
+10 mm–10 m). The dialog's native-units selector is that row's remedy: one click, with the resulting rapid
+rates redrawn in the units chosen, so the operator recognises their own numbers.
+
+**Rotary values never scale.** `[axes.a]` travel and rate are degrees end to end, exactly as
+`profile_schema.SCALED` already has it, and Mach3 agrees: `<AAngular>1</AAngular>` says A is angular, and
+`Steps3 = 88.8889` steps/unit is 32000 steps per revolution — per degree, on any native units setting.
+`AAngular = 0` means the axis is linear in Mach3 and the A rows are refused rather than reinterpreted.
+
+| Mach3 tag | Profile key | Conversion | Confidence |
+|---|---|---|---|
+| `<Profile>` | `[machine].name` | verbatim | measured |
+| the file itself | `[dialect].name` | `"mach3"` | measured |
+| `<IJMode>` | `[dialect].arc_centre` | `1` → `incremental`, `0` → `absolute` | **measured** — Macro Prog. Ref., `GetIJMode()` |
+| `<DwellinMilli>` | `[dialect].dwell_units` | `1` → `milliseconds` | measured — the tag is the Config → Logic checkbox *"G04 Dwell param in Milliseconds"*; already trusted by `profiles/rotary.toml` |
+| `<Vel0>`…`<Vel5>` | `[axes.*].max_rapid` | ×60 (units/**second** → per minute), scaled unless rotary | **measured** — Macro Prog. Ref., `VelocitiesX…C` |
+| `<M0Min>`…`<M5Max>` | `[axes.*].min` / `.max` | scaled unless rotary; **unticked** unless `<SoftLimit>` — and `<ROTSOFT>` for A | measured, possibly stale |
+| `<Rot360>` | `[axes.a].wrap` | **a note, never a write** — see below | semantics differ |
+| `<ShortRot>` | `[axes.a].short_rotate` | `1` → `true` | measured (M14) |
+| max of `<SPEED1…25>` | `[limits].max_spindle_rpm` | verbatim RPM | measured; reproduces the 25000 in `profiles/rotary.toml` |
+| min of `<Vel0…2>` | `[limits].max_feed` | ×60, **unticked** | derived — Mach3 has no such field |
+| `<Units>` | — | decides how every length above is read; `0` = mm, `1` = inch | **measured** — Macro Prog. Ref., `GetSetupUnits()` |
+| `<Motor0Active>`…, `<AxisToMotor0>`…, `<AAngular>` | — | gate the axis rows | measured |
+| `<Steps0>`…`<Steps5>` | — | plausibility check only, never written | measured |
+| `<RadiusA>` | — | a note | measured — the *Rotational Diameter* family, used *"when making blended feedrate calculations"* (Mach3Mill 1.84 § 6.2.12), **not** the stock diameter |
+
+Everything else in the file — 5544 keys in `<Preferences>` alone — is pins, ports, screen colours, hotkeys,
+wizard state and the operator's last file paths, and is not read at all.
+
+**Soft limits are offered unticked, because this machine's two profiles disagree about X by 750 mm.**
+`Rotary.xml` says X spans 745…970; `Mach3Mill.xml`, for the same motors and the same 1.3 m table, says
+−2…600. `<SoftLimit>0</SoftLimit>` in both — they are switched off, so nothing has forced either to be
+true for years. Ticking them by default would turn `geometry.axis-travel-exceeded` into confident nonsense
+about a 225 mm machine. The row is offered with the numbers visible and the reason stated; the operator
+knows which set is real.
+
+**An inactive motor is a note, never a deletion.** `Mach3Mill.xml` has `<Motor3Active>0`, and removing
+`[axes.a]` on the strength of that would change every rotary check from *enforced* to *unknown* — a
+decision about the FourSight profile, not a fact in the XML. The importer only ever sets keys.
+
+**`<Rot360>` is not `wrap`, and the difference is why neither is written from it.** FourSight's `wrap`
+means *this axis turns continuously, so `min`/`max` do not bound it* — a statement about the mechanism.
+Mach3's "Rot 360 rollover" is a statement about the **DRO**: whether the displayed angle folds back to
+0–360. A table can turn for ever with rollover switched off, which is exactly what `Rotary.xml` describes
+(`<Rot360>0`) and exactly why `profiles/rotary.toml` says `wrap = true` without contradicting it. So the
+tag becomes a **note** — *"Mach3 rolls the A DRO over at 360: yes/no"* — and never an edit. Mapping it
+onto `wrap` would flip a mechanical claim from a display setting, and `wrap = false` turns `min`/`max`
+into enforced bounds that then produce travel errors on a program that is fine.
+
+**`<ShortRot>1` with `<Rot360>0` is surfaced as a conflict, and the loader rule stands.** Read naively as
+`short_rotate = true, wrap = false`, that pair is a profile `load_profile` refuses — and the refusal is
+right, and is a standing invariant from T14.1: short-rotating means landing a full turn from the commanded
+angle, which is only the same place if the axis wraps. ShortRot's own premise therefore implies a wrapping
+axis, so the two tags together say something Mach3 permits and a profile cannot. The importer never emits
+an unloadable profile and never writes a silent `wrap = true`: it shows a conflict row carrying both tag
+values, what each would mean, and the one question that settles it — does the A axis turn continuously?
+
+**A Mach3 XML describes the machine, never the job — and not all of the machine.** Everything below is
+listed in the dialog as *not imported, and why*, rather than left for the user to wonder about. **Nothing
+here is guessed**, and `[kinematics]` is the one that matters most: a wrong `rotary_axis` or
+`centerline_offset` draws a confidently wrong toolpath, which is the thing this tool exists to refuse.
+
+| Not supplied | Why | Left as |
+|---|---|---|
+| `[kinematics].rotary_mount` | table vs head is a physical arrangement; the XML has motors, not geometry | the document's own value |
+| `[kinematics].rotary_axis` | nothing states which linear axis A turns about. `<AParallel>` and `<AtoX/Y/Z>` are **toolpath-display** settings, and `profiles/rotary.toml` is the standing counter-example: its A wraps about **Y**, from the post's header, while `<AParallel>1` sits in the same XML | unchanged |
+| `[kinematics].centerline_offset` | the same — where the axis *is* comes from how the job is fixtured and zeroed, and changes between setups on one machine | unchanged |
+| `[kinematics].pivot_to_tip` | head-mount geometry; absent from the file, and the loader already refuses a head mount without it | unchanged |
+| `[stock]` | today's blank. `<StockSize>`, `<RadiusA>` and `<MinPerPass>` are display and feedrate settings, not an envelope | unchanged |
+| `[tool]` | the tool table is `toolz.dat`, not this file, and FourSight carves with one cutter anyway | unchanged |
+| `[offsets]` | G54–G59 live in Mach3's fixture `.dat`. Importing zeros would turn *"assumes zero offset"* warnings into hard errors | unchanged |
+| `[safety]` | `min_clearance_z` is a job decision; `<m_SafeZ>` is Mach3's own SafeZ *move* height, which is not the same threshold and is not a check | unchanged |
+| `[tolerance]` | chord tolerances are FourSight's tessellation, not a machine setting. `<CVDegrees>`/`<LookAhead>` are the control's blending, which nothing here reads | the shipped defaults |
+| `[limits].max_feed` | Mach3 has no such field; the derived candidate is offered unticked and nothing writes it silently | unchanged |
+| `[axes.*].home` | `<GHomeWay1>`…`<GHomeWay6>` is a homing *direction*, not the machine position G28 returns to | unchanged — an unset home means G28 is not drawn |
+
+**The file is not well-formed XML, and the reader must not care.** `Rotary.xml` carries raw bytes inside
+`<LastUser>` — `xml.etree` raises `not well-formed (invalid token)` at column 40229 of its single
+153 KB line. So the reader decodes cp1252, drops C0 control characters, and scans `<Tag>text</Tag>` pairs
+with one regex: no DOM, no new dependency, and no `xml.etree` — which `ruff`'s `S` set flags anyway (S314,
+verified against ruff 0.16.1). A tag it does not map is a tag it never sees, so the noise costs nothing.
+
+**Deliberately not built.** No CLI import — the value is in reviewing the mapping, and a headless
+`--import` would either apply assumptions unattended or ask questions a pipe cannot answer; the mapping
+layer is Qt-free and tested directly instead. No Mach3Turn. No reading of `.dat` fixture or tool files. No
+`<Acc0>`…`<Acc5>`: FourSight has no acceleration model, and importing a number into a field nothing
+reads is how a profile comes to look more configured than it is.
 
 ## Supported G-code Subset (v1)
 

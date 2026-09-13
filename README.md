@@ -370,8 +370,9 @@ mirrored wrap.
 
 ## Status
 
-M0–M16 complete. **`OPEN.md` lists everything still owed** — one gate, three defects and six owed items,
-each with its evidence and what closing it takes. The gaps that are deliberate design decisions rather
+M0–M16 complete; M17 (importing a Mach3 profile) is planned in `TASKS.md` and not started. **`OPEN.md`
+lists everything still owed** — one gate, four defects and six owed items, each with its evidence and
+what closing it takes. The gaps that are deliberate design decisions rather
 than debt, all reasoned out in `PLAN.md`:
 
 - **No tool table**, so `G43`/`G44` tool length is not modelled. The path's shape is correct and its Z datum

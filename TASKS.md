@@ -2205,8 +2205,129 @@ exist. This task makes the editor the *precise* way in rather than adding a seco
 
 ---
 
+## M17 — Importing a Mach3 profile
+
+**Planned, not started.** `PLAN.md` § Importing a Mach3 profile owns the reasoning; this section owns
+the order. Prompted by the state of `profiles/rotary.toml`: two of its keys — `dwell_units` and
+`short_rotate` — were set by reading tags out of the machine's Mach3 XML by hand, and its comments quote
+the tags as evidence. That evidence is now **out of date**.
+`~/Desktop/CNC/Mach3 profiles/Rotary.xml` reads `<ShortRot>0</ShortRot>` and `<Rot360>0</Rot360>`;
+the profile and `TASKS.md` § M14 both quote `<ShortRot>1<`. Probably the operator cleared the checkbox,
+which is what M14 told them to do — but a shipped profile contradicting the controller's own file, with
+nothing able to notice, is the argument for this milestone in one line.
+
+The unit conventions are **settled**, from Mach3's own *Macro Programmers Reference*: `<Units>` is
+`0 = mm, 1 = inch` and does not move with G20/G21, `Vel`*n* is motor-tuning velocity in units/**second**
+(so ×60), and `<IJMode>` is `0 = absolute, 1 = incremental`. All three are in `PLAN.md`'s mapping table
+with their citations. What remains is not a guess to make but a guard to build (T17.5): a mis-set
+`<Units>` is the commonest Mach3 setup error there is, and the import must notice rather than scale
+someone's machine by 25.4.
+
+- [ ] **T17.1 — `machine/mach3_xml.py`: the tolerant reader.** `read(text) -> Mach3Profile`, a flat
+      mapping of tag → string for the sections we read, plus the source path. **Not an XML parser.**
+      `Rotary.xml` is not well-formed — raw bytes inside `<LastUser>` make `xml.etree` raise
+      `not well-formed (invalid token)` at column 40229 of its single 153 KB line — so this decodes
+      cp1252, strips C0 controls, and scans `<Tag>text</Tag>` with one regex. That also keeps
+      `xml.etree` out of the codebase, which `ruff`'s `S` set flags (S314, verified on ruff 0.16.1).
+      Duplicate tags take the **last** value, matching how Mach3 rewrites the file. No Qt, no new
+      dependency.
+      **Done when:** both sample profiles read without error, a fixture carrying a raw `0x18` inside a
+      tag reads without error, and a truncated file is refused with a message naming the file rather
+      than raising out of a slot.
+      Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`,
+      `tests/fixtures/mach3/*.xml`
+
+- [ ] **T17.2 — the mapping: `plan_import(document, mach3, units) -> ImportPlan`.** Blocked by T17.1.
+      `ImportPlan` carries `rows` (each: source tags, target section/key, rendered value, whether it is
+      ticked by default, and the assumption or caveat in words) and `notes` (what was *not* imported and
+      why). It produces `Edit`s against the open `ProfileDocument`, so M8's surgery keeps the comments.
+      The mapping table is in `PLAN.md`; the rules that are easy to get wrong are all refusals:
+      **`[machine].units` is never written** and every length is converted into the units the document
+      already declares — writing `units = "inch"` would silently reinterpret every key the import did not
+      touch. **Rotary values never scale.** **`Vel`×60**, per-second to per-minute. **Soft limits are
+      offered unticked** unless `<SoftLimit>` (and `<ROTSOFT>` for A): the two samples describe one
+      machine and disagree about X travel by 750 mm. **An inactive motor is a note, not a deletion** —
+      the importer only ever sets keys. **`<AAngular>0` refuses the A rows** rather than reinterpreting
+      degrees as length. **A non-identity `<AxisToMotor0>`…`<AxisToMotor5>` refuses that axis's rows**,
+      since the identity case is the only one either sample exercises. **`[stock]`, `[tool]`, `[offsets]`,
+      `[kinematics]`, `[safety]` and `[tolerance]` are never touched** — `PLAN.md`'s *not supplied* table
+      says what each would have had to guess, and `[kinematics]` is the one that would draw a wrong path.
+      `<Rot360>` is a note, not a `wrap` edit: Mach3's rollover is a DRO setting and `wrap` is a claim
+      about the mechanism.
+      **Done when:** importing `Rotary.xml` into `default_4axis.toml` yields exactly
+      `[dialect].name = "mach3"`, `dwell_units = "milliseconds"`, `arc_centre = "incremental"`,
+      `max_spindle_rpm = 25000`, `short_rotate = false`, and four `max_rapid`s asserted against the
+      arithmetic — **x 5100, y 4999.8, z 4000.2, a 3000** from `Vel0…3` × 60 — with every other section of
+      the document byte-identical.
+      **`profiles/rotary.toml` is not the oracle and the test must not use it as one.** It is a *hand
+      re-interpretation* of this machine for a wrapped-rotary job: `rotary_axis = "y"`, no `[axes.x]` at
+      all, `z` 3000 and `a` 3600 chosen by hand, and `wrap`/`short_rotate` true/true against an XML that
+      now reads 0/0. Only `[dialect]` and `max_spindle_rpm` coincide, and asserting more would fail.
+      Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
+
+- [ ] **T17.3 — the `<ShortRot>1` + `<Rot360>0` conflict row.** Blocked by T17.2. **The loader rule is
+      right and stays** — `short_rotate` requires `wrap` (T14.1, and a standing invariant): landing a full
+      turn from the commanded angle is only the same place if the axis wraps, so ShortRot's own premise
+      implies a wrapping axis. Mach3 nonetheless has the two as independent checkboxes, and its `Rot360`
+      is a **DRO rollover**, not a claim that the table turns continuously — which is why
+      `profiles/rotary.toml` can say `wrap = true` over `<Rot360>0` without contradicting the file.
+      So the importer maps neither tag to `wrap`, and when `<ShortRot>1` meets `<Rot360>0` it shows a
+      conflict row: both values, what each would mean, and the question that settles it — does A turn
+      continuously? Never a silent `wrap = true`, and never an edit set `load_profile` would refuse.
+      **Done when:** the conflict is a visible row that writes nothing, a test drives it from a fixture
+      with `<ShortRot>1`/`<Rot360>0`, and a second test asserts no import can produce an edit set that
+      `ProfileDocument.profile()` rejects.
+      Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
+
+- [ ] **T17.4 — `gui/mach3_import.py` and the dialog button.** Blocked by T17.2. **Import from Mach3…**
+      beside `Save as…` in `ProfileDialog`, a file chooser, then a modal review table: tick, source tag
+      and value, target key, resulting value, caveat. Above it a **native-units selector** pre-set from
+      `<Units>`; below it the *not imported, and why* list. OK writes the accepted rows into the
+      **form's widgets**, not into `ProfileDocument`, so the import lands as ordinary pending edits that
+      the existing `Apply` validates and `Revert` discards — one path to a live profile, and an import
+      the loader would refuse cannot take effect. Needs `ProfileDialog.propose(edits)` and a `_Row`
+      method that sets a value and ticks the row's "set" box. The read is a 153 KB regex scan, so the
+      dialog is modal and synchronous; no worker thread, and nothing for `OPEN.md` § 4 to forget.
+      **Done when:** importing `Rotary.xml` leaves the form dirty with exactly the mapped rows changed,
+      `Apply` yields a profile carrying the T17.2 values, `Revert` restores the form, and a cancelled
+      import changes nothing.
+      Files: `src/foursight/gui/mach3_import.py`, `src/foursight/gui/profile_dialog.py`,
+      `tests/test_mach3_import.py`, `tests/test_profile_dialog.py`
+
+- [ ] **T17.5 — the mis-set `<Units>` guard.** Blocked by T17.2. The conventions are documented (see the
+      milestone header), so this is not a guess to settle but the *documented* failure mode to catch:
+      Mach3 defaults to metric and tuning steps-per-unit in inches without switching native units is the
+      commonest Mach3 setup error, which makes the flag say mm while the operator means inch. The
+      importer recomputes the machine from the flag it was given — `Steps`*n* × `Vel`*n* as a step rate,
+      and the soft-limit extent as a travel — and **flags the row when the result is not a machine**
+      (step rate outside roughly 1–200 kHz, travel outside roughly 10 mm–10 m). The dialog's units
+      selector is that row's remedy, with the rapid rates redrawn in the units chosen.
+      Worth one confirmation at the machine while someone is there, since it costs a minute: toggle
+      Config → Select Native Units, save, diff the XML; same for the I/J Mode radio. Both should move
+      exactly the tag `PLAN.md` names.
+      **Done when:** a fixture whose `<Units>` disagrees with its own arithmetic produces the flagged
+      row, and the sample profiles produce none.
+      Files: `src/foursight/machine/mach3_xml.py`, `tests/test_mach3_xml.py`
+
+- [ ] **T17.6 — the documentation the milestone owes.** Blocked by T17.4. `docs/manual_tests/m17.md`
+      walking a real import of `Rotary.xml` against `default_4axis.toml` — the GUI convention since M2,
+      and the only place the units selector and the *not imported* list get looked at by eye. One
+      paragraph in `README.md` § Machine profile. **No screenshot refresh:** `docs/images/` has no
+      picture of the profile dialog, and `scripts/screenshots.py` drives only the main window, so the
+      README pictures nothing this milestone changes — check that is still true before skipping it.
+      Files: `docs/manual_tests/m17.md`, `README.md`
+
+**Deliberately not built.** No CLI import: the value is in reviewing the mapping, and a headless
+`--import` would either apply the assumptions unattended or ask questions a pipe cannot answer — the
+mapping layer is Qt-free and tested directly instead. No Mach3Turn, no `.dat` fixture or tool files, and
+no `<Acc0>`…`<Acc5>`, since FourSight has no acceleration model and a number in a field nothing reads
+makes a profile look more configured than it is.
+
+---
+
 **Project status: M0–M16 complete except T0.8/T0.9**, which need a clean Windows VM to launch the bundle on.
-Everything still owed — that gate, three defects and six owed items — is in **`OPEN.md`**.
+Everything still owed — that gate, four defects and six owed items — is in **`OPEN.md`**. **M17 is planned
+and not started**; its tasks are above, and anything it leaves owed moves to `OPEN.md` when it closes.
 
 ---
 

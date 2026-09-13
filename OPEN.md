@@ -23,6 +23,7 @@ Project status: **M0–M16 complete except T0.8/T0.9.**
 | [8](#8-the-profile-dialog-has-no-diff-preview) | Profile dialog has no diff preview | owed | — |
 | [9](#9-axestype-is-not-editable-so-axesb-is-invisible) | `[axes.*].type` not editable | owed | 5-axis is post-v1 |
 | [10](#10-there-is-no-way-to-save-the-edited-program) | No way to save the edited program | owed | — |
+| [11](#11-profilesrotarytoml-asserts-a-controller-setting-the-controllers-own-file-denies) | `rotary.toml`'s `short_rotate` is contradicted by the machine's XML | defect | — |
 
 ---
 
@@ -217,3 +218,40 @@ it back. Editing the buffer by hand has the same problem; this is not specific t
 **Done when:** `File → Save` and `Save as…` write the editor buffer using `LoadedFile.newline`, the window
 title or status bar shows unsaved state, quitting with unsaved changes prompts, and a test round-trips a
 CRLF fixture through a fix and asserts the bytes on disk.
+
+---
+
+## Defects (found later)
+
+### 11. `profiles/rotary.toml` asserts a controller setting the controller's own file denies
+
+Found while planning M17 (`TASKS.md` § M17, `PLAN.md` § Importing a Mach3 profile), by reading the
+machine's Mach3 profiles instead of the comments quoting them.
+
+`profiles/rotary.toml` sets `[axes.a].short_rotate = true` and justifies it in prose: *"Both Mach3
+profiles for this machine have `<ShortRot>1<` … Verified in Rotary.xml and Mach3Mill.xml, not assumed."*
+`TASKS.md` § M14 cites the same pair as `<ShortRot>1<`, `<Rot360>0<`.
+
+The files today say otherwise:
+
+| | `Rotary.xml` | `Mach3Mill.xml` |
+|---|---|---|
+| `<ShortRot>` | **0** | 1 |
+| `<Rot360>` | **0** | 1 |
+
+`Rotary.xml` is the profile a rotary job runs under, and it has the checkbox **off**. The likely reading
+is that the operator cleared it — that was M14's recommended remedy, in the profile's own words: *"Clearing
+the Mach3 checkbox is the better fix."* If so the fix worked and the profile was never updated, so
+`process.rotary-rapid-short-rotates` now reports three findings on correct Vectric output describing a
+hazard the machine no longer has. Warnings nobody can act on are how a rule gets ignored.
+
+Two neighbours are **not** part of this, and saying so matters because they look identical from a distance.
+`wrap = true` is not contradicted by `<Rot360>0`: Mach3's "Rot 360" rolls the **DRO** over, while
+FourSight's `wrap` claims the axis *turns continuously, so min/max do not bound it*. A table can do the
+second with the first switched off, which is this machine. And `dwell_units = "milliseconds"` rests on
+`<DwellinMilli>1`, still `1` in both files — that one holds. Only `short_rotate` is stale.
+
+**Done when:** `profiles/rotary.toml`'s `short_rotate` matches `Rotary.xml`, its comment cites what the
+file actually says with the date it was read, and M14's citation in `TASKS.md` is corrected. Confirm with
+the operator whether the checkbox was cleared before changing the value — if it was cleared *after* the
+job that gouged, both readings were true in turn and the comment should say so.
